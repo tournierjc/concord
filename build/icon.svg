@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Concord — application icon (source, editable)
+  512 x 512 artboard, no gradient, no filter, no text, no external reference.
+  Geometry is duplicated (by design) in render-icon.mjs: keep the two in sync.
+  Palette = Concord design tokens (dark theme). See icon.md.
+
+  Triangle: equilateral, apex up, circumradius 132, optical centre at y=289
+  (2 px above/below of equal optical padding at 32 px). Vertices:
+    apex        (256, 157)
+    base left   (141.685, 355)
+    base right  (370.315, 355)
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Concord">
+  <title>Concord</title>
+  <desc>Trois pairs reliés deux à deux : maillage local clos, sans noeud central ni nuage.</desc>
+
+  <!-- 1. Tile: opaque rounded square, r=104, 16-unit optical margin all round.
+          The four corners outside the radius stay transparent. -->
+  <rect x="16" y="16" width="480" height="480" rx="104" ry="104" fill="#0E1116"/>
+
+  <!-- 2. Links: three round-capped bars, stroke-width 52 = 3.25 px at 32 px. -->
+  <g fill="none" stroke="#4C9AFF" stroke-width="52" stroke-linecap="round">
+    <path d="M 256 157 L 370.315 355"/>
+    <path d="M 256 157 L 141.685 355"/>
+    <path d="M 141.685 355 L 370.315 355"/>
+  </g>
+
+  <!-- 3. Nodes: three flat discs, one per peer. r=58 -> 7.25 px at 32 px. -->
+  <g fill="#F1F4F8">
+    <circle cx="256" cy="157" r="58"/>
+    <circle cx="141.685" cy="355" r="58"/>
+    <circle cx="370.315" cy="355" r="58"/>
+  </g>
+</svg>

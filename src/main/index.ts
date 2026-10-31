@@ -179,6 +179,20 @@ function harden(contents: Electron.WebContents): void {
   contents.on('will-attach-webview', (domEvent) => domEvent.preventDefault());
 }
 
+/**
+ * Icône de la fenêtre principale.
+ *
+ * En paquet, sous Linux, l'icône de fenêtre vient du `.desktop` (StartupWMClass) et `build/`
+ * n'est pas embarqué dans l'asar : on ne passe donc rien. En dev (`npm start`) il n'y a ni
+ * `.desktop` ni StartupWMClass, la fenêtre garde l'icône Electron par défaut — d'où ce chemin
+ * explicite vers le PNG versionné, construit depuis `app.getAppPath()` (absolu, jamais relatif
+ * au cwd : `npm start` peut être lancé depuis n'importe quel répertoire).
+ */
+function devWindowIcon(): string | undefined {
+  if (app.isPackaged) return undefined;
+  return join(app.getAppPath(), 'build', 'icon.png');
+}
+
 function createMainWindow(): BrowserWindow {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
 
@@ -188,6 +202,7 @@ function createMainWindow(): BrowserWindow {
     minWidth: 760,
     minHeight: 560,
     show: false,
+    icon: devWindowIcon(),
     backgroundColor: '#0E1116',
     title: 'Concord',
     webPreferences: secureWebPreferences({ devTools: !app.isPackaged }),

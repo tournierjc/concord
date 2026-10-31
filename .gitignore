@@ -2,7 +2,13 @@
 node_modules/
 dist/
 release/
-build/
+# build/ = buildResources d'electron-builder : ignoré, SAUF l'icône applicative qui doit
+# être versionnée (un clone nu doit pouvoir rebâtir avec la bonne icône, cf. VERIF 030/031).
+build/*
+!build/icon.png
+!build/icon.svg
+!build/icon.ico
+!build/icon.icns
 *.tsbuildinfo
 
 # Journaux de build, de tests et de vérification (datés, reproductibles)
