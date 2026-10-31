@@ -12,7 +12,9 @@
  * NON VÉRIFIÉ ici : code navigateur, requiert le build Vite (`npm run build`).
  */
 
-import tokens from '../../design/tokens.json';
+// Attribut d'import explicite : sans lui, Node refuse le fichier
+// (`ERR_IMPORT_ATTRIBUTE_MISSING`), et un module du thème devenait intestable par `node --test`.
+import tokens from '../../design/tokens.json' with { type: 'json' };
 
 export type ThemeName = 'dark' | 'light' | 'system';
 
@@ -63,16 +65,28 @@ const SHARED_DECLARATIONS: string[] = [
   ...scalarDeclarations('tracking', tokens.typography.letterSpacing),
   ...scalarDeclarations('motion', tokens.motion.duration, 'ms'),
   ...scalarDeclarations('ease', tokens.motion.easing),
+  // L'UNITÉ est explicite (`'px'`) : sans elle, la déclaration vaut `--component-hairline: 1`, et
+  // `border: var(--component-hairline) solid …` devient INVALIDE au calcul — bordures, paddings,
+  // hauteurs de bouton et hauteurs de ligne retombaient donc tous sur leurs valeurs initiales.
+  // Les clés portent le nom EXACT du jeton (`listRowHeight` → `--layout-list-row-height`) : une clé
+  // raccourcie (`row`, `rowAvatar`, `titleBar`) produisait des variables que la feuille ne pouvait pas
+  // deviner — `--layout-row` existe, `--layout-list-row` non, et la hauteur de ligne n'était donc
+  // jamais appliquée. `listSkeletonRows` est un COMPTE, pas une longueur : il n'est pas exposé ici
+  // (l'unité du groupe est `px`).
   ...scalarDeclarations('layout', {
     windowWidth: tokens.layout.window.width,
     windowHeight: tokens.layout.window.height,
     windowMinWidth: tokens.layout.window.minWidth,
     windowMinHeight: tokens.layout.window.minHeight,
-    titleBar: tokens.layout.titleBarHeight,
-    row: tokens.layout.listRowHeight,
-    rowAvatar: tokens.layout.rowAvatarSize,
-    tileAvatar: tokens.layout.tileAvatarSize,
-  }),
+    titleBarHeight: tokens.layout.titleBarHeight,
+    identityRowHeight: tokens.layout.identityRowHeight,
+    listRowHeight: tokens.layout.listRowHeight,
+    rowAvatarSize: tokens.layout.rowAvatarSize,
+    tileAvatarSize: tokens.layout.tileAvatarSize,
+    emptyBlockMinHeight: tokens.layout.emptyBlockMinHeight,
+    bandHeight: tokens.layout.bandHeight,
+    bandBorderWidth: tokens.layout.bandBorderWidth,
+  }, 'px'),
   ...scalarDeclarations('component', {
     buttonHeight: tokens.component.button.height,
     buttonHeightCompact: tokens.component.button.heightCompact,
@@ -82,7 +96,7 @@ const SHARED_DECLARATIONS: string[] = [
     focusOffset: tokens.component.focus.offset,
     hairline: tokens.component.border.hairline,
     accentBorder: tokens.component.border.accent,
-  }),
+  }, 'px'),
   `--font-ui: ${tokens.typography.family.ui};`,
   `--font-mono: ${tokens.typography.family.mono};`,
 ];

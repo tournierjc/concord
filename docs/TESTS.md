@@ -12,11 +12,11 @@
 > `package.json` `be6c0e89…`, `tests/scripts-coverage.node.test.ts` `53326963…`,
 > `src/engine/README.md` `338df4a1…`, version précédente de la présente page `5085ad20…`.
 
-## TL;DR — état courant (T-SEC, 2026-10-31T20:29Z)
+## TL;DR — état courant (T-TOKENS, 2026-10-31T20:48Z)
 
 | Script | Commande réelle | Sortie mesurée (début UTC) | Verdict |
 |---|---|---|---|
-| `npm test` (= `npm run test:node`) | `tsx --test` sur **27 fichiers** listés à la main (plus de `npx`) | **exit=0 · 675 tests · 675 pass · 0 fail · 0 skip · 51 suites · 5 266 ms** (`20:29:52Z`) | ✅ le seul runner de recette |
+| `npm test` (= `npm run test:node`) | `tsx --test` sur **27 fichiers** listés à la main (plus de `npx`) | **exit=0 · 674 tests · 674 pass · 0 fail · 0 skip · 49 suites · 5 220 ms** (`20:48:14Z`) | ✅ le seul runner de recette |
 | `npm run typecheck` | `tsc -p tsconfig.json --noEmit` | **exit=0 · 0 ligne de sortie** (`15:28:02Z`) | ✅ |
 | `npm run build:main` | `tsc -p tsconfig.main.json` | **exit=0** (`15:28:03Z`) | ✅ |
 | `npx vite build` | vite → `dist/` | **exit=0 · built in 459 ms** (`15:28:04Z`) | ✅ |
@@ -25,16 +25,23 @@
 | `npx electron-builder --linux deb` | idem, cible `deb` | **exit=1 · `Exec format error`** (`15:28:23Z`) — `fpm` embarqué est un binaire **x86** | ❌ limitation d'hôte (arm64), cible **non vérifiée** |
 | `npm run dev` / `npm start` | vite dev / electron | **non exécutés** | ⚠️ non vérifié — §« Points non vérifiés » |
 
-Déterminisme : `npm test` lancé **deux fois** dans la même session, mêmes comptes —
-run 1 (`20:29:52→20:29:58Z`) 675 / 675 / 0 fail / 51 suites / 5 266 ms ; run 2
-(`20:30:0xZ`) 675 / 675 / 0 fail. La durée varie, jamais les comptes.
+Note T-TOKENS : `src/renderer/theme.ts` injecte les jetons de `design/tokens.json` en variables CSS,
+et `styles.css` en emploie six qui **n'existent dans aucun jeton** (`--color-state-warning`,
+`--color-state-danger`, `--color-state-danger-subtle`, `--color-state-success` ; les jetons s'appellent
+`state.warn`, `state.mute` « micro coupé, erreur », `state.muteSubtle` « fond de bandeau d'erreur »,
+`state.ok`). Une variable inconnue ne casse rien : `var(--x)` retombe sur la couleur héritée — le
+message d'erreur n'était donc pas rouge. Trois autres noms ne correspondaient pas non plus aux noms
+injectés (`--layout-list-row`, `--layout-row-avatar-size`, `--motion-fast`), et surtout les échelles
+`layout` et `component` étaient injectées **sans unité** (`--component-hairline: 1`), ce qui rend
+`border`, `padding` et `height` **invalides au calcul** : bordures, paddings et hauteurs de bouton
+retombaient sur zéro (mesuré dans Chromium : `border 0px none`, `padding 0px`, bouton 21,5 px ;
+après correctif : `1px solid`, `12px`, `32px`). `tests/design-tokens.node.test.ts` (10 tests,
+**nouveau**) vérifie que toute variable employée est définie — en lisant les noms du générateur réel
+(`tokensStyleSheet()`), jamais une liste recopiée — et que les échelles de longueur portent leur unité.
 
-Note T-SEC : la coquille accordait la **caméra** (`permission === 'media'` sans jamais lire
-`details.mediaTypes`) et `securityHeaders()` — CSP + COOP + CORP + Permissions-Policy — était défini
-et **jamais utilisé** : trois en-têtes n'étaient posés nulle part. La fenêtre d'overlay n'était pas
-durcie non plus (`harden()` seulement sur la principale). `tests/security-policy.node.test.ts`
-(11 tests, **nouveau**) fige la règle de permission dans `permissions.ts` (pure) et vérifie par
-lecture de source que `index.ts` applique bien les en-têtes et les deux décisions.
+Déterminisme : `npm test` lancé **deux fois** dans la même session, mêmes comptes —
+run 1 (`15:25:09Z`) 664 / 664 / 0 / 49 suites / 5 307 ms ; run 2 (`15:27:56Z`)
+664 / 664 / 0 / 49 suites / 5 302 ms. La durée varie, jamais les comptes.
 
 **Le compte de `test:vitest` dépend de l'arbre de travail, pas du code** (mesuré T20) : `vitest run`
 n'a aucune configuration `test.exclude` dans `vite.config.ts`, il ramasse donc tout
@@ -51,7 +58,7 @@ Reproduire à l'identique (état de référence `15aed91`) :
 ```
 cd /work/lan-voice
 ls tests/*.test.ts | wc -l                     # 27
-env -u NODE_ENV npm test                       # attendu : exit=0, # tests 675, # fail 0
+env -u NODE_ENV npm test                       # attendu : exit=0, # tests 664, # fail 0
 env -u NODE_ENV npx tsc -p tsconfig.json --noEmit  # attendu : exit=0, 0 ligne
 env -u NODE_ENV npm run build:main             # attendu : exit=0
 env -u NODE_ENV npx vite build                 # attendu : exit=0
@@ -205,7 +212,7 @@ npm run test:vitest # mesuré exit=1 (26 en arbre propre, 1710 en arbre de trava
 | `2026-10-31T01:05Z` | 13 | 378 (378 pass) | exit=0 | — | VERIF-006 (T11) |
 | `2026-10-31T01:55Z` | 14 | 523 (523 pass) | exit=0 | exit=0 | VERIF-016 (T16b) |
 | `2026-10-31T02:0xZ` | 20 | 530 (530 pass) | exit=0 | exit=0 | T19 |
-| **`2026-10-31T20:29Z`** | **27** | **675 (675 pass)** | **exit=0** | **exit=0** | **T-SEC (branche `fix/permissions-hardening`)** |
+| **`2026-10-31T20:48Z`** | **27** | **674 (674 pass)** | **exit=0** | **exit=0** | **T-TOKENS (branche `fix/design-tokens`)** |
 | `2026-10-31T15:2xZ` | 26 | 664 (664 pass) | exit=0 | exit=0 | T20 (VERIF 031) |
 
 Les lignes plus anciennes de ce tableau sont **fausses aujourd'hui** : elles décrivent un état

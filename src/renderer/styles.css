@@ -59,7 +59,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: var(--space-4);
-  min-height: var(--layout-title-bar);
+  min-height: var(--layout-title-bar-height);
   border-bottom: var(--component-hairline) solid var(--color-border-subtle);
   padding-bottom: var(--space-3);
 }
@@ -139,7 +139,7 @@ body {
   border-radius: var(--radius-md);
   font: inherit;
   cursor: pointer;
-  transition: background var(--motion-fast) var(--ease-standard);
+  transition: background var(--motion-hover) var(--ease-standard);
 }
 
 .button:hover:not(:disabled) {
@@ -220,7 +220,10 @@ body {
 }
 
 .field__error {
-  color: var(--color-state-danger);
+  /* SPEC-002 §Palette : `state.mute` = « micro coupé, erreur ». Les jetons s'appellent `state.mute`,
+     `state.warn`, `state.ok` : `--color-state-danger` n'existe dans aucun jeton, donc cette ligne
+     héritait la couleur du parent — un message d'erreur sans couleur d'erreur. */
+  color: var(--color-state-mute);
   font-size: var(--text-xs);
 }
 
@@ -252,13 +255,17 @@ body {
 }
 
 .banner--error {
-  background: var(--color-state-danger-subtle);
-  border: var(--component-hairline) solid var(--color-state-danger);
+  /* `state.muteSubtle` = « fond de bandeau d'erreur » (SPEC-002) : c'est le jeton prévu pour CETTE
+     ligne, et il n'était employé nulle part. */
+  background: var(--color-state-mute-subtle);
+  border: var(--component-hairline) solid var(--color-state-mute);
 }
 
 .banner--warning {
-  background: var(--color-bg-raised);
-  border: var(--component-hairline) solid var(--color-state-warning);
+  /* Idem côté avertissement : `state.warnSubtle` = « fond de bandeau d'avertissement ». Le fond
+     `bg.raised` ne teintait pas le bandeau, qui ne se distinguait donc pas d'une carte. */
+  background: var(--color-state-warn-subtle);
+  border: var(--component-hairline) solid var(--color-state-warn);
 }
 
 .empty {
@@ -297,7 +304,7 @@ body {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  min-height: var(--layout-list-row);
+  min-height: var(--layout-list-row-height);
   padding-inline: var(--space-3);
   background: var(--color-bg-raised);
   border-radius: var(--radius-md);
@@ -329,7 +336,7 @@ body {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  min-height: var(--layout-list-row);
+  min-height: var(--layout-list-row-height);
   padding-inline: var(--space-3);
   border-radius: var(--radius-md);
   background: var(--color-bg-raised);
@@ -437,11 +444,11 @@ body {
 }
 
 .controls__voice[data-voice-status='live'] {
-  color: var(--color-state-success);
+  color: var(--color-state-ok);
 }
 
 .controls__voice[data-voice-status='unavailable'] {
-  color: var(--color-state-warning);
+  color: var(--color-state-warn);
 }
 
 .meter {
@@ -627,7 +634,7 @@ body {
   background: linear-gradient(var(--color-bg-overlay), var(--color-bg-overlay));
   border-radius: var(--radius-sm);
   opacity: 0.5;
-  transition: opacity var(--motion-fast) var(--ease-standard);
+  transition: opacity var(--motion-hover) var(--ease-standard);
 }
 
 .overlay__handle:hover,
