@@ -197,7 +197,7 @@ export function SettingsPanel({ settings, locale, onChange, onClose }: SettingsP
           <label className="field">
             <span className="field__label">
               {t('settings.vad.threshold')} —{' '}
-              {t('settings.vad.thresholdValue', { value: settings.talk.vadThresholdDb })}
+              {t('settings.vad.thresholdValue', { db: settings.talk.vadThresholdDb })}
             </span>
             <input
               type="range"
@@ -239,7 +239,7 @@ export function SettingsPanel({ settings, locale, onChange, onClose }: SettingsP
                   talkPatch({ pttAccelerator: DEFAULT_PTT_ACCELERATOR });
                 }}
               >
-                {t('settings.ptt.reset')}
+                {t('settings.ptt.reset', { shortcut: DEFAULT_PTT_ACCELERATOR })}
               </button>
             </div>
             <input

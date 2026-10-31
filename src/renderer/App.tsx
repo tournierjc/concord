@@ -227,6 +227,7 @@ export function App(): JSX.Element {
         <RoomList
           locale={locale}
           discovery={discovery}
+          nickname={(settings?.nickname ?? '').trim()}
           onJoin={joinRoom}
           onRefresh={() => void refreshRooms()}
         />
@@ -262,6 +263,8 @@ interface RoomListProps {
   locale: Locale;
   /** État réel de la découverte : `rooms` vient de `discoverRooms()` / `onRoomsDiscovered`. */
   discovery: DiscoveryState;
+  /** Pseudo local (rogné, vide si non saisi) : sert la suggestion « Salon de … ». */
+  nickname: string;
   onJoin: (roomId: string) => void;
   onRefresh: () => void;
 }
@@ -271,7 +274,13 @@ interface RoomListProps {
  * lui envoie (`RoomSummaryDto`), et ne fabrique aucun salon fictif. Quatre états distincts :
  * chargement, liste vide, N salons, erreur.
  */
-export function RoomList({ locale, discovery, onJoin, onRefresh }: RoomListProps): JSX.Element {
+export function RoomList({
+  locale,
+  discovery,
+  nickname,
+  onJoin,
+  onRefresh,
+}: RoomListProps): JSX.Element {
   const t = createTranslator(locale);
   const [draftName, setDraftName] = useState('');
   const { phase, rooms, error: discoveryError } = discovery;
@@ -346,7 +355,11 @@ export function RoomList({ locale, discovery, onJoin, onRefresh }: RoomListProps
             className="input"
             value={draftName}
             maxLength={32}
-            placeholder={t('room.create.namePlaceholder')}
+            // « Salon de {{name}} » : la moustache est REMPLIE avec le pseudo, ou pas d'indication
+            // du tout quand le pseudo est vide (rendre « Salon de » serait un libellé cassé).
+            placeholder={
+              nickname.length > 0 ? t('room.create.namePlaceholder', { name: nickname }) : undefined
+            }
             onChange={(event) => setDraftName(event.target.value)}
           />
         </label>
