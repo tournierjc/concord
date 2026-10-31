@@ -35,26 +35,5 @@
     "vite": "^5.2.10",
     "vitest": "^1.6.0"
   },
-  "publish": null,
-  "build": {
-    "appId": "local.concord.app",
-    "productName": "Concord",
-    "publish": null,
-    "files": [
-      "dist/**/*",
-      "package.json"
-    ],
-    "linux": {
-      "target": [
-        "AppImage",
-        "deb"
-      ],
-      "category": "AudioVideo"
-    },
-    "win": {
-      "target": [
-        "nsis"
-      ]
-    }
-  }
+  "publish": null
 }

@@ -7,9 +7,9 @@
 #   - pas de `afterSign`, pas de `publish` par cible.
 # Cibles : Linux x64 (AppImage + deb), Windows x64 (nsis).
 #
-# Note pour Régie : package.json contient encore un champ "build" (doublon de ce fichier).
-# electron-builder donne la priorité au fichier electron-builder.yml ; le champ "build" de
-# package.json devrait être supprimé pour éviter deux sources de vérité.
+# Note pour Régie : ce fichier est la SEULE source de config d'electron-builder.
+# Le champ "build" de package.json a été supprimé (AD-28) : read-config-file lit
+# package.json["build"] EN PRIORITÉ et n'ouvre ce fichier que si ce champ est absent.
 
 appId: local.concord.app
 productName: Concord
