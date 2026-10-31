@@ -466,15 +466,27 @@ export function closeVoice(): void {
   current.relay.reset();
   // Départ propre du tuyau : `leave` émis, abonnement coupé, sorties audio détruites.
   emitSignal({ kind: 'leave' });
-  current.link.sinks.clear();
-  current.link.peers.clear();
+  // Chaque étape est ISOLÉE : aucune ne doit pouvoir empêcher la fermeture du micro et des
+  // RTCPeerConnection. Avant, `sinks.clear()` pouvait lever (`NotFoundError` de double retrait sur
+  // un vrai DOM) et la sortie de salon s'arrêtait là — micro ouvert et connexions vivantes.
+  try {
+    current.link.sinks.clear();
+    current.link.peers.clear();
+  } catch (error) {
+    console.warn('[voix] sorties audio non détruites', error);
+  }
   try {
     current.wire.plane.setTransmitting(false);
   } catch {
     // Un plan déjà fermé n'a rien à couper : la fermeture ci-dessous reste la seule vérité.
   }
   // SPEC-009 §1(d) : le mesh d'abord, le plan ensuite — `wire.close()` applique cet ordre.
-  current.wire.close();
+  try {
+    current.wire.close();
+  } catch (error) {
+    // Le micro et les PC sont la partie qui compte : on ne peut pas la simuler, on la dit.
+    console.error('[voix] fermeture du plan média impossible', error);
+  }
   publish({ status: 'idle', error: null, level: 0, transmitting: false, peers: [], link: null });
 }
 
@@ -490,7 +502,13 @@ export function suspendVoice(): void {
   if (current === null) return;
   session = null;
   stopMeter(current);
-  current.link.sinks.clear();
+  // Même isolement qu'à la sortie de salon : un retrait refusé par le DOM ne doit pas laisser la
+  // reprise de connexion bloquée sur un nettoyage à moitié fait.
+  try {
+    current.link.sinks.clear();
+  } catch (error) {
+    console.warn('[voix] sorties audio non détruites (reconnexion)', error);
+  }
   for (const peer of [...current.link.peers.values()]) {
     if (peer.state !== 'failed') upsertPeer(current.link, peer.peerId, { state: 'failed' });
   }

@@ -8,7 +8,9 @@
  *      (`peer-joined`), donc avant tout flux. L'arrivée du flux ne fait que remplir `srcObject` :
  *      il n'y a jamais de flux orphelin, ni de lecteur créé à retardement qui perdrait le direct.
  *   2. **Détruit au départ du pair.** `remove(peerId)` coupe `srcObject` puis retire l'élément du
- *      document : aucun flux mort ne reste branché, aucun son fantôme ne persiste.
+ *      document — **une seule fois** : `element.remove()` détache déjà le nœud, et le `removeChild`
+ *      qui suivait levait `NotFoundError` sur un vrai DOM. Aucun flux mort ne reste branché, aucun
+ *      son fantôme ne persiste, et un retrait impossible n'empêche pas les autres.
  *   3. **Testable sans navigateur.** Aucun `document` en dur : l'hôte DOM est injecté, donc
  *      `node --test` vérifie création/destruction avec un faux DOM.
  *
@@ -118,9 +120,19 @@ export function createAudioSinkRegistry(host: SinkHost): AudioSinkRegistry {
   function remove(peerId: string): void {
     const sink = sinks.get(peerId);
     if (sink === undefined) return;
+    // Sorti du registre AVANT le retrait DOM : même si le retrait échoue, le pair ne reste pas
+    // dans la liste et `clear()` peut poursuivre sa boucle.
     sinks.delete(peerId);
     sink.detach();
-    if (typeof sink.element.remove === 'function') sink.element.remove();
+    // UN SEUL geste de retrait. Les deux à la suite étaient un défaut, pas une ceinture :
+    // `element.remove()` détache déjà le nœud, donc `body.removeChild(element)` levait
+    // `NotFoundError` (`documentSinkHost.remove`, plus bas). Le `clear()` de fin de salon
+    // abandonnait alors les sorties suivantes, et `closeVoice()` — dont l'appel à `clear()`
+    // n'était pas protégé — n'atteignait plus la fermeture du micro ni des RTCPeerConnection.
+    if (typeof sink.element.remove === 'function') {
+      sink.element.remove();
+      return;
+    }
     host.remove(sink.element);
   }
 
@@ -146,7 +158,15 @@ export function createAudioSinkRegistry(host: SinkHost): AudioSinkRegistry {
       return [...sinks.values()];
     },
     clear(): void {
-      for (const peerId of [...sinks.keys()]) remove(peerId);
+      for (const peerId of [...sinks.keys()]) {
+        try {
+          remove(peerId);
+        } catch (error) {
+          // Un DOM qui refuse un retrait ne doit pas empêcher les AUTRES sorties de tomber : la
+          // décision de quitter le salon n'est pas annulée par un nœud capricieux.
+          console.warn('[audio] sortie non retirée du document', error);
+        }
+      }
     },
   };
 }
