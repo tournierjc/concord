@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      Document de la fenêtre overlay (sans cadre, transparente, toujours au premier plan).
+      Pas de CSP en <meta> : elle serait intersectée avec l'en-tête posé par le process principal
+      (src/main/csp.ts), qui calcule les sources WebSocket du LAN au démarrage. Voir index.html.
+    -->
+    <meta name="color-scheme" content="dark" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Concord — overlay</title>
+  </head>
+  <body class="overlay-body">
+    <div id="root"></div>
+    <script type="module" src="/src/renderer/overlay-entry.tsx"></script>
+  </body>
+</html>

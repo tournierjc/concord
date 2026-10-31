@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      Pas de CSP en <meta> : elle serait INTERSECTÉE avec l'en-tête Content-Security-Policy posé par
+      le process principal (src/main/csp.ts), et la liste `connect-src` des WebSockets LAN est
+      calculée au démarrage (adresses privées de la machine + hôtes autorisés). Une meta figée
+      bloquerait donc la WebSocket d'une adresse privée du LAN en production. La CSP est appliquée par en-tête sur le
+      protocole `app://` (src/main/renderer-protocol.ts) et sur le serveur de dev (vite.config.ts).
+    -->
+    <meta name="color-scheme" content="dark" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Concord</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/renderer/main.tsx"></script>
+  </body>
+</html>

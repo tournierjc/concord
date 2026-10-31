@@ -1,0 +1,563 @@
+/**
+ * signaling-link.ts — le TUYAU de signalisation (T16b / SPEC-007 §4.3).
+ *
+ * Un serveur TCP (`node:net`) et son client, cadrés en **lignes JSON** : une ligne = un message du
+ * protocole de `src/engine/net/local-signaling.ts`, dont la sémantique est réutilisée telle quelle
+ * (`join` / `offer` / `answer` / `ice` / `leave`, plafond de pairs, refus explicites). Ce fichier
+ * n'invente donc pas un second protocole : il ne fait que **porter** les octets.
+ *
+ * Règles non négociables, chacune falsifiable par un test :
+ *  1. **Jamais d'écoute large.** L'adresse d'écoute passe `isAllowedListenHost` : `0.0.0.0`, `::`,
+ *     `*`, `any` et toute adresse publique sont refusés AVANT `listen()` — on refuse de démarrer
+ *     plutôt que d'écouter large. Repli de port uniquement 47821 → 47830, et un refus explicite si
+ *     les dix sont occupés.
+ *  2. **Bornes.** Une ligne de plus de 64 Ko ferme la connexion avec un refus explicite ; un JSON
+ *     invalide est refusé de la même manière. Aucune de ces deux entrées ne fait tomber le process.
+ *  3. **ICE filtré.** Tout candidat, à l'émission comme à la réception, passe
+ *     `src/engine/rtc/ice-filter.ts` : un candidat hors LAN ne sort pas et n'entre pas.
+ *  4. **Aucune exception qui fuit** : tout échec devient un message `link` (`refused`/`closed`) avec
+ *     une raison lisible — c'est ce que l'écran affiche.
+ *
+ * L'identité attribuée par le serveur (`selfId`) est publiée dans `link.detail` : le renderer n'a
+ * pas besoin d'un canal de plus, et il connaît déjà son identité locale (`localId`).
+ */
+
+import { connect, createServer, type Server, type Socket } from 'node:net';
+
+import {
+  createLocalSignaling,
+  isAllowedListenHost,
+  SIGNALING_BASE_PORT,
+  SIGNALING_PORT_RANGE,
+  type ClientMessage,
+  type LocalSignaling,
+  type ServerMessage,
+  type SocketLike,
+} from '../engine/net/local-signaling';
+import { isLanCandidate } from '../engine/rtc/ice-filter';
+import { systemTimers, type MainTimers } from './timers';
+import { SIGNAL_MAX_LINE_BYTES, type SignalIn, type SignalOut } from '../shell/ipc-contract';
+
+/** Longueur maximale d'une ligne JSON (SPEC-007 §4.3) : au-delà, la connexion est fermée. */
+export const MAX_LINE_BYTES = SIGNAL_MAX_LINE_BYTES;
+
+/** Délai de connexion du client avant refus explicite. */
+export const CONNECT_TIMEOUT_MS = 5000;
+
+export interface SignalingLinkOptions {
+  /** `host` : écoute + rejoint son propre salon ; `client` : rejoint l'hôte indiqué. */
+  role: 'host' | 'client';
+  /** Identité locale (journal seulement : le fil ne transporte aucun identifiant persistant). */
+  localId: string;
+  /** Nom publié dans le salon (≤ 32 caractères, comme le protocole). */
+  name: string;
+  /** Adresse d'écoute (hôte) ou adresse de l'hôte (client) : LAN ou loopback, jamais large. */
+  host: string;
+  /** Client : port de l'hôte (défaut 47821). Hôte : premier port essayé. */
+  port?: number;
+  maxPeers?: number;
+  /** Horloge injectée (l'engine interdit `Date.now`, le main la fournit). */
+  now: () => number;
+  onMessage: (message: SignalIn) => void;
+  timeoutMs?: number;
+  /** Minuteur injecté (SPEC-012 §4) : le délai de connexion passe par `src/main/timers.ts`. */
+  timers?: MainTimers;
+}
+
+export interface SignalingLinkStats {
+  lines: number;
+  filteredCandidates: number;
+  refused: number;
+  oversize: number;
+  malformed: number;
+}
+
+export interface SignalingLink {
+  readonly role: 'host' | 'client';
+  /** Adresse réellement écoutée (hôte) ; `null` en client ou si le lien a refusé de démarrer. */
+  readonly listen: { host: string; port: number } | null;
+  /** Identité attribuée par le serveur, connue après le `hello`. */
+  readonly selfId: string | null;
+  readonly stats: SignalingLinkStats;
+  send(message: SignalOut): void;
+  close(detail?: string): void;
+}
+
+/* ------------------------------------------------------------------ */
+/* Choix de l'adresse d'écoute — pur, testable sans réseau             */
+/* ------------------------------------------------------------------ */
+
+/** Forme minimale d'une entrée de `os.networkInterfaces()` (injectable en test). */
+export interface InterfaceLike {
+  address: string;
+  family: string | number;
+  internal: boolean;
+}
+
+/**
+ * Rend l'adresse d'écoute du lien : la première adresse IPv4 privée (RFC1918) non interne, et le
+ * loopback à défaut. Aucune autre valeur ne sort d'ici : `0.0.0.0`, `::` et les adresses publiques
+ * ne sont jamais des candidats, donc le lien ne peut pas écouter large par accident.
+ */
+export function pickListenHost(interfaces: Record<string, InterfaceLike[] | undefined>): string {
+  const sorted = Object.keys(interfaces).sort((a, b) => a.localeCompare(b));
+  for (const name of sorted) {
+    for (const entry of interfaces[name] ?? []) {
+      const isV4 = entry.family === 'IPv4' || entry.family === 4;
+      if (!isV4 || entry.internal) continue;
+      if (!isAllowedListenHost(entry.address)) continue;
+      // Une adresse de lien-local (169.254/16) n'est pas un réseau local utile : on l'ignore.
+      if (entry.address.startsWith('169.254.')) continue;
+      return entry.address;
+    }
+  }
+  return '127.0.0.1';
+}
+
+/* ------------------------------------------------------------------ */
+/* Encodage / décodage — purs, donc testables sans socket              */
+/* ------------------------------------------------------------------ */
+
+function asText(payload: unknown): string | null {
+  if (typeof payload === 'string') return payload.length > 0 ? payload : null;
+  return null;
+}
+
+function asCandidate(payload: unknown): string | null {
+  if (typeof payload === 'string') return payload.length > 0 ? payload : null;
+  if (payload !== null && typeof payload === 'object') {
+    const inner = (payload as { candidate?: unknown }).candidate;
+    return typeof inner === 'string' && inner.length > 0 ? inner : null;
+  }
+  return null;
+}
+
+/**
+ * Traduit un `SignalOut` du contrat en message de protocole.
+ *
+ * Rend `null` quand rien ne doit sortir : charge utile inexploitable, ou candidat ICE hors LAN.
+ * Le second cas n'est pas une erreur — c'est le filtre LAN qui fait son travail.
+ */
+export function toWire(message: SignalOut): ClientMessage | null {
+  if (message.kind === 'leave') return { type: 'leave' };
+  const to = typeof message.to === 'string' ? message.to : '';
+  if (to.length === 0) return null;
+  if (message.kind === 'offer' || message.kind === 'answer') {
+    const sdp = asText(message.payload);
+    if (sdp === null) return null;
+    return { type: message.kind, to, sdp };
+  }
+  const candidate = asCandidate(message.payload);
+  if (candidate === null) return null;
+  // Filtre LAN AVANT l'émission : un srflx/relay/d'adresse publique ne sort jamais.
+  if (!isLanCandidate(candidate)) return null;
+  return { type: 'ice', to, candidate };
+}
+
+/** Rend la charge utile d'un candidat relayé : la chaîne, ou l'objet JSON si elle en est un. */
+export function decodeCandidatePayload(candidate: string): unknown {
+  const trimmed = candidate.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (parsed !== null && typeof parsed === 'object') return parsed;
+    } catch {
+      // Pas du JSON : la chaîne de candidat repart telle quelle.
+    }
+  }
+  return candidate;
+}
+
+/**
+ * Texte de candidat réellement filtrable : la ligne SDP, y compris quand elle voyage emballée
+ * dans un JSON (`{ candidate, sdpMid, sdpMLineIndex }`) — sinon `isLanCandidate` verrait un
+ * objet sérialisé et refuserait TOUT candidat emballé.
+ */
+export function candidateText(candidate: string): string {
+  const trimmed = candidate.trim();
+  if (!trimmed.startsWith('{')) return candidate;
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (parsed !== null && typeof parsed === 'object') {
+      const inner = (parsed as { candidate?: unknown }).candidate;
+      if (typeof inner === 'string') return inner;
+    }
+  } catch {
+    // JSON invalide : la chaîne brute est filtrée telle quelle.
+  }
+  return candidate;
+}
+
+/** Traduit un message serveur en `SignalIn` ; `null` si le message est hors contrat. */
+export function fromWire(message: ServerMessage): SignalIn | null {
+  switch (message.type) {
+    case 'offer':
+    case 'answer': {
+      if (typeof message.from !== 'string' || typeof message.sdp !== 'string') return null;
+      return { kind: message.type, from: message.from, payload: message.sdp };
+    }
+    case 'ice': {
+      if (typeof message.from !== 'string' || typeof message.candidate !== 'string') return null;
+      // Filtre LAN à l'ENTRÉE : un pair mal configuré ne fait pas entrer un candidat hors LAN.
+      if (!isLanCandidate(candidateText(message.candidate))) return null;
+      return { kind: 'ice', from: message.from, payload: decodeCandidatePayload(message.candidate) };
+    }
+    case 'join':
+      if (message.peer === undefined) return null;
+      return { kind: 'peer-joined', peerId: message.peer.peerId, name: message.peer.name };
+    case 'leave':
+      if (typeof message.peerId !== 'string') return null;
+      return { kind: 'peer-left', peerId: message.peerId };
+    default:
+      return null;
+  }
+}
+
+/** Parse une ligne serveur sans jamais lever : `null` = ligne hors contrat. */
+export function parseServerLine(line: string): ServerMessage | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== 'object') return null;
+  const type = (parsed as { type?: unknown }).type;
+  if (typeof type !== 'string') return null;
+  return parsed as ServerMessage;
+}
+
+/* ------------------------------------------------------------------ */
+/* Lecture ligne par ligne, bornée                                     */
+/* ------------------------------------------------------------------ */
+
+interface LineReader {
+  push(chunk: string): void;
+}
+
+function readLines(
+  socket: Socket,
+  onLine: (line: string) => void,
+  onOverflow: (bytes: number) => void,
+): LineReader {
+  let buffer = '';
+  let closed = false;
+  return {
+    push(chunk: string): void {
+      if (closed) return;
+      buffer += chunk;
+      for (;;) {
+        const index = buffer.indexOf('\n');
+        if (index === -1) break;
+        const line = buffer.slice(0, index).replace(/\r$/, '');
+        buffer = buffer.slice(index + 1);
+        if (line.length > 0) onLine(line);
+      }
+      if (Buffer.byteLength(buffer, 'utf8') > MAX_LINE_BYTES) {
+        closed = true;
+        buffer = '';
+        onOverflow(MAX_LINE_BYTES);
+      }
+    },
+  };
+}
+
+function refuseLine(detail: string): string {
+  return JSON.stringify({ type: 'refuse', code: 'invalid-message', reason: detail });
+}
+
+/* ------------------------------------------------------------------ */
+/* Le lien                                                            */
+/* ------------------------------------------------------------------ */
+
+export function createSignalingLink(options: SignalingLinkOptions): SignalingLink {
+  const role = options.role;
+  const name = options.name.slice(0, 32);
+  const maxPeers = options.maxPeers;
+  const timeoutMs = options.timeoutMs ?? CONNECT_TIMEOUT_MS;
+  const timers = options.timers ?? systemTimers;
+  const basePort = options.port ?? SIGNALING_BASE_PORT;
+  const stats: SignalingLinkStats = {
+    lines: 0,
+    filteredCandidates: 0,
+    refused: 0,
+    oversize: 0,
+    malformed: 0,
+  };
+
+  let server: Server | null = null;
+  let signaling: LocalSignaling | null = null;
+  let outbound: Socket | null = null;
+  let listen: { host: string; port: number } | null = null;
+  let selfId: string | null = null;
+  let closed = false;
+  let connected = false;
+
+  function emit(message: SignalIn): void {
+    try {
+      options.onMessage(message);
+    } catch {
+      // Un consommateur qui lève ne doit pas casser le transport.
+    }
+  }
+
+  function emitLink(state: 'connecting' | 'connected' | 'refused' | 'closed', detail: string | null = null): void {
+    // `detail` est TOUJOURS présent (null si aucune raison) : le renderer n'a pas à distinguer
+    // « champ absent » de « pas de raison », conformément à SPEC-007 §4.1 (contrat figé).
+    emit({ kind: 'link', state, detail });
+  }
+
+  function refuse(detail: string): void {
+    if (closed) return;
+    stats.refused += 1;
+    closed = true;
+    emitLink('refused', detail);
+  }
+
+  function joinRequest(): string {
+    return JSON.stringify({ type: 'join', name } satisfies ClientMessage);
+  }
+
+  function handleServerRefuse(message: { code: string; reason: string }): void {
+    if (message.code === 'room-full' || message.code === 'closed' || message.code === 'not-joined') {
+      refuse(`lien refusé par l'hôte (${message.code}) : ${message.reason}`);
+      outbound?.destroy();
+      return;
+    }
+    if (message.code === 'off-lan') {
+      // Un candidat hors LAN a été bloqué côté serveur : il ne compte pas comme un refus de lien.
+      stats.filteredCandidates += 1;
+      return;
+    }
+    stats.malformed += 1;
+  }
+
+  function handleServerMessage(raw: string): void {
+    stats.lines += 1;
+    const message = parseServerLine(raw);
+    if (message === null) {
+      stats.malformed += 1;
+      return;
+    }
+    if (message.type === 'hello') {
+      selfId = message.peerId;
+      connected = true;
+      emitLink('connected', `pair=${message.peerId} port=${listen?.port ?? basePort}`);
+      for (const peer of message.peers ?? []) {
+        emit({ kind: 'peer-joined', peerId: peer.peerId, name: peer.name });
+      }
+      return;
+    }
+    if (message.type === 'refuse') {
+      handleServerRefuse({ code: message.code, reason: message.reason });
+      return;
+    }
+    if (message.type === 'bye') {
+      closed = true;
+      emitLink('closed', `l'hôte a fermé le salon : ${message.reason}`);
+      return;
+    }
+    if (message.type === 'ice' && !isLanCandidate(candidateText(message.candidate))) {
+      stats.filteredCandidates += 1;
+      return;
+    }
+    const incoming = fromWire(message);
+    if (incoming === null) {
+      stats.malformed += 1;
+      return;
+    }
+    emit(incoming);
+  }
+
+  /** Ouvre le socket sortant (le nôtre) vers `host:port` et s'annonce. */
+  function dial(host: string, port: number): void {
+    const socket = connect({ host, port });
+    outbound = socket;
+    // `timers.once` arme l'`unref` lui-même : une tentative de lien ne retient pas le processus.
+    const timer = timers.once(timeoutMs, () => {
+      if (connected) return;
+      refuse(`lien refusé : aucun hôte sur ${host}:${port} après ${timeoutMs} ms`);
+      socket.destroy();
+    });
+
+    socket.setEncoding('utf8');
+    const reader = readLines(
+      socket,
+      (line) => {
+        handleServerMessage(line);
+      },
+      () => {
+        stats.oversize += 1;
+        refuse(`lien rompu : ligne de plus de ${Math.round(MAX_LINE_BYTES / 1024)} Ko reçue de l'hôte`);
+        socket.destroy();
+      },
+    );
+    socket.on('data', (chunk: string) => reader.push(chunk));
+    socket.on('connect', () => {
+      timers.cancel(timer);
+      socket.write(`${joinRequest()}\n`);
+    });
+    socket.on('error', () => {
+      timers.cancel(timer);
+      if (!connected) {
+        refuse(`lien refusé : connexion impossible vers ${host}:${port}`);
+      }
+    });
+    socket.on('close', () => {
+      timers.cancel(timer);
+      if (closed) return;
+      closed = true;
+      emitLink('closed', 'lien fermé');
+    });
+  }
+
+  function startHost(host: string): void {
+    const ports: number[] = [];
+    for (let index = 0; index < SIGNALING_PORT_RANGE; index += 1) ports.push(basePort + index);
+    let attempt = 0;
+
+    const tryNext = (lastDetail: string): void => {
+      if (closed) return;
+      const port = ports[attempt];
+      attempt += 1;
+      if (port === undefined) {
+        refuse(
+          `lien refusé : aucune des ${SIGNALING_PORT_RANGE} adresses de port ${basePort}-${basePort + SIGNALING_PORT_RANGE - 1} n'a pu être écoutée sur ${host} (${lastDetail})`,
+        );
+        return;
+      }
+      const candidateServer = createServer();
+      candidateServer.once('error', (error: NodeJS.ErrnoException) => {
+        candidateServer.close();
+        const detail = error.code === 'EADDRINUSE' ? 'port occupé' : error.message;
+        tryNext(detail);
+      });
+      candidateServer.listen({ host, port }, () => {
+        server = candidateServer;
+        listen = { host, port };
+        signaling = createLocalSignaling({
+          port,
+          now: options.now,
+          ...(maxPeers === undefined ? {} : { maxParticipants: maxPeers }),
+        });
+        candidateServer.on('connection', (socket: Socket) => acceptIncoming(socket));
+        candidateServer.on('error', (error: Error) => {
+          refuse(`lien rompu : ${error.message}`);
+        });
+        // L'hôte est aussi un pair : il rejoint son propre salon par le même chemin que les autres.
+        dial(host === 'localhost' ? '127.0.0.1' : host, port);
+      });
+    };
+
+    tryNext('');
+  }
+
+  function acceptIncoming(socket: Socket): void {
+    const local = signaling;
+    if (local === null || closed) {
+      socket.destroy();
+      return;
+    }
+    socket.setEncoding('utf8');
+    const adapter: SocketLike = {
+      send(data: string): void {
+        if (socket.destroyed) return;
+        socket.write(`${data}\n`);
+      },
+      close(): void {
+        socket.end();
+      },
+    };
+    const connection = local.handleConnection(adapter);
+
+    const reader = readLines(
+      socket,
+      (line) => {
+        stats.lines += 1;
+        try {
+          JSON.parse(line);
+        } catch {
+          stats.malformed += 1;
+          adapter.send(refuseLine(`ligne JSON invalide (${line.length} octets) : connexion fermée`));
+          socket.end();
+          return;
+        }
+        connection.receive(line);
+      },
+      () => {
+        stats.oversize += 1;
+        adapter.send(
+          refuseLine(
+            `ligne de plus de ${Math.round(MAX_LINE_BYTES / 1024)} Ko : connexion fermée sans traitement`,
+          ),
+        );
+        socket.end();
+      },
+    );
+
+    socket.on('data', (chunk: string) => reader.push(chunk));
+    socket.on('error', () => {
+      connection.close('socket en erreur');
+    });
+    socket.on('close', () => {
+      connection.close('socket fermé');
+    });
+  }
+
+  // --- Démarrage -------------------------------------------------------------------------
+
+  if (!isAllowedListenHost(options.host)) {
+    // Refus AVANT tout `listen()` : aucune socket n'est ouverte sur une adresse large.
+    refuse(
+      `adresse refusée « ${options.host} » : le lien n'écoute que sur une adresse du réseau local ou le loopback`,
+    );
+  } else if (role === 'host') {
+    emitLink('connecting', `écoute sur ${options.host}`);
+    startHost(options.host);
+  } else {
+    emitLink('connecting', `connexion à ${options.host}:${basePort}`);
+    dial(options.host, basePort);
+  }
+
+  return {
+    role,
+    get listen() {
+      return listen;
+    },
+    get selfId() {
+      return selfId;
+    },
+    stats,
+    send(message: SignalOut): void {
+      if (closed || outbound === null || outbound.destroyed) return;
+      const wire = toWire(message);
+      if (wire === null) {
+        // Candidat hors LAN, ou charge utile inexploitable : rien ne sort, et c'est voulu.
+        if (message.kind === 'ice') stats.filteredCandidates += 1;
+        return;
+      }
+      outbound.write(`${JSON.stringify(wire)}\n`);
+      if (message.kind === 'leave') {
+        closed = true;
+        outbound.end();
+        emitLink('closed', 'départ du salon');
+      }
+    },
+    close(detail?: string): void {
+      if (closed) return;
+      closed = true;
+      try {
+        outbound?.write(`${JSON.stringify({ type: 'leave' } satisfies ClientMessage)}\n`);
+        outbound?.end();
+      } catch {
+        outbound?.destroy();
+      }
+      outbound = null;
+      signaling?.close();
+      signaling = null;
+      server?.close();
+      server = null;
+      emitLink('closed', detail ?? 'lien fermé');
+    },
+  };
+}

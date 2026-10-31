@@ -1,0 +1,28 @@
+# Dépendances et artefacts de compilation — jamais versionnés
+node_modules/
+dist/
+release/
+build/
+*.tsbuildinfo
+
+# Journaux de build, de tests et de vérification (datés, reproductibles)
+*.log
+.m*.log
+.verif-*
+.meta
+
+# Captures brutes des campagnes de mesure (61 Mo au 2026-10-31) :
+# ce sont des preuves locales régénérables, pas du code. Les rapports qui les
+# citent (VERIF/*.md) sont versionnés, eux.
+VERIF/raw/
+VERIF/__pycache__/
+
+# Divers
+.DS_Store
+.vscode/
+*.swp
+
+# Fragments de travail des scripts de vérification (bouts de shell testés à la main)
+VERIF/*.tmp
+VERIF/.*.tmp
+VERIF/.t[0-9]*

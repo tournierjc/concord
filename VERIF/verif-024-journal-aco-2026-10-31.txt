@@ -1,0 +1,8 @@
+# VERIF-024 — journal de recette ACo (check-aco-016.sh) — arbre T23 mergé, gel 04:47Z
+# Relevé : 2026-10-31T03:49:40Z (prod) — instrument : banc jsdom+React réel (sandbox desk-qa/aco16)
+ACo-8 statut=PASS cable=1 reload=0 extinction_ms=2007 extinction_module_ms=2000 budget_ms=2016 portee=surface+entree-overlay-executees-dans-un-DOM-React-reel
+ACo-9 F1 statut=PASS cable=1 reload=0 extinction_ms=2007 budget_ms=2016 falsification=balayage periode_ms=2000 pire_cas_ms=4000 pire_cas_attendu_ms=4000 verdict=ROUGE accepte_balayage=0
+ACo-9 F2 statut=NON-EXECUTE raison=E17-C6-ferme-constat-documentaire-pas-une-mesure
+ACo-16 statut=PASS cable=1 duree_s=3 garde_vie_hz=1 messages=3 compte=rendus methode=MutationObserver+commits-React rendus_overlay=0 rendus_test=1
+ACo-14 statut=gele raison=C5-mesure-non-rendue
+ACo-15 statut=gele raison=C5

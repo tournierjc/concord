@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>SPEC-013 — planche : état « inconnu » (parole non mesurée)</title>
+<!--
+  Planche de contrôle de SPEC-013 (T21). Valeurs recopiées de design/tokens.json et de
+  src/renderer/styles.css (lignes 352-382 pour le halo de salon, 556-610 pour l'overlay).
+  Aucune dépendance : ouvrir le fichier dans un navigateur, comparer visuellement
+  « silencieux » et « inconnu » — ils doivent être indiscernables, y compris à 60 %.
+-->
+<style>
+  :root{
+    --bg-canvas:#0E1116; --bg-surface:#151A21; --bg-inset:#090B0F; --bg-overlay:#0B0E13;
+    --border-subtle:#2A323D; --text-primary:#F1F4F8; --text-muted:#8B97A5;
+    --state-speaking:#3DDC84; --state-mute:#FF6B6B;
+    --halo-width:2px; --halo-ms:80ms; --ease:cubic-bezier(.2,0,0,1);
+    --avatar:28px; --space-1:4px; --space-2:8px; --space-3:12px; --radius-pill:999px;
+    --text-xs:12px; --weight-medium:500; --weight-semibold:600;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:24px;background:var(--bg-canvas);color:var(--text-primary);
+       font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  h1{font-size:18px;margin:0 0 4px}
+  h2{font-size:13px;letter-spacing:.04em;text-transform:uppercase;color:var(--text-muted);
+     margin:28px 0 10px;font-weight:600}
+  p.lead{margin:0 0 8px;color:var(--text-muted);max-width:74ch}
+  .panel{background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:12px;padding:16px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+  figure{margin:0}
+  figcaption{color:var(--text-muted);font-size:12px;margin-top:6px}
+  figcaption b{color:var(--text-primary);font-weight:600}
+  .tag{display:inline-block;font-size:11px;padding:1px 6px;border-radius:999px;
+       border:1px solid var(--border-subtle);color:var(--text-muted)}
+
+  /* ---- liste de salon : recopie de .participant (styles.css) ---- */
+  ul.participants{list-style:none;margin:0;padding:0;display:grid;gap:2px}
+  .participant{position:relative;display:flex;align-items:center;gap:var(--space-3);
+               min-block-size:calc(var(--avatar) + var(--space-2));padding:var(--space-1) 0}
+  .participant__avatar{display:flex;align-items:center;justify-content:center;
+    inline-size:var(--avatar);block-size:var(--avatar);background:var(--bg-inset);
+    border-radius:var(--radius-pill);font-size:var(--text-xs);font-weight:var(--weight-semibold)}
+  .participant__halo{position:absolute;
+    inline-size:calc(var(--avatar) + var(--space-1));block-size:var(--avatar);
+    inset-inline-start:var(--space-3);border-radius:var(--radius-pill);
+    border:var(--halo-width) solid transparent;
+    transition:border-color var(--halo-ms) var(--ease);pointer-events:none}
+  .participant[data-speaking='true'] .participant__halo{border-color:var(--state-speaking)}
+  .participant[data-muted='true'] .participant__avatar{color:var(--state-mute)}
+  .participant__name{font-weight:var(--weight-medium)}
+  .participant__you{color:var(--text-muted);font-weight:400}
+  .participant__state{color:var(--text-muted);font-size:var(--text-xs);margin-inline-start:auto}
+
+  /* ---- overlay : recopie de .overlay__avatar (styles.css) ---- */
+  .stage{position:relative;border-radius:12px;padding:26px 18px;display:flex;justify-content:center}
+  .stage--dark{background:linear-gradient(135deg,#20262f,#10141a)}
+  .stage--light{background:linear-gradient(135deg,#ffffff,#e7ebf2)}
+  .dim{opacity:.6}
+  ul.overlay__avatars{list-style:none;margin:0;padding:0;display:flex;align-items:center;gap:10px}
+  .overlay__avatar{position:relative;display:flex;align-items:center;justify-content:center;
+    width:34px;height:34px;border-radius:var(--radius-pill);background:var(--bg-overlay);
+    border:var(--halo-width) solid var(--border-subtle)}
+  .overlay__halo{position:absolute;inset:calc(-1 * var(--halo-width));
+    border-radius:var(--radius-pill);border:var(--halo-width) solid transparent;
+    transition:border-color var(--halo-ms) var(--ease);pointer-events:none}
+  .overlay__avatar[data-speaking='true'] .overlay__halo{border-color:var(--state-speaking)}
+  .overlay__initials{font-size:var(--text-xs);font-weight:var(--weight-semibold);color:var(--text-primary)}
+  .overlay__avatar[data-muted='true'] .overlay__initials{color:var(--state-mute)}
+  .overlay__mute{position:absolute;inset-block-end:calc(-1 * var(--space-1));
+    inset-inline-end:calc(-1 * var(--space-1));width:var(--space-2);height:var(--space-2);
+    border-radius:var(--radius-pill);background:var(--state-mute);border:1px solid var(--bg-overlay)}
+
+  table{border-collapse:collapse;font-size:13px;width:100%}
+  th,td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--border-subtle);vertical-align:top}
+  th{color:var(--text-muted);font-weight:600;font-size:12px}
+  td.num{font-variant-numeric:tabular-nums}
+  .bad{color:#FFB0B0}.ok{color:#8BE3B4}
+</style>
+</head>
+<body>
+
+<h1>État « inconnu » — pair présent, parole non mesurée</h1>
+<p class="lead">Règle de la planche : <b>« inconnu » doit être indiscernable de « silencieux »</b>
+(R-U1). Ce qui n'est pas mesuré ne s'affiche pas. Ce document sert à vérifier cette identité à
+l'œil, puis en pixels (AC-U1, AC-U9).</p>
+
+<h2>1 · Liste de salon (Room) — 100 % d'opacité</h2>
+<div class="panel">
+  <ul class="participants">
+    <li class="participant" data-speaking="false">
+      <span class="participant__avatar" aria-hidden="true">CM</span>
+      <span class="participant__halo"></span>
+      <span class="participant__name">Camille</span>
+      <span class="participant__state">Audio en attente…</span>
+    </li>
+    <li class="participant" data-speaking="unknown">
+      <span class="participant__avatar" aria-hidden="true">CM</span>
+      <span class="participant__halo"></span>
+      <span class="participant__name">Camille</span>
+      <span class="participant__state">Audio en attente…</span>
+    </li>
+    <li class="participant" data-speaking="true">
+      <span class="participant__avatar" aria-hidden="true">CM</span>
+      <span class="participant__halo"></span>
+      <span class="participant__name">Camille</span>
+      <span class="participant__state">parle</span>
+    </li>
+    <li class="participant" data-speaking="false" data-muted="true">
+      <span class="participant__avatar" aria-hidden="true">MO</span>
+      <span class="participant__halo"></span>
+      <span class="participant__name">Moi <span class="participant__you">(Vous)</span></span>
+      <span class="participant__state">Muet</span>
+    </li>
+    <li class="participant" data-speaking="unknown">
+      <span class="participant__avatar" aria-hidden="true">DO</span>
+      <span class="participant__halo"></span>
+      <span class="participant__name">Dominique</span>
+      <span class="participant__state">Reconnexion… (3 s)</span>
+    </li>
+  </ul>
+</div>
+<div class="grid" style="margin-top:12px">
+  <figure class="panel"><figcaption><b>Lignes 1 et 2</b> — <span class="tag">false</span> et
+    <span class="tag">unknown</span> : même rendu, 0 px d'écart. C'est l'exigence, pas un défaut.</figcaption></figure>
+  <figure class="panel"><figcaption><b>Ligne 3</b> — cible quand AD-17 D3/D4 livrera le producteur :
+    halo 2 px <code>state.speaking</code> + libellé « parle », rien d'autre ne change.</figcaption></figure>
+  <figure class="panel"><figcaption><b>Lignes 4 et 5</b> — les deux seuls cas où la ligne dit
+    quelque chose du son : soi-même (mesuré en local) et la liaison (texte de lien).
+    Un pair <span class="tag">unknown</span> ne reçoit jamais de texte de parole.</figcaption></figure>
+</div>
+
+<h2>2 · Overlay — pair inconnu, aujourd'hui (aucune mesure dans cette fenêtre)</h2>
+<div class="grid">
+  <figure class="stage stage--dark">
+    <ul class="overlay__avatars">
+      <li class="overlay__avatar" data-speaking="unknown"><span class="overlay__halo"></span><span class="overlay__initials">CM</span></li>
+      <li class="overlay__avatar" data-speaking="unknown"><span class="overlay__halo"></span><span class="overlay__initials">DO</span></li>
+      <li class="overlay__avatar" data-speaking="unknown" data-muted="true"><span class="overlay__halo"></span><span class="overlay__initials">MO</span><span class="overlay__mute"></span></li>
+    </ul>
+  </figure>
+  <figure class="stage stage--dark dim">
+    <ul class="overlay__avatars">
+      <li class="overlay__avatar" data-speaking="unknown"><span class="overlay__halo"></span><span class="overlay__initials">CM</span></li>
+      <li class="overlay__avatar" data-speaking="unknown"><span class="overlay__halo"></span><span class="overlay__initials">DO</span></li>
+      <li class="overlay__avatar" data-speaking="unknown" data-muted="true"><span class="overlay__halo"></span><span class="overlay__initials">MO</span><span class="overlay__mute"></span></li>
+    </ul>
+  </figure>
+</div>
+<div class="grid" style="margin-top:12px">
+  <figure class="panel"><figcaption><b>Fond sombre, 100 %</b> — anneau <code>border.subtle</code>,
+    initiales <code>text.primary</code>. Aucun halo : il n'y a rien à mesurer. Le badge rouge
+    n'existe que pour soi-même.</figcaption></figure>
+  <figure class="panel"><figcaption><b>Même overlay à 60 %</b> (opacité de fenêtre) — les initiales
+    tiennent 4,91:1 même sur un fond blanc (mesure §3). L'état inconnu reste lisible : il ne
+    repose sur aucune couleur.</figcaption></figure>
+</div>
+
+<h2>3 · Overlay — rendu cible quand le relais d'état existera</h2>
+<div class="grid">
+  <figure class="stage stage--dark">
+    <ul class="overlay__avatars">
+      <li class="overlay__avatar" data-speaking="true"><span class="overlay__halo"></span><span class="overlay__initials">CM</span></li>
+      <li class="overlay__avatar" data-speaking="false"><span class="overlay__halo"></span><span class="overlay__initials">DO</span></li>
+      <li class="overlay__avatar" data-speaking="unknown"><span class="overlay__halo"></span><span class="overlay__initials">AL</span></li>
+    </ul>
+  </figure>
+  <figure class="stage stage--light dim">
+    <ul class="overlay__avatars">
+      <li class="overlay__avatar" data-speaking="true"><span class="overlay__halo"></span><span class="overlay__initials">CM</span></li>
+      <li class="overlay__avatar" data-speaking="false"><span class="overlay__halo"></span><span class="overlay__initials">DO</span></li>
+      <li class="overlay__avatar" data-speaking="unknown"><span class="overlay__halo"></span><span class="overlay__initials">AL</span></li>
+    </ul>
+  </figure>
+</div>
+<div class="grid" style="margin-top:12px">
+  <figure class="panel"><figcaption><b>Fond sombre, 100 %</b> — halo 3,52:1 à 10,83:1 selon le fond
+    (§3), au-dessus du minimum non-textuel de 3:1. Seul le premier avatar parle.</figcaption></figure>
+  <figure class="panel"><figcaption><b>Fond clair, 60 %</b> — cas le plus défavorable mesuré :
+    halo 3,52:1, initiales 4,91:1. Le halo reste perceptible sans changer de jeton.</figcaption></figure>
+</div>
+
+<h2>4 · Contraste mesuré (composite α sur papier peint, pire cas)</h2>
+<div class="panel">
+<table>
+  <thead><tr><th>Élément</th><th>α=100 %</th><th>α=60 % / blanc</th><th>α=60 % / gris 50 %</th><th>α=60 % / noir</th><th>Seuil</th></tr></thead>
+  <tbody>
+    <tr><td>Initiales sur avatar (<code>text.primary</code> / <code>bg.inset</code>)</td><td class="num">17,85</td><td class="num ok">4,91</td><td class="num ok">6,65</td><td class="num ok">6,51</td><td>4,5:1</td></tr>
+    <tr><td>Nom + état (<code>text.muted</code> / <code>bg.overlay</code>)</td><td class="num">6,51</td><td class="num bad">2,78</td><td class="num bad">3,35</td><td class="num bad">2,89</td><td>4,5:1</td></tr>
+    <tr><td>Halo de parole (<code>state.speaking</code>)</td><td class="num">10,83</td><td class="num ok">3,52</td><td class="num ok">4,52</td><td class="num ok">4,28</td><td>3:1</td></tr>
+    <tr><td>Badge muet (<code>state.mute</code>, aplat)</td><td class="num">6,97</td><td class="num bad">2,73</td><td class="num ok">3,33</td><td class="num ok">3,02</td><td>3:1</td></tr>
+    <tr><td>Croix « parler » en texte (<code>text.muted</code> à 60 %)</td><td class="num">6,51</td><td class="num bad">2,78</td><td class="num bad">3,35</td><td class="num bad">2,89</td><td>4,5:1</td></tr>
+  </tbody>
+</table>
+<p class="lead" style="margin-top:10px">Deux conséquences normatives : (a) tout <b>texte</b>
+d'auxiliaire ajouté à l'état inconnu serait illisible à 60 % ⇒ R-U2 ; (b) le halo reste au-dessus de
+3:1 dans tous les cas ⇒ aucun jeton à changer quand le producteur arrivera.</p>
+</div>
+
+</body>
+</html>

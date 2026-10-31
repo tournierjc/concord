@@ -1,0 +1,96 @@
+# Configuration electron-builder — Concord
+#
+# Contraintes dures (SPEC-001 A15 / CA19 / CA20) :
+#   - publish: null  => aucun provider de publication, donc AUCUN fichier de mise à jour généré
+#                       (pas de latest-linux.yml / latest.yml) et aucune dépendance electron-updater.
+#   - aucune signature obligatoire, aucun notarize, aucun service distant.
+#   - pas de `afterSign`, pas de `publish` par cible.
+# Cibles : Linux x64 (AppImage + deb), Windows x64 (nsis).
+#
+# Note pour Régie : package.json contient encore un champ "build" (doublon de ce fichier).
+# electron-builder donne la priorité au fichier electron-builder.yml ; le champ "build" de
+# package.json devrait être supprimé pour éviter deux sources de vérité.
+
+appId: local.concord.app
+productName: Concord
+artifactName: concord-${version}-${os}-${arch}.${ext}
+
+directories:
+  output: release
+  buildResources: build
+
+# Rien d'autre que le code compilé + le manifeste.
+files:
+  - dist/**/*
+  - package.json
+  - '!**/*.map'
+  - '!**/*.md'
+  - '!**/{.git,.github,test,tests,SPECS,src,.vscode}/**'
+
+asar: true
+compression: normal
+
+# Aucune mise à jour automatique, aucun canal de publication.
+publish: null
+generateUpdatesFilesForAllChannels: false
+
+electronLanguages:
+  - fr
+  - en-US
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  category: AudioVideo
+  synopsis: Chat vocal sur réseau local, sans compte et sans cloud
+  description: >-
+    Salon vocal pour un groupe sur le même réseau local. Aucune donnée ne quitte le LAN : pas de
+    compte, pas de télémétrie, pas de mise à jour automatique.
+  desktop:
+    entry:
+      Name: Concord
+      Comment: Chat vocal sur réseau local
+      Categories: AudioVideo;Network;
+      StartupWMClass: concord
+  executableName: concord
+  maintainer: Concord <maintainers@concord.local>
+
+deb:
+  # Dépendances de runtime standard d'Electron sous Debian/Ubuntu. Aucune dépendance réseau.
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+    - libatspi2.0-0
+    - libuuid1
+    - libsecret-1-0
+  recommends: []
+
+appImage:
+  license: LICENCE
+  artifactName: concord-${version}-${arch}.AppImage
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  # Signature non exigée : la construction ne doit pas échouer faute de certificat.
+  forceCodeSigning: false
+  signAndEditExecutable: true
+  verifyUpdateCodeSignature: false
+  executableName: concord
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  differentialPackage: false
+  deleteAppDataOnUninstall: false
+  shortcutName: Concord
+  artifactName: concord-${version}-setup-${arch}.${ext}

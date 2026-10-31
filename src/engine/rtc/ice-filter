@@ -1,0 +1,122 @@
+/**
+ * src/engine/rtc/ice-filter — MIROIR JS SANS EXTENSION (artefact d'exécution).
+ *
+ * Le Banc tests/ice-filter.test.ts importe le module par un spécifieur SANS
+ * extension (« ../src/engine/rtc/ice-filter »). Le chargeur ESM de Node ne
+ * résout pas un spécifieur relatif sans extension ; ce fichier (format CJS,
+ * extension vide) rend ce spécifieur résolvable sous `node --test`.
+ *
+ * Source de vérité : src/engine/rtc/ice-filter.ts (même logique, à l'identique).
+ * Ne pas éditer isolément : toute règle change dans le .ts puis ici.
+ */
+'use strict'
+
+var MDNS_SUFFIX = '.local'
+
+function tokenize(line) {
+  return line.split(/[ \t\r\n\v\f]+/).filter(function (token) {
+    return token.length > 0
+  })
+}
+
+function stripSdpPrefix(line) {
+  return line.startsWith('a=') ? line.slice(2) : line
+}
+
+function parseIpv4(address) {
+  var parts = address.split('.')
+  if (parts.length !== 4) return null
+  var octets = []
+  for (var i = 0; i < parts.length; i++) {
+    if (!/^\d{1,3}$/.test(parts[i])) return null
+    var value = Number(parts[i])
+    if (value > 255) return null
+    octets.push(value)
+  }
+  return octets
+}
+
+function isLanIpv4(address) {
+  var octets = parseIpv4(address)
+  if (octets === null) return false
+  var a = octets[0]
+  var b = octets[1]
+  if (a === 10) return true
+  if (a === 172 && b >= 16 && b <= 31) return true
+  if (a === 192 && b === 168) return true
+  if (a === 169 && b === 254) return true
+  if (a === 127) return true
+  return false
+}
+
+function firstHextet(address) {
+  var bare = address.split('%')[0]
+  var segments = bare.split(':')
+  for (var i = 0; i < segments.length; i++) {
+    if (segments[i].length === 0) continue
+    if (!/^[0-9a-f]{1,4}$/.test(segments[i])) return null
+    return parseInt(segments[i], 16)
+  }
+  return 0
+}
+
+function isLanIpv6(address) {
+  var bare = address.toLowerCase()
+  if (bare.startsWith('[') && bare.endsWith(']')) bare = bare.slice(1, -1)
+  if (bare.length === 0) return false
+  if (!bare.includes(':')) return false
+  var withoutZone = bare.split('%')[0]
+  if (withoutZone === '::1') return true
+  if (/^0{1,4}(:0{1,4}){6}:0{0,4}1?$/.test(withoutZone)) return true
+  var hextet = firstHextet(withoutZone)
+  if (hextet === null) return false
+  if ((hextet & 0xffc0) === 0xfe80) return true
+  if ((hextet & 0xfe00) === 0xfc00) return true
+  return false
+}
+
+function isLanAddress(address) {
+  var value = address.trim()
+  if (value.length === 0) return false
+  var lower = value.toLowerCase()
+  if (lower.endsWith(MDNS_SUFFIX)) return lower.length > MDNS_SUFFIX.length
+  if (value.includes(':')) return isLanIpv6(value)
+  return isLanIpv4(value)
+}
+
+function parseCandidate(line) {
+  var tokens = tokenize(stripSdpPrefix(line))
+  if (tokens.length < 6) return null
+  if (!tokens[0].startsWith('candidate:')) return null
+  var typeIndex = tokens.indexOf('typ')
+  if (typeIndex < 0 || typeIndex + 1 >= tokens.length) return null
+  return { address: tokens[4], type: tokens[typeIndex + 1].toLowerCase() }
+}
+
+function isLanCandidate(candidate) {
+  if (candidate === null || candidate === undefined) return false
+  var line
+  if (typeof candidate === 'string') {
+    line = candidate
+  } else if (typeof candidate === 'object') {
+    var inner = candidate.candidate
+    if (typeof inner !== 'string') return false
+    line = inner
+  } else {
+    return false
+  }
+  var parsed = parseCandidate(line)
+  if (parsed === null) return false
+  if (parsed.type !== 'host') return false
+  return isLanAddress(parsed.address)
+}
+
+function filterLanCandidates(candidates) {
+  if (!Array.isArray(candidates)) return []
+  return candidates.filter(function (candidate) {
+    return isLanCandidate(candidate)
+  })
+}
+
+exports.isLanCandidate = isLanCandidate
+exports.filterLanCandidates = filterLanCandidates

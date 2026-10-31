@@ -1,0 +1,28 @@
+{
+  "//": "Compilation du process principal Electron (main + preload). Sortie CommonJS dans dist/, pour que package.json#main = dist/main/index.js soit exact. Le renderer n'est PAS compilé ici : il l'est par vite (tsconfig.json).",
+  "//rewriteRelativeImportExtensions": "Ajouté le 2026-10-31 par Carillon : src/engine/net/*.ts importent en `.ts` (exigence de tsx/node --test). Sans cette option, tsc refusait d'émettre (TS5097 x3) et build:main sortait exit=2. L'option réécrit le spécifieur à l'ÉMISSION (`./x.ts` -> `./x.js`) sans toucher aux sources. ATTENTION : cette note est un champ racine de PREMIER niveau (hors compilerOptions) — tsc ignore les clés inconnues à la racine d'un tsconfig, mais rejette (TS5025) une clé inconnue DANS compilerOptions. Aucun commentaire // ni /* */ dans ce fichier : il doit rester du JSON strict pour que require('./tsconfig.main.json') fonctionne.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "jsx": "preserve",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "rewriteRelativeImportExtensions": true,
+    "removeComments": false,
+    "sourceMap": false,
+    "declaration": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node"]
+  },
+  "include": ["src/main/**/*.ts", "src/preload/**/*.ts", "src/renderer/contract.d.ts"],
+  "exclude": ["node_modules", "dist", "src/renderer/**/*.tsx", "src/renderer/**/*.ts"]
+}
