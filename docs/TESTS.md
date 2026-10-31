@@ -12,11 +12,11 @@
 > `package.json` `be6c0e89…`, `tests/scripts-coverage.node.test.ts` `53326963…`,
 > `src/engine/README.md` `338df4a1…`, version précédente de la présente page `5085ad20…`.
 
-## TL;DR — état courant (T20, 2026-10-31T15:2xZ)
+## TL;DR — état courant (T-ROSTER, 2026-10-31T20:19Z)
 
 | Script | Commande réelle | Sortie mesurée (début UTC) | Verdict |
 |---|---|---|---|
-| `npm test` (= `npm run test:node`) | `tsx --test` sur **26 fichiers** listés à la main (plus de `npx`) | **exit=0 · 664 tests · 664 pass · 0 fail · 0 skip · 49 suites · 5 307 ms** (`15:25:09Z`) | ✅ le seul runner de recette |
+| `npm test` (= `npm run test:node`) | `tsx --test` sur **27 fichiers** listés à la main (plus de `npx`) | **exit=0 · 674 tests · 674 pass · 0 fail · 0 skip · 52 suites · 5 238 ms** (`20:19:25Z`) | ✅ le seul runner de recette |
 | `npm run typecheck` | `tsc -p tsconfig.json --noEmit` | **exit=0 · 0 ligne de sortie** (`15:28:02Z`) | ✅ |
 | `npm run build:main` | `tsc -p tsconfig.main.json` | **exit=0** (`15:28:03Z`) | ✅ |
 | `npx vite build` | vite → `dist/` | **exit=0 · built in 459 ms** (`15:28:04Z`) | ✅ |
@@ -26,8 +26,14 @@
 | `npm run dev` / `npm start` | vite dev / electron | **non exécutés** | ⚠️ non vérifié — §« Points non vérifiés » |
 
 Déterminisme : `npm test` lancé **deux fois** dans la même session, mêmes comptes —
-run 1 (`15:25:09Z`) 664 / 664 / 0 / 49 suites / 5 307 ms ; run 2 (`15:27:56Z`)
-664 / 664 / 0 / 49 suites / 5 302 ms. La durée varie, jamais les comptes.
+run 1 (`20:19:25→20:19:31Z`) 674 / 674 / 0 fail / 52 suites / 5 238 ms ; run 2
+(`20:19:3xZ`) 674 / 674 / 0 fail. La durée varie, jamais les comptes.
+
+Note T-ROSTER : la liste des participants suit la **signalisation** (`peer-joined`/`peer-left`) au
+lieu de rester figée à soi-même. `RoomBridge.addParticipant` n'avait aucun appelant et aucune méthode
+ne retirait un participant : le compte restait à 1/8, la garde « salon plein » était inatteignable et
+l'overlay n'avait personne à dessiner. `tests/roster-link.node.test.ts` (10 tests, **nouveau**) passe
+par un vrai `RoomBridge` : la chaîne message → annuaire → `lan:event:*` est vérifiée de bout en bout.
 
 **Le compte de `test:vitest` dépend de l'arbre de travail, pas du code** (mesuré T20) : `vitest run`
 n'a aucune configuration `test.exclude` dans `vite.config.ts`, il ramasse donc tout
@@ -43,8 +49,8 @@ Reproduire à l'identique (état de référence `15aed91`) :
 
 ```
 cd /work/lan-voice
-ls tests/*.test.ts | wc -l                     # 26
-env -u NODE_ENV npm test                       # attendu : exit=0, # tests 664, # fail 0
+ls tests/*.test.ts | wc -l                     # 27
+env -u NODE_ENV npm test                       # attendu : exit=0, # tests 674, # fail 0
 env -u NODE_ENV npx tsc -p tsconfig.json --noEmit  # attendu : exit=0, 0 ligne
 env -u NODE_ENV npm run build:main             # attendu : exit=0
 env -u NODE_ENV npx vite build                 # attendu : exit=0
@@ -198,7 +204,8 @@ npm run test:vitest # mesuré exit=1 (26 en arbre propre, 1710 en arbre de trava
 | `2026-10-31T01:05Z` | 13 | 378 (378 pass) | exit=0 | — | VERIF-006 (T11) |
 | `2026-10-31T01:55Z` | 14 | 523 (523 pass) | exit=0 | exit=0 | VERIF-016 (T16b) |
 | `2026-10-31T02:0xZ` | 20 | 530 (530 pass) | exit=0 | exit=0 | T19 |
-| **`2026-10-31T15:2xZ`** | **26** | **664 (664 pass)** | **exit=0** | **exit=0** | **T20 (cette page, VERIF 031)** |
+| **`2026-10-31T20:19Z`** | **27** | **674 (674 pass)** | **exit=0** | **exit=0** | **T-ROSTER (branche `fix/roster-wiring`)** |
+| `2026-10-31T15:2xZ` | 26 | 664 (664 pass) | exit=0 | exit=0 | T20 (VERIF 031) |
 
 Les lignes plus anciennes de ce tableau sont **fausses aujourd'hui** : elles décrivent un état
 daté, utile seulement pour savoir depuis quand un chiffre a cessé d'être vrai.

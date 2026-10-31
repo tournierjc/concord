@@ -162,13 +162,35 @@ export class RoomBridge {
     this.emitParticipants();
   }
 
-  /** Ajoute un participant distant (appelé par le moteur, plafonné à 8). */
-  addParticipant(participant: Omit<ParticipantDto, 'gain'> & { gain?: number }): void {
-    if (this.participants.length >= IPC_MAX_PARTICIPANTS) return;
-    if (this.participants.some((entry) => entry.id === participant.id)) return;
+  /**
+   * Ajoute un participant distant (appelé au fil de la signalisation, voir `roster-link` ; plafonné
+   * à 8). Rend `true` seulement si la liste a réellement changé — un `peer-joined` rejoué ne doit
+   * pas faire croire à une arrivée.
+   */
+  addParticipant(participant: Omit<ParticipantDto, 'gain'> & { gain?: number }): boolean {
+    if (this.participants.length >= IPC_MAX_PARTICIPANTS) return false;
+    if (this.participants.some((entry) => entry.id === participant.id)) return false;
     this.participants.push({ gain: 1, ...participant });
     this.emitParticipants();
     this.emitRoomState();
+    return true;
+  }
+
+  /**
+   * Retire un participant (départ constaté, `peer-left`). Rend `true` si la liste a changé.
+   *
+   * Le participant local ne part jamais par ce chemin : on ne quitte pas son propre salon parce
+   * qu'un pair a annoncé son départ. Sans cette méthode, un participant parti restait affiché
+   * jusqu'à la fermeture du salon — la liste ne pouvait que grandir.
+   */
+  removeParticipant(peerId: string): boolean {
+    if (peerId === SELF_ID) return false;
+    const before = this.participants.length;
+    this.participants = this.participants.filter((entry) => entry.id !== peerId);
+    if (this.participants.length === before) return false;
+    this.emitParticipants();
+    this.emitRoomState();
+    return true;
   }
 
   private updateSelf(patch: Partial<ParticipantDto>): void {

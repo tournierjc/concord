@@ -27,6 +27,7 @@ import { OverlayController, listDisplays } from './overlay-controller';
 import { registerPushToTalk, releasePushToTalk, type PttRegistration } from './ptt';
 import { appUrl, registerAppProtocol, registerAppScheme } from './renderer-protocol';
 import { RoomBridge, type BridgeEvent } from './room-bridge';
+import { applySignalToRoster } from './roster-link';
 import { createSettingsStore, type SettingsStore } from './settings-store';
 import { systemTimers } from './timers';
 import {
@@ -45,6 +46,7 @@ import {
   type OverlayPatchPayload,
   type RoomJoinPayload,
   type RoomSummaryDto,
+  type SignalIn,
   type SignalOut,
   type SpeakingSetPayload,
 } from '../shell/ipc-contract';
@@ -466,11 +468,26 @@ function startSignalingLink(roomId: string, name: string, selfId: string): void 
     host: role === 'client' && remote ? remote.host : listenHost,
     ...(role === 'client' && remote ? { port: remote.port } : {}),
     now: () => systemTimers.now(),
-    onMessage: (message) => sendEvent(IPC.eventSignal, message),
+    onMessage: (message) => {
+      // L'annuaire suit la présence de signalisation AVANT d'envoyer le message au renderer :
+      // `peer-joined`/`peer-left` étaient jusqu'ici transmis sans que personne ne tienne la liste.
+      applyRoster(message);
+      sendEvent(IPC.eventSignal, message);
+    },
   });
 }
 
 /** Ferme le tuyau (« leave » émis, sockets fermées) — idempotent. */
+/**
+ * Reporte un message de signalisation sur l'annuaire du salon (`roster-link`).
+ *
+ * L'état du salon part déjà vers le renderer depuis `RoomBridge` (`lan:event:participants` /
+ * `lan:event:room-state`) : rien d'autre à publier ici.
+ */
+function applyRoster(message: SignalIn): void {
+  applySignalToRoster(bridge, message, signalingLink?.selfId ?? null);
+}
+
 function stopSignalingLink(detail: string): void {
   const link = signalingLink;
   signalingLink = null;
