@@ -54,6 +54,7 @@ import {
 import {
   applySettingsPatch,
   defaultSettings,
+  pushToTalkAcceleratorChanged,
   resolveDisplayName,
   type Settings,
 } from '../shell/settings-schema';
@@ -133,6 +134,8 @@ async function bootstrap(): Promise<void> {
   createOverlay();
 
   registerIpcHandlers();
+  // Enregistre le raccourci PTT auprès du système ET publie un éventuel conflit : l'UI doit le dire,
+  // pas le masquer (le second envoi qui vivait en fin de `bootstrap` faisait doublon).
   registerPushToTalkShortcut();
   // Après les fenêtres : le premier `onRooms` doit trouver un renderer à qui parler.
   discovery.start();
@@ -146,8 +149,6 @@ async function bootstrap(): Promise<void> {
   screen.on('display-removed', onDisplayChange);
   screen.on('display-metrics-changed', onDisplayChange);
 
-  // Conflit de raccourci : l'UI doit le dire, pas le masquer.
-  if (ptt?.conflict) sendEvent(IPC.eventShortcutConflict, ptt.conflict);
 }
 
 // --- Fenêtres --------------------------------------------------------------------------------
@@ -281,10 +282,19 @@ function applySecurityPolicies(): void {
   if (!DEV_SERVER) registerAppProtocol(join(__dirname, '..', 'renderer'));
 }
 
+/**
+ * (Re)enregistre le raccourci push-to-talk auprès du système, et publie le conflit s'il y en a un.
+ *
+ * `releasePushToTalk()` d'abord : `globalShortcut.register` refuse un accélérateur encore tenu — le
+ * plus souvent par nous-mêmes, quand on change de raccourci en cours de session. Sans cette
+ * libération, un changement de raccourci échouait sur son propre ancien enregistrement.
+ */
 function registerPushToTalkShortcut(): void {
+  releasePushToTalk();
   ptt = registerPushToTalk(settings.talk.pttAccelerator, (active) => {
     bridge.setPushToTalk(active);
   });
+  if (ptt.conflict) sendEvent(IPC.eventShortcutConflict, ptt.conflict);
 }
 
 // --- IPC -------------------------------------------------------------------------------------
@@ -381,12 +391,17 @@ function forwardBridgeEvent(event: BridgeEvent): void {
 }
 
 function persist(next: Settings): void {
+  const previousSettings = settings;
   settings = next;
   try {
     store.save(next);
   } catch (error) {
     console.error('[réglages] écriture impossible', error);
   }
+  // Le raccourci push-to-talk est enregistré AUPRÈS DU SYSTÈME : écrire la nouvelle valeur dans les
+  // réglages ne suffit pas (l'ancien accélérateur restait réservé, le nouveau ne répondait pas
+  // jusqu'au redémarrage). On ne ré-enregistre que s'il a changé.
+  if (pushToTalkAcceleratorChanged(previousSettings, next)) registerPushToTalkShortcut();
   sendEvent(IPC.eventSettingsChanged, { settings });
   // Un réglage d'overlay (taille, échelle, écran) change la géométrie : il faut la republier, sinon
   // le renderer de l'overlay garde l'ancienne. `syncOverlayGeometry` fait l'apply + la publication.

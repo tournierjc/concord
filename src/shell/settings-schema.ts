@@ -667,6 +667,18 @@ export function applySettingsPatch(current: Settings, patch: unknown): SettingsR
   return parseSettings(merged);
 }
 
+/**
+ * Vrai si deux réglages diffèrent par le raccourci push-to-talk.
+ *
+ * Le raccourci n'est pas un réglage mou : il est réservé auprès du SYSTÈME (`globalShortcut`). Écrire
+ * la nouvelle valeur dans les réglages ne suffit donc pas — l'ancien accélérateur restait réservé et
+ * le nouveau ne répondait pas jusqu'au redémarrage. Cette fonction dit quand il faut réellement
+ * ré-enregistrer, et laisse tous les autres réglages (overlay, audio, seuil de bruit…) tranquilles.
+ */
+export function pushToTalkAcceleratorChanged(previous: Settings, next: Settings): boolean {
+  return previous.talk.pttAccelerator !== next.talk.pttAccelerator;
+}
+
 /** Sérialise des réglages validés (utile pour l'écriture disque, tests de round-trip). */
 export function serializeSettings(settings: Settings): string {
   return `${JSON.stringify(settings, null, 2)}\n`;
