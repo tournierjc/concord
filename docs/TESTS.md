@@ -12,11 +12,11 @@
 > `package.json` `be6c0e89…`, `tests/scripts-coverage.node.test.ts` `53326963…`,
 > `src/engine/README.md` `338df4a1…`, version précédente de la présente page `5085ad20…`.
 
-## TL;DR — état courant (T-TOKENS, 2026-10-31T20:48Z)
+## TL;DR — état courant (T-PARITE, 2026-10-31T20:50Z)
 
 | Script | Commande réelle | Sortie mesurée (début UTC) | Verdict |
 |---|---|---|---|
-| `npm test` (= `npm run test:node`) | `tsx --test` sur **27 fichiers** listés à la main (plus de `npx`) | **exit=0 · 674 tests · 674 pass · 0 fail · 0 skip · 49 suites · 5 220 ms** (`20:48:14Z`) | ✅ le seul runner de recette |
+| `npm test` (= `npm run test:node`) | `tsx --test` sur **27 fichiers** listés à la main (plus de `npx`) | **exit=0 · 668 tests · 668 pass · 0 fail · 0 skip · 49 suites · 5 225 ms** (`20:50:54Z`) | ✅ le seul runner de recette |
 | `npm run typecheck` | `tsc -p tsconfig.json --noEmit` | **exit=0 · 0 ligne de sortie** (`15:28:02Z`) | ✅ |
 | `npm run build:main` | `tsc -p tsconfig.main.json` | **exit=0** (`15:28:03Z`) | ✅ |
 | `npx vite build` | vite → `dist/` | **exit=0 · built in 459 ms** (`15:28:04Z`) | ✅ |
@@ -25,19 +25,16 @@
 | `npx electron-builder --linux deb` | idem, cible `deb` | **exit=1 · `Exec format error`** (`15:28:23Z`) — `fpm` embarqué est un binaire **x86** | ❌ limitation d'hôte (arm64), cible **non vérifiée** |
 | `npm run dev` / `npm start` | vite dev / electron | **non exécutés** | ⚠️ non vérifié — §« Points non vérifiés » |
 
-Note T-TOKENS : `src/renderer/theme.ts` injecte les jetons de `design/tokens.json` en variables CSS,
-et `styles.css` en emploie six qui **n'existent dans aucun jeton** (`--color-state-warning`,
-`--color-state-danger`, `--color-state-danger-subtle`, `--color-state-success` ; les jetons s'appellent
-`state.warn`, `state.mute` « micro coupé, erreur », `state.muteSubtle` « fond de bandeau d'erreur »,
-`state.ok`). Une variable inconnue ne casse rien : `var(--x)` retombe sur la couleur héritée — le
-message d'erreur n'était donc pas rouge. Trois autres noms ne correspondaient pas non plus aux noms
-injectés (`--layout-list-row`, `--layout-row-avatar-size`, `--motion-fast`), et surtout les échelles
-`layout` et `component` étaient injectées **sans unité** (`--component-hairline: 1`), ce qui rend
-`border`, `padding` et `height` **invalides au calcul** : bordures, paddings et hauteurs de bouton
-retombaient sur zéro (mesuré dans Chromium : `border 0px none`, `padding 0px`, bouton 21,5 px ;
-après correctif : `1px solid`, `12px`, `32px`). `tests/design-tokens.node.test.ts` (10 tests,
-**nouveau**) vérifie que toute variable employée est définie — en lisant les noms du générateur réel
-(`tokensStyleSheet()`), jamais une liste recopiée — et que les échelles de longueur portent leur unité.
+Note T-PARITE : `src/preload/PARITE.md` annonçait « 17 canaux (10 invoke + 7 events) » et quatre écarts
+(« canon non câblé : 4 events sur 7 », `eventSpeaking` mort, trois littéraux au lieu de `IPC.*`). Ces
+écarts sont **corrigés depuis** (le discriminant du pont est la VALEUR du canon, `forwardBridgeEvent`
+compare les valeurs sans caster, `eventSpeaking` a été retiré au profit de `eventSpeakingSet`), mais le
+document les présentait toujours comme l'état courant. Il porte désormais un « État mesuré au
+2026-10-31 » (22 canaux : 13 invoke + 9 événements, aucun manquant, aucun en trop) et conserve l'ancien
+constat sous un titre « Historique ». `tests/preload-parity-doc.node.test.ts` (4 tests, **nouveau**)
+vérifie que les comptes annoncés sont ceux du contrat et que le preload consomme tous les événements du
+canon — un document de parité non mesuré redevient faux au premier canal ajouté. Empreinte `package.json`
+à cette re-mesure : `sha256 0594d333…`.
 
 Déterminisme : `npm test` lancé **deux fois** dans la même session, mêmes comptes —
 run 1 (`15:25:09Z`) 664 / 664 / 0 / 49 suites / 5 307 ms ; run 2 (`15:27:56Z`)
@@ -212,7 +209,7 @@ npm run test:vitest # mesuré exit=1 (26 en arbre propre, 1710 en arbre de trava
 | `2026-10-31T01:05Z` | 13 | 378 (378 pass) | exit=0 | — | VERIF-006 (T11) |
 | `2026-10-31T01:55Z` | 14 | 523 (523 pass) | exit=0 | exit=0 | VERIF-016 (T16b) |
 | `2026-10-31T02:0xZ` | 20 | 530 (530 pass) | exit=0 | exit=0 | T19 |
-| **`2026-10-31T20:48Z`** | **27** | **674 (674 pass)** | **exit=0** | **exit=0** | **T-TOKENS (branche `fix/design-tokens`)** |
+| **`2026-10-31T20:50Z`** | **27** | **668 (668 pass)** | **exit=0** | **exit=0** | **T-PARITE (branche `fix/docs-truth`)** |
 | `2026-10-31T15:2xZ` | 26 | 664 (664 pass) | exit=0 | exit=0 | T20 (VERIF 031) |
 
 Les lignes plus anciennes de ce tableau sont **fausses aujourd'hui** : elles décrivent un état
