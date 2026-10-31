@@ -124,6 +124,34 @@ export function defaultSettings(): Settings {
   };
 }
 
+/**
+ * Nom d'affichage d'un participant, dérivé des réglages (SPEC-001 A6).
+ *
+ * A6 : « Pseudo choisi localement (défaut = prénom du compte OS, modifiable) ». Le schéma de
+ * réglages garde `nickname` vide par défaut — un défaut lu sur la machine n'a rien à faire dans un
+ * module pur —, donc c'est l'appelant (le main, qui connaît `os.userInfo()`) qui fournit le nom du
+ * compte. Fonction pure : même entrée, même sortie, testable sans machine.
+ *
+ * Retourne toujours une chaîne non vide : un participant sans nom serait un trou dans la liste.
+ */
+export function resolveDisplayName(nickname: string, osUserName: string): string {
+  const chosen = typeof nickname === 'string' ? nickname.trim() : '';
+  if (chosen.length > 0) return truncateDisplayName(chosen);
+  const fallback = typeof osUserName === 'string' ? osUserName.trim() : '';
+  if (fallback.length > 0) return truncateDisplayName(fallback);
+  return 'Concord';
+}
+
+/** 32 caractères, comme la validation du pseudo (`app.nickname.error.tooLong`). */
+const MAX_DISPLAY_NAME_LENGTH = 32;
+
+function truncateDisplayName(value: string): string {
+  // `Array.from` : on coupe en points de code, jamais au milieu d'une paire de substitution.
+  const points = Array.from(value);
+  if (points.length <= MAX_DISPLAY_NAME_LENGTH) return value;
+  return points.slice(0, MAX_DISPLAY_NAME_LENGTH).join('').trim();
+}
+
 // --- Résultats et erreurs --------------------------------------------------------------------
 
 export type SettingsErrorCode =

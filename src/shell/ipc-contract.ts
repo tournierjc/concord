@@ -183,7 +183,16 @@ export interface SettingsChangedDto {
 }
 
 export interface RoomJoinPayload {
+  /**
+   * Identifiant du salon. Salon repéré sur le LAN : `hôte:port` (dérivé de l'annonce mDNS, voir
+   * `room-discovery`). Salon créé localement : le nom saisi par la personne qui le crée.
+   */
   roomId: string;
+  /**
+   * Nom d'affichage du SALON (en-tête de l'écran de salon, liste des salons). Ce champ ne porte
+   * jamais l'identité d'un participant : le nom du participant local vient des réglages côté main
+   * (SPEC-001 A6, `resolveDisplayName`).
+   */
   name: string;
 }
 

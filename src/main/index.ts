@@ -16,7 +16,7 @@
  */
 
 import { app, BrowserWindow, ipcMain, screen, session } from 'electron';
-import { networkInterfaces } from 'node:os';
+import { networkInterfaces, userInfo } from 'node:os';
 import { join } from 'node:path';
 
 import { buildCsp } from './csp';
@@ -48,7 +48,12 @@ import {
   type SignalOut,
   type SpeakingSetPayload,
 } from '../shell/ipc-contract';
-import { applySettingsPatch, defaultSettings, type Settings } from '../shell/settings-schema';
+import {
+  applySettingsPatch,
+  defaultSettings,
+  resolveDisplayName,
+  type Settings,
+} from '../shell/settings-schema';
 
 /**
  * Serveur de développement Vite (boucle locale uniquement, port 5173). Jamais défini en production :
@@ -272,6 +277,15 @@ function registerPushToTalkShortcut(): void {
 }
 
 // --- IPC -------------------------------------------------------------------------------------
+
+/** Nom du compte OS, dernière ressource de A6 avant le défaut fixe. `userInfo()` peut lever. */
+function osUserName(): string {
+  try {
+    return userInfo().username;
+  } catch {
+    return '';
+  }
+}
 
 function isTrustedSender(url: string | undefined): boolean {
   if (!url) return false;
@@ -505,7 +519,9 @@ function registerIpcHandlers(): void {
     [IPC.roomsDiscover]: () => discovery.list(),
     [IPC.roomJoin]: (payload: unknown) => {
       const join = expectPayload(IPC.roomJoin, payload, isRoomJoinPayload);
-      const state = bridge.join(join);
+      // `join.name` est le nom du SALON ; le nom du participant local vient des réglages (A6),
+      // jamais du champ qui décrit le salon.
+      const state = bridge.join(join, resolveDisplayName(settings.nickname, osUserName()));
       // Salon refusé (plafond atteint) : aucun tuyau à ouvrir.
       if (state.roomId !== null && state.selfId !== null) {
         startSignalingLink(state.roomId, join.name, state.selfId);

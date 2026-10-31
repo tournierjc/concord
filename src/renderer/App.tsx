@@ -156,10 +156,12 @@ export function App(): JSX.Element {
   );
 
   const joinRoom = useCallback(
-    async (roomId: string) => {
+    async (roomId: string, roomName: string) => {
       if (!settings) return;
       try {
-        const state = await api.joinRoom({ roomId, name: settings.nickname || roomId });
+        // `name` décrit le SALON : c'est le nom affiché en en-tête. Le nom du participant, lui,
+        // vient des réglages côté main (A6) — l'envoyer ici affichait le pseudo comme nom de salon.
+        const state = await api.joinRoom({ roomId, name: roomName });
         setRoom(state);
         setScreen(state.roomId ? 'room' : 'rooms');
         setError(null);
@@ -227,7 +229,7 @@ export function App(): JSX.Element {
         <RoomList
           locale={locale}
           discovery={discovery}
-          onJoin={joinRoom}
+          onJoin={(roomId, roomName) => void joinRoom(roomId, roomName)}
           onRefresh={() => void refreshRooms()}
         />
       ) : (
@@ -262,7 +264,7 @@ interface RoomListProps {
   locale: Locale;
   /** État réel de la découverte : `rooms` vient de `discoverRooms()` / `onRoomsDiscovered`. */
   discovery: DiscoveryState;
-  onJoin: (roomId: string) => void;
+  onJoin: (roomId: string, roomName: string) => void;
   onRefresh: () => void;
 }
 
@@ -328,7 +330,7 @@ export function RoomList({ locale, discovery, onJoin, onRefresh }: RoomListProps
               <button
                 type="button"
                 className="button"
-                onClick={() => onJoin(room.roomId)}
+                onClick={() => onJoin(room.roomId, room.roomName)}
               >
                 {room.participantCount >= MAX_ROOM_PARTICIPANTS
                   ? t('room.row.full')
@@ -357,7 +359,7 @@ export function RoomList({ locale, discovery, onJoin, onRefresh }: RoomListProps
           type="button"
           className="button button--primary"
           disabled={draftName.trim().length === 0}
-          onClick={() => onJoin(draftName.trim())}
+          onClick={() => onJoin(draftName.trim(), draftName.trim())}
         >
           {t('room.create.confirm')}
         </button>

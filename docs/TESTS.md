@@ -12,29 +12,29 @@
 > `package.json` `be6c0e89…`, `tests/scripts-coverage.node.test.ts` `53326963…`,
 > `src/engine/README.md` `338df4a1…`, version précédente de la présente page `5085ad20…`.
 
-## TL;DR — état courant (T-PRELOAD, 2026-10-31T20:07Z)
+## TL;DR — état courant (T-ROOMNAME, 2026-10-31T20:11Z)
 
 | Script | Commande réelle | Sortie mesurée (début UTC) | Verdict |
 |---|---|---|---|
-| `npm test` (= `npm run test:node`) | `tsx --test` sur **27 fichiers** listés à la main (plus de `npx`) | **exit=0 · 669 tests · 669 pass · 0 fail · 0 skip · 50 suites · 5 225 ms** (`20:07:25Z`) | ✅ le seul runner de recette |
+| `npm test` (= `npm run test:node`) | `tsx --test` sur **27 fichiers** listés à la main (plus de `npx`) | **exit=0 · 678 tests · 678 pass · 0 fail · 0 skip · 53 suites · 5 208 ms** (`20:11:21Z`) | ✅ le seul runner de recette |
 | `npm run typecheck` | `tsc -p tsconfig.json --noEmit` | **exit=0 · 0 ligne de sortie** (`15:28:02Z`) | ✅ |
-| `npm run build:main` | `tsc -p tsconfig.main.json` (main **seul** : le preload n'est plus émis ici) | **exit=0** (`20:07:42Z`) | ✅ |
-| `npm run build:preload` | `node scripts/build-preload.mjs` (esbuild, `electron` seul externe) | **exit=0 · `dist/preload/index.js` 25 853 o · 1 seul `require` (`electron`) · 0,09 s** (`20:07:42Z`) | ✅ indispensable : un preload `tsc` multi-fichiers ne se charge pas sous `sandbox: true` |
+| `npm run build:main` | `tsc -p tsconfig.main.json` | **exit=0** (`15:28:03Z`) | ✅ |
 | `npx vite build` | vite → `dist/` | **exit=0 · built in 459 ms** (`15:28:04Z`) | ✅ |
-| `npm run test:vitest` | `vitest run` | **exit=1 · 27 fichiers en échec · « Tests no tests » · 3 s** (`20:07:51→20:07:54Z`, arbre de travail) — compte dépendant de l'arbre, écart expliqué ci-dessous | ❌ inutilisable ici (rouge par construction) |
+| `npm run test:vitest` | `vitest run` | **exit=1 · 26 fichiers en échec · « Tests no tests » · 1 s** (`15:27:47Z`, clone propre) — **1710 fichiers** dans l'arbre de travail (`15:25:48Z`), écart expliqué ci-dessous | ❌ inutilisable ici (rouge par construction) |
 | `npx electron-builder --linux AppImage` | electron-builder 24.13.3 | **exit=0 · 96 634 946 o** (`15:28:41Z → 15:28:44Z`), aucun `latest-linux.yml` | ✅ (depuis le retrait de `appImage.license`) |
 | `npx electron-builder --linux deb` | idem, cible `deb` | **exit=1 · `Exec format error`** (`15:28:23Z`) — `fpm` embarqué est un binaire **x86** | ❌ limitation d'hôte (arm64), cible **non vérifiée** |
 | `npm run dev` / `npm start` | vite dev / electron | **non exécutés** | ⚠️ non vérifié — §« Points non vérifiés » |
 
-Déterminisme : `npm test` lancé **deux fois** dans la même session sur l'arbre courant, mêmes
-comptes — run 1 (`20:07:25Z`) 669 / 669 / 0 fail / 50 suites / 5 225 ms ; run 2
-(`20:07:42→20:07:48Z`) 669 / 669 / 0 fail. La durée varie, jamais les comptes.
+Déterminisme : `npm test` lancé **deux fois** dans la même session, mêmes comptes —
+run 1 (`20:11:21→20:11:26Z`) 678 / 678 / 0 fail / 53 suites / 5 208 ms ; run 2
+(`20:11:40→20:11:50Z`) 678 / 678 / 0 fail. Le second run a suivi `sh VERIF/run-all.sh` (`20:11:50Z`,
+`LAN-VOICE VERIF RESULT=PASS`). La durée varie, jamais les comptes.
 
-Note T-PRELOAD : `tests/preload-bundle.node.test.ts` (5 tests) **exécute** `scripts/build-preload.mjs`
-vers un répertoire temporaire et mesure l'artefact produit — `electron` seul module requis, contrat
-IPC inliné (chaque canal `lan:…` du contrat est présent dans la sortie), pont exposé et gelé. Ce
-qu'il ne prouve pas : qu'un vrai renderer Electron charge ce preload (aucun binaire Electron
-exécutable sur cet hôte, cf. §« Points non vérifiés »).
+Note T-ROOMNAME : `tests/room-bridge.node.test.ts` (10 tests, **nouveau**) couvre l'annuaire de salon
+du main — module qui n'avait aucun test alors qu'il tient l'état affiché (nom du salon, participants,
+mute/deafen/PTT, gain) et qu'il émet les `lan:event:*`. Il fige notamment l'émission par **valeur** de
+canal (le bug des noms de clé émettait des événements que `guardPayload` refusait en silence) et le
+fait que `payload.name` décrit le SALON, plus le participant.
 
 **Le compte de `test:vitest` dépend de l'arbre de travail, pas du code** (mesuré T20) : `vitest run`
 n'a aucune configuration `test.exclude` dans `vite.config.ts`, il ramasse donc tout
@@ -51,10 +51,9 @@ Reproduire à l'identique (état de référence `15aed91`) :
 ```
 cd /work/lan-voice
 ls tests/*.test.ts | wc -l                     # 27
-env -u NODE_ENV npm test                       # attendu : exit=0, # tests 669, # fail 0
+env -u NODE_ENV npm test                       # attendu : exit=0, # tests 678, # fail 0
 env -u NODE_ENV npx tsc -p tsconfig.json --noEmit  # attendu : exit=0, 0 ligne
-env -u NODE_ENV npm run build:main             # attendu : exit=0 (main seul)
-env -u NODE_ENV npm run build:preload          # attendu : exit=0, dist/preload/index.js autonome
+env -u NODE_ENV npm run build:main             # attendu : exit=0
 env -u NODE_ENV npx vite build                 # attendu : exit=0
 env -u NODE_ENV npm run test:vitest            # attendu : exit=1 (26 fichiers en arbre propre,
                                                #   1710 si VERIF/raw et .verif-t*/ sont présents)
@@ -206,7 +205,7 @@ npm run test:vitest # mesuré exit=1 (26 en arbre propre, 1710 en arbre de trava
 | `2026-10-31T01:05Z` | 13 | 378 (378 pass) | exit=0 | — | VERIF-006 (T11) |
 | `2026-10-31T01:55Z` | 14 | 523 (523 pass) | exit=0 | exit=0 | VERIF-016 (T16b) |
 | `2026-10-31T02:0xZ` | 20 | 530 (530 pass) | exit=0 | exit=0 | T19 |
-| **`2026-10-31T20:07Z`** | **27** | **669 (669 pass)** | **exit=0** | **exit=0** | **T-PRELOAD (branche `fix/preload-bundle`)** |
+| **`2026-10-31T20:11Z`** | **27** | **678 (678 pass)** | **exit=0** | **exit=0** | **T-ROOMNAME (branche `fix/room-name-semantics`)** |
 | `2026-10-31T15:2xZ` | 26 | 664 (664 pass) | exit=0 | exit=0 | T20 (VERIF 031) |
 
 Les lignes plus anciennes de ce tableau sont **fausses aujourd'hui** : elles décrivent un état

@@ -78,22 +78,30 @@ export class RoomBridge {
     };
   }
 
-  /** Rejoint un salon. Le 9ᵉ participant est refusé, avec une clé de message pour l'UI. */
-  join(payload: RoomJoinPayload): RoomStateDto {
+  /**
+   * Rejoint un salon. Le 9ᵉ participant est refusé, avec une clé de message pour l'UI.
+   *
+   * `payload.name` est le nom du SALON tel qu'il doit s'afficher ; le nom du participant local
+   * arrive séparément (`selfName`, dérivé des réglages par le main — SPEC-001 A6). Les deux
+   * venaient auparavant du même champ : l'en-tête du salon affichait donc le pseudo de la personne
+   * qui venait de le rejoindre.
+   */
+  join(payload: RoomJoinPayload, selfName: string): RoomStateDto {
     if (this.participants.length >= IPC_MAX_PARTICIPANTS) {
       this.notice = 'room.row.fullReason';
       this.emitRoomState();
       return this.getRoomState();
     }
+    const roomName = payload.name.trim();
     this.roomId = payload.roomId;
-    this.roomName = payload.name;
+    this.roomName = roomName.length > 0 ? roomName : payload.roomId;
     this.phase = 'connected';
     this.notice = null;
     this.selfIdLocal = SELF_ID;
     this.participants = [
       {
         id: SELF_ID,
-        name: payload.name,
+        name: selfName,
         muted: this.muted,
         deafened: this.deafened,
         gain: 1,
