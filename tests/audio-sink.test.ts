@@ -168,3 +168,121 @@ test('documentSinkHost délègue création, ajout et retrait au document fourni'
   registry.remove('p5');
   assert.equal(removedNodes.length, 1);
 });
+
+
+/* ------------------------------------------------------------------ */
+/* Retrait : UN seul geste, et un DOM qui refuse ne bloque pas les autres */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Faux DOM qui se comporte comme Chromium : `element.remove()` détache le nœud, et un `removeChild`
+ * sur un nœud déjà détaché lève `NotFoundError`. C'est exactement ce que le faux hôte ci-dessus ne
+ * reproduisait pas — d'où un défaut passé inaperçu : deux retraits à la suite.
+ */
+function chromiumLikeHost(): {
+  host: SinkHost;
+  nodes: FakeNode[];
+  body: Set<SinkElement>;
+  hostRemovals: () => number;
+} {
+  const nodes: FakeNode[] = [];
+  const body = new Set<SinkElement>();
+  let hostRemovals = 0;
+  const host: SinkHost = {
+    createElement(tagName: string): FakeNode {
+      assert.equal(tagName, 'audio');
+      const node: FakeNode = {
+        srcObject: null,
+        autoplay: false,
+        attrs: {},
+        removed: false,
+        plays: 0,
+        playRejects: false,
+        setAttribute(name: string, value: string): void {
+          node.attrs[name] = value;
+        },
+        remove(): void {
+          node.removed = true;
+          body.delete(node);
+        },
+      };
+      nodes.push(node);
+      return node;
+    },
+    append(node: SinkElement): void {
+      body.add(node);
+    },
+    remove(node: SinkElement): void {
+      hostRemovals += 1;
+      if (!body.has(node)) {
+        // Comme Chromium : retirer un nœud qui n'est plus enfant du parent lève.
+        throw new Error("NotFoundError: Failed to execute 'removeChild' on 'Node'");
+      }
+      body.delete(node);
+    },
+  };
+  return { host, nodes, body, hostRemovals: () => hostRemovals };
+}
+
+test('remove ne retire le nœud QU’UNE fois (pas de removeChild après element.remove)', () => {
+  const harness = chromiumLikeHost();
+  const registry = createAudioSinkRegistry(harness.host);
+  registry.attach('p2', { id: 'flux' });
+
+  registry.remove('p2');
+
+  assert.equal(harness.nodes[0]?.removed, true, 'l’élément quitte le document');
+  assert.equal(harness.body.size, 0, 'plus aucun enfant du body');
+  assert.equal(
+    harness.hostRemovals(),
+    0,
+    'l’hôte ne doit PAS être sollicité après un element.remove() réussi',
+  );
+});
+
+test('clear() détruit toutes les sorties, même quand le retrait passe par l’hôte', () => {
+  const harness = chromiumLikeHost();
+  // Éléments sans `remove()` : le retrait passe alors par `host.remove` (chemin de `documentSinkHost`).
+  const host: SinkHost = {
+    createElement: () => ({ srcObject: null, autoplay: false }),
+    append: (node) => harness.body.add(node),
+    remove: harness.host.remove,
+  };
+  const registry = createAudioSinkRegistry(host);
+  registry.ensure('p2');
+  registry.ensure('p3');
+  assert.equal(harness.body.size, 2);
+
+  registry.clear();
+
+  assert.equal(registry.list().length, 0, 'le registre est vidé');
+  assert.equal(harness.body.size, 0, 'aucun enfant ne reste accroché');
+  assert.equal(harness.hostRemovals(), 2, 'un retrait par élément, pas deux');
+});
+
+test('un DOM qui refuse un retrait n’interrompt pas clear() (le micro passe avant le DOM)', () => {
+  const removed: string[] = [];
+  const host: SinkHost = {
+    createElement(tagName: string): SinkElement {
+      const node: SinkElement = { srcObject: null, autoplay: false };
+      Object.defineProperty(node, 'peer', { value: tagName, enumerable: false });
+      return node;
+    },
+    append(): void {
+      /* sans objet ici */
+    },
+    remove(node: SinkElement): void {
+      const label = String((node as { peer?: string }).peer ?? '');
+      removed.push(label);
+      if (removed.length === 1) throw new Error('NotFoundError: removeChild');
+    },
+  };
+  const registry = createAudioSinkRegistry(host);
+  registry.ensure('a');
+  registry.ensure('b');
+  registry.ensure('c');
+
+  assert.doesNotThrow(() => registry.clear(), 'la sortie de salon ne peut pas être annulée par le DOM');
+  assert.equal(removed.length, 3, 'les trois retraits sont tentés');
+  assert.equal(registry.list().length, 0, 'le registre est vidé quoi qu’il arrive');
+});
