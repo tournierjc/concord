@@ -16,7 +16,6 @@ import { useEffect, useState } from 'react';
 
 import {
   DEFAULT_PTT_ACCELERATOR,
-  MAX_ROOM_PARTICIPANTS,
   OVERLAY_OPACITY_MAX,
   OVERLAY_OPACITY_MIN,
   SIGNALING_PORT_DEFAULT,
@@ -25,12 +24,20 @@ import {
   type TalkMode,
 } from '../shell/settings-schema';
 import { isValidAccelerator, normalizeAccelerator } from '../shell/settings-schema';
+import type { RoomStateDto } from '../shell/ipc-contract';
 import { createTranslator, type Locale } from './i18n';
 import { lanApi } from './api';
 
 export interface SettingsPanelProps {
   settings: Settings;
   locale: Locale;
+  /**
+   * L'état du salon, tel que le process principal l'a publié : c'est la SEULE source du port de
+   * signalisation (celui qu'on écoute, ou celui lu dans l'annonce de l'hôte) et de l'identité
+   * éphémère de session. Rien n'est déduit ici des réglages : SPEC-002 D1 interdit d'afficher un port
+   * qu'on n'a pas lu, et `settings.network.signalingPort` n'est pas le port utilisé.
+   */
+  session: RoomStateDto;
   onChange: (patch: Partial<Settings>) => Promise<void> | void;
   onClose: () => void;
 }
@@ -61,7 +68,7 @@ function acceleratorFromEvent(event: React.KeyboardEvent<HTMLInputElement>): str
   return [...modifiers, normalizedKey].join('+');
 }
 
-export function SettingsPanel({ settings, locale, onChange, onClose }: SettingsPanelProps): JSX.Element {
+export function SettingsPanel({ settings, locale, session, onChange, onClose }: SettingsPanelProps): JSX.Element {
   const t = createTranslator(locale);
   const [inputs, setInputs] = useState<DeviceOption[]>([]);
   const [outputs, setOutputs] = useState<DeviceOption[]>([]);
@@ -197,7 +204,7 @@ export function SettingsPanel({ settings, locale, onChange, onClose }: SettingsP
           <label className="field">
             <span className="field__label">
               {t('settings.vad.threshold')} —{' '}
-              {t('settings.vad.thresholdValue', { value: settings.talk.vadThresholdDb })}
+              {t('settings.vad.thresholdValue', { db: settings.talk.vadThresholdDb })}
             </span>
             <input
               type="range"
@@ -239,7 +246,7 @@ export function SettingsPanel({ settings, locale, onChange, onClose }: SettingsP
                   talkPatch({ pttAccelerator: DEFAULT_PTT_ACCELERATOR });
                 }}
               >
-                {t('settings.ptt.reset')}
+                {t('settings.ptt.reset', { shortcut: DEFAULT_PTT_ACCELERATOR })}
               </button>
             </div>
             <input
@@ -348,13 +355,36 @@ export function SettingsPanel({ settings, locale, onChange, onClose }: SettingsP
           </h3>
           <p className="field">
             <span className="field__label">{t('settings.network.port')}</span>
-            <span className="field__value">{settings.network.signalingPort}</span>
+            <span className="field__value">
+              {session.signalingPort === null
+                ? t('common.none')
+                : String(session.signalingPort)}
+            </span>
             <span className="field__help">{t('settings.network.externalHelp')}</span>
           </p>
+          {session.signalingPort !== null &&
+          session.signalingPort !== SIGNALING_PORT_DEFAULT ? (
+            <p className="field__help field__help--warn">
+              {t('settings.network.portBumped', {
+                default: String(SIGNALING_PORT_DEFAULT),
+                port: String(session.signalingPort),
+              })}
+            </p>
+          ) : null}
           <p className="field field--safe">{t('settings.network.externalNone')}</p>
-          <p className="field__help">
-            {t('settings.network.identity')} : {settings.nickname || t('common.none')} ·{' '}
-            {MAX_ROOM_PARTICIPANTS} · {SIGNALING_PORT_DEFAULT}
+          {/*
+            « Identité de session » = l'identifiant ÉPHÉMÈRE attribué par la signalisation
+            (`RoomStateDto.selfId`), pas le pseudo : le pseudo est le nom affiché sur le réseau (déjà
+            dans la barre de titre), et SPEC-001 A5/A6 dit que l'identité d'un pair est son identifiant
+            d'instance éphémère. La ligne affichait un pseudo suivi de deux CONSTANTES (8, 47821)
+            présentées comme des faits de session.
+          */}
+          <p className="field">
+            <span className="field__label">{t('settings.network.identity')}</span>
+            <span className="field__value">
+              {session.selfId === null ? t('common.none') : session.selfId}
+            </span>
+            <span className="field__help">{t('settings.network.identityHelp')}</span>
           </p>
         </section>
       </div>

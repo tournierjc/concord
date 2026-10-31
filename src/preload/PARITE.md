@@ -1,4 +1,29 @@
-# T8 — Parité contrat ↔ preload (lecture seule)
+# T8 — Parité contrat ↔ preload
+
+## État mesuré au 2026-10-31 (cette section remplace les constats ci-dessous)
+
+Compté sur `src/shell/ipc-contract.ts` (`IPC`, `INVOKE_CHANNELS`, `EVENT_CHANNELS`) et
+`src/preload/index.ts` (9 abonnements, `subscribe` l.46) :
+
+- **22 canaux** dans le contrat : **13 invoke** (`settingsGet`, `settingsSet`, `settingsOpen`,
+  `roomJoin`, `roomLeave`, `roomsDiscover`, `controlSetMute`, `controlSetDeafen`,
+  `controlSetPushToTalk`, `controlSetGain`, `overlaySet`, `speakingSet`, `signalSend`) et
+  **9 événements** (`eventParticipants`, `eventRoomState`, `eventRoomsDiscovered`,
+  `eventControlState`, `eventSettingsChanged`, `eventOverlayGeometry`, `eventShortcutConflict`,
+  `eventSignal`, `eventSpeakingSet`).
+- Exposés au renderer : les 13 invoke + les 9 événements. Manquants : aucun. En trop : aucun.
+- Les quatre écarts décrits plus bas sont **corrigés** :
+  1. `room-bridge.ts` type son discriminant sur la **VALEUR** du canon
+     (`{ channel: typeof IPC.eventRoomState; payload: RoomStateCore }`) et émet `IPC.eventRoomState` :
+     plus de nom de clé sur le fil, donc plus de refus de `guardPayload` ;
+  2. `eventSpeaking` **n'existe plus** : retiré du contrat (commentaire « AD-17 D1 ») et remplacé par
+     `eventSpeakingSet` (« AD-19 D1 / AD-20 D1 »), émis par `index.ts` vers la fenêtre d'overlay ;
+  3. `forwardBridgeEvent` (`index.ts`) compare désormais les **valeurs** (`IPC.eventParticipants`,
+     `IPC.eventRoomState`) et ne caste plus rien — le commentaire du fichier dit pourquoi (un littéral
+     repris du nom de clé rendait le branchement mort) ;
+  4. aucun canal hors canon : `ipcMain.handle` reste sur une liste fermée.
+
+## Historique — constat T8 (conservé tel quel, il décrit l'état d'alors)
 
 Source : `src/shell/ipc-contract.ts` (grep ciblé, jamais lu en entier) vs `src/preload/index.ts` (lu, 4,1 Ko).
 

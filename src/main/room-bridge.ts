@@ -17,7 +17,7 @@ import type {
   ParticipantDto,
   RoomJoinPayload,
   RoomPhase,
-  RoomStateDto,
+  RoomStateCore,
   TalkModeDto,
 } from '../shell/ipc-contract';
 
@@ -27,7 +27,7 @@ import type {
  */
 export type BridgeEvent =
   | { channel: typeof IPC.eventParticipants; payload: ParticipantDto[] }
-  | { channel: typeof IPC.eventRoomState; payload: RoomStateDto }
+  | { channel: typeof IPC.eventRoomState; payload: RoomStateCore }
   | { channel: typeof IPC.eventControlState; payload: ControlStateDto };
 
 export type BridgeEmitter = (event: BridgeEvent) => void;
@@ -53,7 +53,7 @@ export class RoomBridge {
     this.emit = emit;
   }
 
-  getRoomState(): RoomStateDto {
+  getRoomState(): RoomStateCore {
     return {
       roomId: this.roomId,
       roomName: this.roomName,
@@ -78,22 +78,30 @@ export class RoomBridge {
     };
   }
 
-  /** Rejoint un salon. Le 9ᵉ participant est refusé, avec une clé de message pour l'UI. */
-  join(payload: RoomJoinPayload): RoomStateDto {
+  /**
+   * Rejoint un salon. Le 9ᵉ participant est refusé, avec une clé de message pour l'UI.
+   *
+   * `payload.name` est le nom du SALON tel qu'il doit s'afficher ; le nom du participant local
+   * arrive séparément (`selfName`, dérivé des réglages par le main — SPEC-001 A6). Les deux
+   * venaient auparavant du même champ : l'en-tête du salon affichait donc le pseudo de la personne
+   * qui venait de le rejoindre.
+   */
+  join(payload: RoomJoinPayload, selfName: string): RoomStateCore {
     if (this.participants.length >= IPC_MAX_PARTICIPANTS) {
       this.notice = 'room.row.fullReason';
       this.emitRoomState();
       return this.getRoomState();
     }
+    const roomName = payload.name.trim();
     this.roomId = payload.roomId;
-    this.roomName = payload.name;
+    this.roomName = roomName.length > 0 ? roomName : payload.roomId;
     this.phase = 'connected';
     this.notice = null;
     this.selfIdLocal = SELF_ID;
     this.participants = [
       {
         id: SELF_ID,
-        name: payload.name,
+        name: selfName,
         muted: this.muted,
         deafened: this.deafened,
         gain: 1,
@@ -106,7 +114,7 @@ export class RoomBridge {
     return this.getRoomState();
   }
 
-  leave(): RoomStateDto {
+  leave(): RoomStateCore {
     this.roomId = null;
     this.roomName = null;
     this.phase = 'idle';
@@ -162,13 +170,35 @@ export class RoomBridge {
     this.emitParticipants();
   }
 
-  /** Ajoute un participant distant (appelé par le moteur, plafonné à 8). */
-  addParticipant(participant: Omit<ParticipantDto, 'gain'> & { gain?: number }): void {
-    if (this.participants.length >= IPC_MAX_PARTICIPANTS) return;
-    if (this.participants.some((entry) => entry.id === participant.id)) return;
+  /**
+   * Ajoute un participant distant (appelé au fil de la signalisation, voir `roster-link` ; plafonné
+   * à 8). Rend `true` seulement si la liste a réellement changé — un `peer-joined` rejoué ne doit
+   * pas faire croire à une arrivée.
+   */
+  addParticipant(participant: Omit<ParticipantDto, 'gain'> & { gain?: number }): boolean {
+    if (this.participants.length >= IPC_MAX_PARTICIPANTS) return false;
+    if (this.participants.some((entry) => entry.id === participant.id)) return false;
     this.participants.push({ gain: 1, ...participant });
     this.emitParticipants();
     this.emitRoomState();
+    return true;
+  }
+
+  /**
+   * Retire un participant (départ constaté, `peer-left`). Rend `true` si la liste a changé.
+   *
+   * Le participant local ne part jamais par ce chemin : on ne quitte pas son propre salon parce
+   * qu'un pair a annoncé son départ. Sans cette méthode, un participant parti restait affiché
+   * jusqu'à la fermeture du salon — la liste ne pouvait que grandir.
+   */
+  removeParticipant(peerId: string): boolean {
+    if (peerId === SELF_ID) return false;
+    const before = this.participants.length;
+    this.participants = this.participants.filter((entry) => entry.id !== peerId);
+    if (this.participants.length === before) return false;
+    this.emitParticipants();
+    this.emitRoomState();
+    return true;
   }
 
   private updateSelf(patch: Partial<ParticipantDto>): void {

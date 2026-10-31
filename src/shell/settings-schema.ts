@@ -124,6 +124,34 @@ export function defaultSettings(): Settings {
   };
 }
 
+/**
+ * Nom d'affichage d'un participant, dérivé des réglages (SPEC-001 A6).
+ *
+ * A6 : « Pseudo choisi localement (défaut = prénom du compte OS, modifiable) ». Le schéma de
+ * réglages garde `nickname` vide par défaut — un défaut lu sur la machine n'a rien à faire dans un
+ * module pur —, donc c'est l'appelant (le main, qui connaît `os.userInfo()`) qui fournit le nom du
+ * compte. Fonction pure : même entrée, même sortie, testable sans machine.
+ *
+ * Retourne toujours une chaîne non vide : un participant sans nom serait un trou dans la liste.
+ */
+export function resolveDisplayName(nickname: string, osUserName: string): string {
+  const chosen = typeof nickname === 'string' ? nickname.trim() : '';
+  if (chosen.length > 0) return truncateDisplayName(chosen);
+  const fallback = typeof osUserName === 'string' ? osUserName.trim() : '';
+  if (fallback.length > 0) return truncateDisplayName(fallback);
+  return 'Concord';
+}
+
+/** 32 caractères, comme la validation du pseudo (`app.nickname.error.tooLong`). */
+const MAX_DISPLAY_NAME_LENGTH = 32;
+
+function truncateDisplayName(value: string): string {
+  // `Array.from` : on coupe en points de code, jamais au milieu d'une paire de substitution.
+  const points = Array.from(value);
+  if (points.length <= MAX_DISPLAY_NAME_LENGTH) return value;
+  return points.slice(0, MAX_DISPLAY_NAME_LENGTH).join('').trim();
+}
+
 // --- Résultats et erreurs --------------------------------------------------------------------
 
 export type SettingsErrorCode =
@@ -637,6 +665,18 @@ export function applySettingsPatch(current: Settings, patch: unknown): SettingsR
   }
   if (ctx.errors.length > 0) return { ok: false, errors: ctx.errors };
   return parseSettings(merged);
+}
+
+/**
+ * Vrai si deux réglages diffèrent par le raccourci push-to-talk.
+ *
+ * Le raccourci n'est pas un réglage mou : il est réservé auprès du SYSTÈME (`globalShortcut`). Écrire
+ * la nouvelle valeur dans les réglages ne suffit donc pas — l'ancien accélérateur restait réservé et
+ * le nouveau ne répondait pas jusqu'au redémarrage. Cette fonction dit quand il faut réellement
+ * ré-enregistrer, et laisse tous les autres réglages (overlay, audio, seuil de bruit…) tranquilles.
+ */
+export function pushToTalkAcceleratorChanged(previous: Settings, next: Settings): boolean {
+  return previous.talk.pttAccelerator !== next.talk.pttAccelerator;
 }
 
 /** Sérialise des réglages validés (utile pour l'écriture disque, tests de round-trip). */

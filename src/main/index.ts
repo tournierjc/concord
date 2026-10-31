@@ -16,17 +16,20 @@
  */
 
 import { app, BrowserWindow, ipcMain, screen, session } from 'electron';
-import { networkInterfaces } from 'node:os';
+import { networkInterfaces, userInfo } from 'node:os';
 import { join } from 'node:path';
 
-import { buildCsp } from './csp';
+import { securityHeaders } from './csp';
 import { createDiscoveryBridge, type DiscoveryBridge } from './discovery-bridge';
 import { installNetworkGuard } from './net-guard';
 import { APP_SCHEME, SCHEME_SEP } from './net-schemes';
 import { OverlayController, listDisplays } from './overlay-controller';
 import { registerPushToTalk, releasePushToTalk, type PttRegistration } from './ptt';
 import { appUrl, registerAppProtocol, registerAppScheme } from './renderer-protocol';
+import { isPermissionAllowed, isPermissionCheckAllowed } from './permissions';
 import { RoomBridge, type BridgeEvent } from './room-bridge';
+import { effectiveSignalingPort } from './signaling-port';
+import { applySignalToRoster } from './roster-link';
 import { createSettingsStore, type SettingsStore } from './settings-store';
 import { systemTimers } from './timers';
 import {
@@ -45,10 +48,17 @@ import {
   type OverlayPatchPayload,
   type RoomJoinPayload,
   type RoomSummaryDto,
+  type SignalIn,
   type SignalOut,
   type SpeakingSetPayload,
 } from '../shell/ipc-contract';
-import { applySettingsPatch, defaultSettings, type Settings } from '../shell/settings-schema';
+import {
+  applySettingsPatch,
+  defaultSettings,
+  pushToTalkAcceleratorChanged,
+  resolveDisplayName,
+  type Settings,
+} from '../shell/settings-schema';
 
 /**
  * Serveur de développement Vite (boucle locale uniquement, port 5173). Jamais défini en production :
@@ -125,6 +135,8 @@ async function bootstrap(): Promise<void> {
   createOverlay();
 
   registerIpcHandlers();
+  // Enregistre le raccourci PTT auprès du système ET publie un éventuel conflit : l'UI doit le dire,
+  // pas le masquer (le second envoi qui vivait en fin de `bootstrap` faisait doublon).
   registerPushToTalkShortcut();
   // Après les fenêtres : le premier `onRooms` doit trouver un renderer à qui parler.
   discovery.start();
@@ -138,8 +150,6 @@ async function bootstrap(): Promise<void> {
   screen.on('display-removed', onDisplayChange);
   screen.on('display-metrics-changed', onDisplayChange);
 
-  // Conflit de raccourci : l'UI doit le dire, pas le masquer.
-  if (ptt?.conflict) sendEvent(IPC.eventShortcutConflict, ptt.conflict);
 }
 
 // --- Fenêtres --------------------------------------------------------------------------------
@@ -226,6 +236,11 @@ function createMainWindow(): BrowserWindow {
 
 function createOverlay(): void {
   overlay.create(preloadPath());
+  // Même durcissement que la fenêtre principale : sans cela, la seule différence entre les deux
+  // webContents était... l'absence de garde. `setWindowOpenHandler`/`will-navigate` refusent toute
+  // ouverture et toute navigation hors de `app://` (ou du serveur de dev).
+  const overlayWindow = overlay.getWindow();
+  if (overlayWindow) harden(overlayWindow.webContents);
   overlay.load();
   // AD-20 D1 : une overlay qui (re)charge ne peut pas attendre la prochaine transition — une parole
   // déjà en cours resterait éteinte. On rejoue le dernier ensemble connu, tel quel.
@@ -239,39 +254,60 @@ function createOverlay(): void {
 
 function applySecurityPolicies(): void {
   const ses = session.defaultSession;
-  const csp = buildCsp({ devServerOrigin: DEV_SERVER });
 
-  // CSP posée sur CHAQUE réponse : un document chargé sans en-tête serait sans défense.
+  // En-têtes posés sur CHAQUE réponse : un document chargé sans en-tête serait sans défense.
+  // Ils viennent TOUS de `securityHeaders` (une seule définition) : la version précédente
+  // recomposait la liste à la main et laissait tomber `Cross-Origin-Opener-Policy`,
+  // `Cross-Origin-Resource-Policy` et `Permissions-Policy` — qui n'étaient donc nulle part.
+  const headers = securityHeaders({ devServerOrigin: DEV_SERVER });
   ses.webRequest.onHeadersReceived((details, callback) => {
-    callback({
-      responseHeaders: {
-        ...details.responseHeaders,
-        'Content-Security-Policy': [csp],
-        'X-Content-Type-Options': ['nosniff'],
-        'Referrer-Policy': ['no-referrer'],
-      },
-    });
+    const responseHeaders: Record<string, string[]> = { ...details.responseHeaders };
+    for (const [name, value] of Object.entries(headers)) responseHeaders[name] = [value];
+    callback({ responseHeaders });
   });
 
   // Uniquement le micro ; tout le reste (géolocalisation, notifications, presse-papiers, USB…) est
-  // refusé sans même consulter l'utilisateur.
-  ses.setPermissionRequestHandler((_contents, permission, callback) => {
-    callback(permission === 'media');
+  // refusé sans même consulter l'utilisateur. La décision est dans `permissions.ts` (pure, testée) :
+  // répondre « media » sans lire `mediaTypes` accordait aussi la CAMÉRA, alors que l'application n'en
+  // fait aucun usage et que `Permissions-Policy` annonce `camera=()`.
+  ses.setPermissionRequestHandler((_contents, permission, callback, details) => {
+    const mediaTypes = 'mediaTypes' in details ? details.mediaTypes : undefined;
+    callback(isPermissionAllowed(permission, mediaTypes));
   });
-  ses.setPermissionCheckHandler((_contents, permission) => permission === 'media');
+  ses.setPermissionCheckHandler((_contents, permission, _origin, details) =>
+    isPermissionCheckAllowed(permission, details.mediaType),
+  );
 
   networkGuard = installNetworkGuard(ses, { devServerOrigin: DEV_SERVER, lanHosts: [] });
 
   if (!DEV_SERVER) registerAppProtocol(join(__dirname, '..', 'renderer'));
 }
 
+/**
+ * (Re)enregistre le raccourci push-to-talk auprès du système, et publie le conflit s'il y en a un.
+ *
+ * `releasePushToTalk()` d'abord : `globalShortcut.register` refuse un accélérateur encore tenu — le
+ * plus souvent par nous-mêmes, quand on change de raccourci en cours de session. Sans cette
+ * libération, un changement de raccourci échouait sur son propre ancien enregistrement.
+ */
 function registerPushToTalkShortcut(): void {
+  releasePushToTalk();
   ptt = registerPushToTalk(settings.talk.pttAccelerator, (active) => {
     bridge.setPushToTalk(active);
   });
+  if (ptt.conflict) sendEvent(IPC.eventShortcutConflict, ptt.conflict);
 }
 
 // --- IPC -------------------------------------------------------------------------------------
+
+/** Nom du compte OS, dernière ressource de A6 avant le défaut fixe. `userInfo()` peut lever. */
+function osUserName(): string {
+  try {
+    return userInfo().username;
+  } catch {
+    return '';
+  }
+}
 
 function isTrustedSender(url: string | undefined): boolean {
   if (!url) return false;
@@ -342,10 +378,32 @@ function syncOverlayGeometry(): void {
   });
 }
 
+/**
+ * Port de signalisation RÉELLEMENT utilisé (SPEC-001 A5, SPEC-002 D1) — lu, jamais supposé.
+ *
+ * L'onglet Réseau affichait `settings.network.signalingPort`, la valeur demandée dans les réglages :
+ * le moteur ne la lit pas (il part de 47821 et incrémente si le port est pris), et SPEC-002 D1
+ * interdit d'afficher un port qu'on n'a pas lu. On publie donc la mesure : la socket écoutée quand ce
+ * poste héberge, le port annoncé par l'hôte quand il est client, rien hors salon.
+ */
+function currentSignalingPort(): number | null {
+  return effectiveSignalingPort({
+    listen: signalingLink?.listen ?? null,
+    roomId: bridge.getRoomState().roomId,
+    rooms: discovery.list(),
+  });
+}
+
 function forwardBridgeEvent(event: BridgeEvent): void {
   // `BridgeEvent.channel` porte les VALEURS du canon (`lan:event:participants`, …), pas les noms
   // de clés : on ne transmet donc aucune conversion, et le discriminant reste vérifié par le type.
-  sendEvent(event.channel, event.payload);
+  // L'état de salon part enrichi du port effectif : il n'existe que dans le main (socket d'écoute,
+  // annonces lues), et l'UI n'a pas le droit de l'inventer.
+  if (event.channel === IPC.eventRoomState) {
+    sendEvent(event.channel, { ...event.payload, signalingPort: currentSignalingPort() });
+  } else {
+    sendEvent(event.channel, event.payload);
+  }
   // Comparaison contre les VALEURS du canon (`IPC.*`). Un littéral repris du nom de clé est toujours
   // différent de la valeur `'lan:event:…'` correspondante : il rendrait ce branchement mort.
   // C'est le bug corrigé ici : `overlay.apply` n'était plus jamais rappelé, la pastille overlay
@@ -356,12 +414,17 @@ function forwardBridgeEvent(event: BridgeEvent): void {
 }
 
 function persist(next: Settings): void {
+  const previousSettings = settings;
   settings = next;
   try {
     store.save(next);
   } catch (error) {
     console.error('[réglages] écriture impossible', error);
   }
+  // Le raccourci push-to-talk est enregistré AUPRÈS DU SYSTÈME : écrire la nouvelle valeur dans les
+  // réglages ne suffit pas (l'ancien accélérateur restait réservé, le nouveau ne répondait pas
+  // jusqu'au redémarrage). On ne ré-enregistre que s'il a changé.
+  if (pushToTalkAcceleratorChanged(previousSettings, next)) registerPushToTalkShortcut();
   sendEvent(IPC.eventSettingsChanged, { settings });
   // Un réglage d'overlay (taille, échelle, écran) change la géométrie : il faut la republier, sinon
   // le renderer de l'overlay garde l'ancienne. `syncOverlayGeometry` fait l'apply + la publication.
@@ -466,14 +529,46 @@ function startSignalingLink(roomId: string, name: string, selfId: string): void 
     host: role === 'client' && remote ? remote.host : listenHost,
     ...(role === 'client' && remote ? { port: remote.port } : {}),
     now: () => systemTimers.now(),
-    onMessage: (message) => sendEvent(IPC.eventSignal, message),
+    onMessage: (message) => {
+      // L'annuaire suit la présence de signalisation AVANT d'envoyer le message au renderer :
+      // `peer-joined`/`peer-left` étaient jusqu'ici transmis sans que personne ne tienne la liste.
+      applyRoster(message);
+      sendEvent(IPC.eventSignal, message);
+    },
+    onListen: (listen) => {
+      // Annonce mDNS (SPEC-001 A5) : le salon que CETTE machine héberge devient rejoignable. Sans
+      // elle, aucun autre poste ne voyait de salon — la liste restait vide et « rejoindre » un
+      // salon distant était impossible sur un vrai réseau.
+      if (role !== 'host') return;
+      // Un lien remplacé (ou fermé) entre le bind et ce rappel ne doit pas annoncer un port mort.
+      if (signalingLink === null) return;
+      const state = bridge.getRoomState();
+      discovery.announce({
+        roomName: state.roomName ?? roomId,
+        port: listen.port,
+        participants: state.participantCount,
+      });
+    },
   });
 }
 
 /** Ferme le tuyau (« leave » émis, sockets fermées) — idempotent. */
+/**
+ * Reporte un message de signalisation sur l'annuaire du salon (`roster-link`).
+ *
+ * L'état du salon part déjà vers le renderer depuis `RoomBridge` (`lan:event:participants` /
+ * `lan:event:room-state`) : rien d'autre à publier ici.
+ */
+function applyRoster(message: SignalIn): void {
+  applySignalToRoster(bridge, message, signalingLink?.selfId ?? null);
+}
+
 function stopSignalingLink(detail: string): void {
   const link = signalingLink;
   signalingLink = null;
+  // Le salon n'est plus hébergé ici : l'annonce mDNS doit disparaître en même temps que le lien,
+  // sinon les autres postes continuent de proposer un salon injoignable.
+  discovery.retract();
   if (link === null) return;
   try {
     link.close(detail);
@@ -505,7 +600,9 @@ function registerIpcHandlers(): void {
     [IPC.roomsDiscover]: () => discovery.list(),
     [IPC.roomJoin]: (payload: unknown) => {
       const join = expectPayload(IPC.roomJoin, payload, isRoomJoinPayload);
-      const state = bridge.join(join);
+      // `join.name` est le nom du SALON ; le nom du participant local vient des réglages (A6),
+      // jamais du champ qui décrit le salon.
+      const state = bridge.join(join, resolveDisplayName(settings.nickname, osUserName()));
       // Salon refusé (plafond atteint) : aucun tuyau à ouvrir.
       if (state.roomId !== null && state.selfId !== null) {
         startSignalingLink(state.roomId, join.name, state.selfId);

@@ -149,9 +149,27 @@ export interface RoomStateDto {
   participantCount: number;
   /** Identifiant du participant local dans la liste. */
   selfId: string | null;
+  /**
+   * Port de signalisation RÉELLEMENT utilisé pour ce salon : celui que ce poste écoute quand il
+   * héberge, ou celui **lu** dans l'annonce du salon quand il est client ; `null` hors salon.
+   *
+   * Ce n'est PAS le port demandé dans les réglages : le moteur incrémente 47821→47830 quand le port
+   * est pris (SPEC-001 A5), et l'interface ne montre jamais un port qu'elle n'a pas lu (SPEC-002 D1).
+   */
+  signalingPort: number | null;
   /** Message destiné à l'UI quand le salon est refusé (plafond de 8, port occupé…). */
   notice: string | null;
 }
+
+/**
+ * État de salon **sans** le port de signalisation.
+ *
+ * Le pont de salon ne connaît pas ce port : il appartient à la coquille (`signalingLink.listen`) et
+ * aux annonces lues (`discovery.list()`). Ce type dit exactement ce que le pont sait produire ; la
+ * coquille l'enrichit en `RoomStateDto` avant publication. Sans cette séparation, le pont devrait
+ * écrire `signalingPort: null` — c'est-à-dire affirmer « aucun port » sur un salon qui en a un.
+ */
+export type RoomStateCore = Omit<RoomStateDto, 'signalingPort'>;
 
 export interface ControlStateDto {
   muted: boolean;
@@ -183,7 +201,16 @@ export interface SettingsChangedDto {
 }
 
 export interface RoomJoinPayload {
+  /**
+   * Identifiant du salon. Salon repéré sur le LAN : `hôte:port` (dérivé de l'annonce mDNS, voir
+   * `room-discovery`). Salon créé localement : le nom saisi par la personne qui le crée.
+   */
   roomId: string;
+  /**
+   * Nom d'affichage du SALON (en-tête de l'écran de salon, liste des salons). Ce champ ne porte
+   * jamais l'identité d'un participant : le nom du participant local vient des réglages côté main
+   * (SPEC-001 A6, `resolveDisplayName`).
+   */
   name: string;
 }
 
@@ -369,6 +396,31 @@ class Guard {
     }
     if (value.length > max) {
       this.invalid(`${path}.${key}`, `longueur > ${max}`);
+      return undefined;
+    }
+    return value;
+  }
+
+  /**
+   * Un PORT (ou `null`) : entier dans les bornes, sinon refusé. Un port est un entier — `47821.5`
+   * n'existe pas, et laisser passer un flottant ne ferait que déplacer le mensonge plus loin.
+   */
+  nullablePort(
+    source: Dict | null,
+    key: string,
+    path: string,
+    min: number,
+    max: number,
+  ): number | null | undefined {
+    if (!source) return undefined;
+    const value = source[key];
+    if (value === null) return null;
+    if (typeof value !== 'number' || !Number.isInteger(value)) {
+      this.invalid(`${path}.${key}`, 'port entier ou null attendu');
+      return undefined;
+    }
+    if (value < min || value > max) {
+      this.invalid(`${path}.${key}`, `valeur hors bornes [${min}, ${max}]`);
       return undefined;
     }
     return value;
@@ -720,7 +772,15 @@ function guardEvent(channel: string, raw: unknown): GuardResult<unknown> {
       return { ok: true, value: rooms };
     }
     case IPC.eventRoomState: {
-      const allowed = ['roomId', 'roomName', 'phase', 'participantCount', 'selfId', 'notice'] as const;
+      const allowed = [
+        'roomId',
+        'roomName',
+        'phase',
+        'participantCount',
+        'selfId',
+        'signalingPort',
+        'notice',
+      ] as const;
       const payload = guard.object(raw, 'payload', allowed);
       if (payload === null) return guardError(channel, guard);
       const roomId = guard.nullableString(payload, 'roomId', 'payload', 64);
@@ -728,9 +788,13 @@ function guardEvent(channel: string, raw: unknown): GuardResult<unknown> {
       const phase = guard.oneOf(payload, 'phase', 'payload', ROOM_PHASES);
       const participantCount = guard.number(payload, 'participantCount', 'payload', 0, IPC_MAX_PARTICIPANTS);
       const selfId = guard.nullableString(payload, 'selfId', 'payload', 64);
+      const signalingPort = guard.nullablePort(payload, 'signalingPort', 'payload', 1, 65535);
       const notice = guard.nullableString(payload, 'notice', 'payload', 240);
       if (guard.errors.length > 0) return guardError(channel, guard);
-      return { ok: true, value: { roomId, roomName, phase, participantCount, selfId, notice } };
+      return {
+        ok: true,
+        value: { roomId, roomName, phase, participantCount, selfId, signalingPort, notice },
+      };
     }
     case IPC.eventControlState: {
       const allowed = ['muted', 'deafened', 'pushToTalk', 'mode', 'micLevel'] as const;

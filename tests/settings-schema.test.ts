@@ -26,6 +26,7 @@ import {
   normalizeAccelerator,
   parseSettings,
   serializeSettings,
+  resolveDisplayName,
   signalingPortCandidates,
   type Settings,
   type SettingsError,
@@ -289,4 +290,36 @@ test('les réglages validés sont sérialisables et re-lisibles à l\'identique'
   assert.equal(again.ok, true);
   if (!again.ok) return;
   assert.deepEqual(again.value, value);
+});
+
+// --- resolveDisplayName (SPEC-001 A6 : pseudo local, défaut = compte OS) ----------------------
+
+test('resolveDisplayName : le pseudo réglé gagne, rogné de ses blancs', () => {
+  assert.equal(resolveDisplayName('  Marion  ', 'jc'), 'Marion');
+  // Le compte OS ne sert que de repli : il ne doit jamais écraser un pseudo choisi.
+  assert.equal(resolveDisplayName('Marion', ''), 'Marion');
+});
+
+test('resolveDisplayName : pseudo vide ou blanc → nom du compte OS', () => {
+  assert.equal(resolveDisplayName('', 'jc'), 'jc');
+  assert.equal(resolveDisplayName('   ', ' jc '), 'jc');
+});
+
+test('resolveDisplayName : aucun nom disponible → « Concord », jamais une chaîne vide', () => {
+  // Un participant sans nom serait un trou dans la liste : la fonction ne rend pas `''`.
+  assert.equal(resolveDisplayName('', ''), 'Concord');
+  assert.equal(resolveDisplayName('   ', '   '), 'Concord');
+});
+
+test('resolveDisplayName : borne à 32 points de code, sans casser une paire de substitution', () => {
+  const long = 'a'.repeat(40);
+  assert.equal(resolveDisplayName(long, 'jc').length, 32);
+  assert.equal(resolveDisplayName(long, 'jc'), 'a'.repeat(32));
+
+  // 32 emoji = 64 unités UTF-16 : une coupe naïve au caractère laisserait un demi-surrogate.
+  const emoji = '\u{1F600}'.repeat(40);
+  const bounded = resolveDisplayName(emoji, 'jc');
+  assert.equal(Array.from(bounded).length, 32);
+  assert.equal(bounded, '\u{1F600}'.repeat(32));
+  assert.equal(bounded.includes('\uFFFD'), false);
 });
