@@ -74,17 +74,20 @@ deb:
 
 appImage:
   # appImage.license embarquait « LICENCE », fichier ABSENT du dépôt : toute
-  # construction AppImage échouait (VERIF 029, 2026-10-31). Le titulaire des
-  # droits n'est pas tranché par le propriétaire du projet, donc aucun LICENCE
-  # n'est inventé ici. L'option est retirée pour que la cible reste
-  # constructible ; à rétablir (license: LICENCE) le jour où le fichier existe.
+  # construction AppImage échouait (VERIF 029, 2026-10-31). L'option est retirée
+  # pour que la cible reste constructible.
+  # 2026-10-31 (arbitrage JC) : le dépôt est sous licence MIT, fichier LICENSE
+  # présent à la racine ; package.json "license": "MIT" est donc exact. Rien à
+  # embarquer de force : l'option reste absente, le fichier est versionné.
   artifactName: concord-${version}-${arch}.AppImage
 
 win:
   target:
     - target: nsis
       arch: [x64]
-  # Signature non exigée : la construction ne doit pas échouer faute de certificat.
+  # AUCUN certificat Windows (arbitrage JC, 2026-10-31) : les binaires Windows
+  # sont livrés NON SIGNÉS. La construction ne doit pas échouer faute de
+  # certificat ; SmartScreen affichera un avertissement, c'est assumé et dit.
   forceCodeSigning: false
   signAndEditExecutable: true
   verifyUpdateCodeSignature: false
