@@ -87,13 +87,21 @@ export function isAllowedListenHost(host: string): boolean {
 /* ------------------------------------------------------------------ */
 
 /** Codes de refus explicites. */
-export type RefuseCode =
-  | 'room-full'
-  | 'not-joined'
-  | 'unknown-peer'
-  | 'invalid-message'
-  | 'off-lan'
-  | 'closed'
+export const REFUSE_CODES = [
+  'room-full',
+  'not-joined',
+  'unknown-peer',
+  'invalid-message',
+  'off-lan',
+  'closed'
+] as const
+
+export type RefuseCode = (typeof REFUSE_CODES)[number]
+
+/** Vrai si la chaîne est un code de refus connu : le type seul disparaît au build. */
+export function isRefuseCode(value: unknown): value is RefuseCode {
+  return typeof value === 'string' && (REFUSE_CODES as readonly string[]).includes(value)
+}
 
 /** Les 8 types de messages du protocole. */
 export const SIGNALING_MESSAGE_TYPES = [

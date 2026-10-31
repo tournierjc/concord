@@ -10,13 +10,15 @@
  */
 
 import assert from 'node:assert/strict';
-import { connect, type Socket } from 'node:net';
+import { connect, createServer, type Socket } from 'node:net';
 import { test } from 'node:test';
 
 import {
   createSignalingLink,
   decodeCandidatePayload,
   fromWire,
+  MAX_PEERS_PER_HELLO,
+  parseServerLine,
   pickListenHost,
   toWire,
   type SignalingLink,
@@ -358,4 +360,134 @@ test('close() est idempotent et n’émet qu’un seul état « closed »', asyn
   link.close('test');
   link.close('test');
   assert.equal(messages.filter((m) => m.kind === 'link' && m.state === 'closed').length, 1);
+});
+
+
+/* ------------------------------------------------------------------ */
+/* parseServerLine : validation STRICTE, champ par champ               */
+/* ------------------------------------------------------------------ */
+
+test('un hello hostile (peers:[null]) est REFUSÉ, pas fatal', () => {
+  // Le défaut d'origine : ne valider que `type` laissait passer celui-ci, puis `peer.peerId` levait
+  // un TypeError dans le gestionnaire `data` de la socket — hors de tout try — et tuait le process
+  // principal. Un hôte hostile suffisait à faire tomber l'application d'en face.
+  assert.equal(parseServerLine('{"type":"hello","peers":[null]}'), null);
+  assert.equal(parseServerLine('{"type":"hello","peerId":"p1","peers":[42]}'), null);
+  assert.equal(parseServerLine('{"type":"hello","peerId":"p1","peers":[{}]}'), null);
+  assert.equal(parseServerLine('{"type":"hello","peerId":"p1","peers":{"a":1}}'), null);
+  assert.equal(parseServerLine('{"type":"hello"}'), null);
+  assert.equal(parseServerLine('{"type":"hello","peerId":"","peers":[]}'), null);
+});
+
+test('un hello valide passe, pairs compris', () => {
+  const parsed = parseServerLine(
+    '{"type":"hello","peerId":"p1","name":"Hôte","maxParticipants":8,"peers":[{"peerId":"p2","name":"Léo"}]}',
+  );
+  assert.ok(parsed);
+  assert.equal(parsed.type, 'hello');
+  if (parsed.type !== 'hello') return;
+  assert.equal(parsed.peerId, 'p1');
+  assert.equal(parsed.maxParticipants, 8);
+  assert.deepEqual(parsed.peers, [{ peerId: 'p2', name: 'Léo' }]);
+});
+
+test('la liste de pairs est BORNÉE : au-delà, la ligne est refusée en entier', () => {
+  const peers = Array.from({ length: MAX_PEERS_PER_HELLO }, (_, index) => ({
+    peerId: `p${index}`,
+    name: `Pair ${index}`,
+  }));
+  const line = (list: unknown): string =>
+    JSON.stringify({ type: 'hello', peerId: 'p1', name: 'Hôte', maxParticipants: 8, peers: list });
+
+  const ok = parseServerLine(line(peers));
+  assert.ok(ok, 'la borne elle-même passe');
+  assert.equal(parseServerLine(line([...peers, { peerId: 'px', name: 'De trop' }])), null);
+  // Un hôte hostile n'impose pas l'allocation d'une liste démesurée.
+  assert.equal(parseServerLine(line(Array.from({ length: 100_000 }, () => ({ peerId: 'p', name: 'n' })))), null);
+});
+
+test('les autres types sont validés champ par champ', () => {
+  // hello/join/leave/offer/answer/ice/refuse/bye : chacun doit être refusé s'il lui manque un champ.
+  assert.equal(parseServerLine('{"type":"refuse","code":"room-full"}'), null, 'refuse sans raison');
+  assert.equal(parseServerLine('{"type":"refuse","code":"inconnu","reason":"x"}'), null, 'code hors protocole');
+  assert.equal(parseServerLine('{"type":"bye"}'), null, 'bye sans raison');
+  assert.equal(parseServerLine('{"type":"offer","from":12,"sdp":"v=0"}'), null, 'from non textuel');
+  assert.equal(parseServerLine('{"type":"ice","from":"p2","candidate":null,"to":"p1"}'), null);
+  assert.equal(parseServerLine('{"type":"leave","peerId":""}'), null);
+  assert.equal(parseServerLine('{"type":"join","peer":"p2"}'), null, 'join sans objet pair');
+  assert.equal(parseServerLine('{"type":"inconnu"}'), null);
+  assert.equal(parseServerLine('[]'), null);
+  assert.equal(parseServerLine('null'), null);
+  assert.equal(parseServerLine('pas du json'), null);
+
+  const refus = parseServerLine('{"type":"refuse","code":"room-full","reason":"salon plein"}');
+  assert.ok(refus);
+  assert.equal(refus.type, 'refuse');
+
+  const bye = parseServerLine('{"type":"bye","reason":"à plus"}');
+  assert.ok(bye);
+  assert.equal(bye.type, 'bye');
+});
+
+
+/* ------------------------------------------------------------------ */
+/* Bout en bout : une ligne hostile ne casse pas la liaison            */
+/* ------------------------------------------------------------------ */
+
+test('un hôte hostile qui envoie peers:[null] ne casse pas la liaison (et le process survit)', async () => {
+  const port = testBasePort();
+  const accepted: Socket[] = [];
+  const server = createServer((socket: Socket) => {
+    accepted.push(socket);
+  });
+  await new Promise<void>((resolve) => server.listen({ host: '127.0.0.1', port }, resolve));
+
+  const messages: SignalIn[] = [];
+  const link = createSignalingLink({
+    role: 'client',
+    localId: 'local-test',
+    name: 'Banc',
+    host: '127.0.0.1',
+    port,
+    now: () => Date.now(),
+    onMessage: (message) => messages.push(message),
+  });
+
+  await eventually(() => accepted.length === 1);
+  const hostile = accepted[0];
+  assert.ok(hostile);
+
+  // 1. hello délibérément hors contrat.
+  hostile.write(
+    `${JSON.stringify({ type: 'hello', peerId: 'p1', name: 'Hôte', maxParticipants: 8, peers: [null] })}\n`,
+  );
+  await eventually(() => link.stats.malformed >= 1);
+  assert.equal(
+    messages.filter((message) => message.kind === 'peer-joined').length,
+    0,
+    'aucun pair ne doit être annoncé par une ligne refusée',
+  );
+  assert.equal(
+    messages.some((message) => message.kind === 'link' && message.state === 'refused'),
+    false,
+    'la liaison ne doit pas mourir : la ligne est ignorée',
+  );
+
+  // 2. Une ligne saine derrière doit encore passer : le lien n'est pas resté cassé.
+  hostile.write(
+    `${JSON.stringify({
+      type: 'hello',
+      peerId: 'p1',
+      name: 'Hôte',
+      maxParticipants: 8,
+      peers: [{ peerId: 'p2', name: 'Léo' }],
+    })}\n`,
+  );
+  await eventually(() => link.stats.lines >= 2);
+  await eventually(() => messages.some((message) => message.kind === 'peer-joined'));
+  assert.equal(link.stats.malformed, 1, 'une seule ligne refusée');
+
+  link.close('fin de test');
+  hostile.destroy();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
 });

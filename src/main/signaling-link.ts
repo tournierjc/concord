@@ -27,6 +27,7 @@ import { connect, createServer, type Server, type Socket } from 'node:net';
 import {
   createLocalSignaling,
   isAllowedListenHost,
+  isRefuseCode,
   SIGNALING_BASE_PORT,
   SIGNALING_PORT_RANGE,
   type ClientMessage,
@@ -213,7 +214,38 @@ export function fromWire(message: ServerMessage): SignalIn | null {
   }
 }
 
-/** Parse une ligne serveur sans jamais lever : `null` = ligne hors contrat. */
+/**
+ * Nombre maximal de pairs acceptés dans un `hello`. Notre propre hôte en annonce au plus
+ * `maxParticipants - 1` (7 par défaut) : cette borne est large, et surtout *finie* — un hôte hostile
+ * ne fait pas allouer une liste de plusieurs centaines de milliers d'entrées.
+ */
+export const MAX_PEERS_PER_HELLO = 64;
+
+/** Ligne JSON décodée : un objet (ni `null`, ni tableau). */
+function isMessageObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Résumé de pair d'un `hello`/`join`, ou `null` si le champ n'en est pas un. */
+function asPeerSummary(value: unknown): { peerId: string; name: string } | null {
+  if (!isMessageObject(value)) return null;
+  const peerId = value.peerId;
+  if (typeof peerId !== 'string' || peerId.length === 0) return null;
+  const name = value.name;
+  if (name !== undefined && typeof name !== 'string') return null;
+  return { peerId, name: typeof name === 'string' ? name : '' };
+}
+
+/**
+ * Parse une ligne serveur sans jamais lever : `null` = ligne hors contrat.
+ *
+ * VALIDATION STRICTE, CHAMP PAR CHAMP. Ne vérifier que `type` laissait passer tout le reste :
+ * `{"type":"hello","peers":[null]}` traversait le parseur, puis `peer.peerId` levait un `TypeError`
+ * DANS le gestionnaire `data` de la socket — hors de tout `try` — et tuait le process principal.
+ * Un hôte hostile (ou simplement bogué) suffisait donc à faire tomber l'application d'en face, sur
+ * le chemin de connexion. Ici, une ligne non conforme est comptée (`stats.malformed`) et ignorée :
+ * la liaison reste utilisable pour les lignes saines qui suivent.
+ */
 export function parseServerLine(line: string): ServerMessage | null {
   let parsed: unknown;
   try {
@@ -221,10 +253,69 @@ export function parseServerLine(line: string): ServerMessage | null {
   } catch {
     return null;
   }
-  if (parsed === null || typeof parsed !== 'object') return null;
-  const type = (parsed as { type?: unknown }).type;
+  if (!isMessageObject(parsed)) return null;
+
+  const type = parsed.type;
   if (typeof type !== 'string') return null;
-  return parsed as ServerMessage;
+
+  switch (type) {
+    case 'hello': {
+      if (typeof parsed.peerId !== 'string' || parsed.peerId.length === 0) return null;
+      const rawPeers = parsed.peers;
+      if (rawPeers !== undefined && !Array.isArray(rawPeers)) return null;
+      const peers: Array<{ peerId: string; name: string }> = [];
+      for (const entry of rawPeers ?? []) {
+        // Au-delà de la borne : la ligne entière est refusée, on n'en garde pas une moitié.
+        if (peers.length >= MAX_PEERS_PER_HELLO) return null;
+        const peer = asPeerSummary(entry);
+        if (peer === null) return null;
+        peers.push(peer);
+      }
+      const maxParticipants = parsed.maxParticipants;
+      if (typeof maxParticipants !== 'number' || !Number.isFinite(maxParticipants)) return null;
+      return {
+        type: 'hello',
+        peerId: parsed.peerId,
+        name: typeof parsed.name === 'string' ? parsed.name : '',
+        maxParticipants: Math.trunc(maxParticipants),
+        peers,
+      };
+    }
+    case 'join': {
+      const peer = asPeerSummary(parsed.peer);
+      if (peer === null) return null;
+      return { type: 'join', peer };
+    }
+    case 'leave': {
+      if (typeof parsed.peerId !== 'string' || parsed.peerId.length === 0) return null;
+      return { type: 'leave', peerId: parsed.peerId };
+    }
+    case 'offer':
+    case 'answer': {
+      if (typeof parsed.from !== 'string' || typeof parsed.sdp !== 'string') return null;
+      if (typeof parsed.to !== 'string') return null;
+      return type === 'offer'
+        ? { type: 'offer', from: parsed.from, to: parsed.to, sdp: parsed.sdp }
+        : { type: 'answer', from: parsed.from, to: parsed.to, sdp: parsed.sdp };
+    }
+    case 'ice': {
+      if (typeof parsed.from !== 'string' || typeof parsed.candidate !== 'string') return null;
+      if (typeof parsed.to !== 'string') return null;
+      return { type: 'ice', from: parsed.from, to: parsed.to, candidate: parsed.candidate };
+    }
+    case 'refuse': {
+      const code = parsed.code;
+      if (!isRefuseCode(code)) return null;
+      if (typeof parsed.reason !== 'string') return null;
+      return { type: 'refuse', code, reason: parsed.reason };
+    }
+    case 'bye': {
+      if (typeof parsed.reason !== 'string') return null;
+      return { type: 'bye', reason: parsed.reason };
+    }
+    default:
+      return null;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -392,7 +483,18 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
         socket.destroy();
       },
     );
-    socket.on('data', (chunk: string) => reader.push(chunk));
+    socket.on('data', (chunk: string) => {
+      try {
+        reader.push(chunk);
+      } catch (error) {
+        // Filet SOUS le parseur : un message entrant ne doit jamais tuer le process principal.
+        // On compte, on refuse, on rompt ce lien-là — l'application reste debout.
+        stats.malformed += 1;
+        console.warn('[signalisation] message entrant refusé', error);
+        refuse('lien rompu : message entrant refusé');
+        socket.destroy();
+      }
+    });
     socket.on('connect', () => {
       timers.cancel(timer);
       socket.write(`${joinRequest()}\n`);
