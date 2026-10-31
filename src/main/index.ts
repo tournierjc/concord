@@ -19,13 +19,14 @@ import { app, BrowserWindow, ipcMain, screen, session } from 'electron';
 import { networkInterfaces } from 'node:os';
 import { join } from 'node:path';
 
-import { buildCsp } from './csp';
+import { securityHeaders } from './csp';
 import { createDiscoveryBridge, type DiscoveryBridge } from './discovery-bridge';
 import { installNetworkGuard } from './net-guard';
 import { APP_SCHEME, SCHEME_SEP } from './net-schemes';
 import { OverlayController, listDisplays } from './overlay-controller';
 import { registerPushToTalk, releasePushToTalk, type PttRegistration } from './ptt';
 import { appUrl, registerAppProtocol, registerAppScheme } from './renderer-protocol';
+import { isPermissionAllowed, isPermissionCheckAllowed } from './permissions';
 import { RoomBridge, type BridgeEvent } from './room-bridge';
 import { createSettingsStore, type SettingsStore } from './settings-store';
 import { systemTimers } from './timers';
@@ -226,6 +227,11 @@ function createMainWindow(): BrowserWindow {
 
 function createOverlay(): void {
   overlay.create(preloadPath());
+  // Même durcissement que la fenêtre principale : sans cela, la seule différence entre les deux
+  // webContents était... l'absence de garde. `setWindowOpenHandler`/`will-navigate` refusent toute
+  // ouverture et toute navigation hors de `app://` (ou du serveur de dev).
+  const overlayWindow = overlay.getWindow();
+  if (overlayWindow) harden(overlayWindow.webContents);
   overlay.load();
   // AD-20 D1 : une overlay qui (re)charge ne peut pas attendre la prochaine transition — une parole
   // déjà en cours resterait éteinte. On rejoue le dernier ensemble connu, tel quel.
@@ -239,26 +245,29 @@ function createOverlay(): void {
 
 function applySecurityPolicies(): void {
   const ses = session.defaultSession;
-  const csp = buildCsp({ devServerOrigin: DEV_SERVER });
 
-  // CSP posée sur CHAQUE réponse : un document chargé sans en-tête serait sans défense.
+  // En-têtes posés sur CHAQUE réponse : un document chargé sans en-tête serait sans défense.
+  // Ils viennent TOUS de `securityHeaders` (une seule définition) : la version précédente
+  // recomposait la liste à la main et laissait tomber `Cross-Origin-Opener-Policy`,
+  // `Cross-Origin-Resource-Policy` et `Permissions-Policy` — qui n'étaient donc nulle part.
+  const headers = securityHeaders({ devServerOrigin: DEV_SERVER });
   ses.webRequest.onHeadersReceived((details, callback) => {
-    callback({
-      responseHeaders: {
-        ...details.responseHeaders,
-        'Content-Security-Policy': [csp],
-        'X-Content-Type-Options': ['nosniff'],
-        'Referrer-Policy': ['no-referrer'],
-      },
-    });
+    const responseHeaders: Record<string, string[]> = { ...details.responseHeaders };
+    for (const [name, value] of Object.entries(headers)) responseHeaders[name] = [value];
+    callback({ responseHeaders });
   });
 
   // Uniquement le micro ; tout le reste (géolocalisation, notifications, presse-papiers, USB…) est
-  // refusé sans même consulter l'utilisateur.
-  ses.setPermissionRequestHandler((_contents, permission, callback) => {
-    callback(permission === 'media');
+  // refusé sans même consulter l'utilisateur. La décision est dans `permissions.ts` (pure, testée) :
+  // répondre « media » sans lire `mediaTypes` accordait aussi la CAMÉRA, alors que l'application n'en
+  // fait aucun usage et que `Permissions-Policy` annonce `camera=()`.
+  ses.setPermissionRequestHandler((_contents, permission, callback, details) => {
+    const mediaTypes = 'mediaTypes' in details ? details.mediaTypes : undefined;
+    callback(isPermissionAllowed(permission, mediaTypes));
   });
-  ses.setPermissionCheckHandler((_contents, permission) => permission === 'media');
+  ses.setPermissionCheckHandler((_contents, permission, _origin, details) =>
+    isPermissionCheckAllowed(permission, details.mediaType),
+  );
 
   networkGuard = installNetworkGuard(ses, { devServerOrigin: DEV_SERVER, lanHosts: [] });
 
