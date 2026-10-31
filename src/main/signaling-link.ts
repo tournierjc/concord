@@ -62,6 +62,14 @@ export interface SignalingLinkOptions {
   timeoutMs?: number;
   /** Minuteur injecté (SPEC-012 §4) : le délai de connexion passe par `src/main/timers.ts`. */
   timers?: MainTimers;
+  /**
+   * Appelé une fois, quand un port a réellement été écouté (rôle hôte uniquement).
+   *
+   * Le port DEMANDÉ n'est qu'une préférence : `SIGNALING_PORT_RANGE` ports sont essayés à la suite.
+   * Un hôte doit donc annoncer celui qu'il écoute vraiment (SPEC-001 A5) — c'est ce que ce rappel
+   * permet, sans scrutation ni délai arbitraire.
+   */
+  onListen?: (listen: { host: string; port: number }) => void;
 }
 
 export interface SignalingLinkStats {
@@ -435,6 +443,8 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
       candidateServer.listen({ host, port }, () => {
         server = candidateServer;
         listen = { host, port };
+        // Vient après le bind, jamais avant : on ne peut annoncer qu'un port réellement écouté.
+        options.onListen?.(listen);
         signaling = createLocalSignaling({
           port,
           now: options.now,

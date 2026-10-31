@@ -467,6 +467,20 @@ function startSignalingLink(roomId: string, name: string, selfId: string): void 
     ...(role === 'client' && remote ? { port: remote.port } : {}),
     now: () => systemTimers.now(),
     onMessage: (message) => sendEvent(IPC.eventSignal, message),
+    onListen: (listen) => {
+      // Annonce mDNS (SPEC-001 A5) : le salon que CETTE machine héberge devient rejoignable. Sans
+      // elle, aucun autre poste ne voyait de salon — la liste restait vide et « rejoindre » un
+      // salon distant était impossible sur un vrai réseau.
+      if (role !== 'host') return;
+      // Un lien remplacé (ou fermé) entre le bind et ce rappel ne doit pas annoncer un port mort.
+      if (signalingLink === null) return;
+      const state = bridge.getRoomState();
+      discovery.announce({
+        roomName: state.roomName ?? roomId,
+        port: listen.port,
+        participants: state.participantCount,
+      });
+    },
   });
 }
 
@@ -474,6 +488,9 @@ function startSignalingLink(roomId: string, name: string, selfId: string): void 
 function stopSignalingLink(detail: string): void {
   const link = signalingLink;
   signalingLink = null;
+  // Le salon n'est plus hébergé ici : l'annonce mDNS doit disparaître en même temps que le lien,
+  // sinon les autres postes continuent de proposer un salon injoignable.
+  discovery.retract();
   if (link === null) return;
   try {
     link.close(detail);

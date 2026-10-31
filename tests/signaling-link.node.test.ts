@@ -10,7 +10,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { connect, type Socket } from 'node:net';
+import { connect, createServer, type Socket } from 'node:net';
 import { test } from 'node:test';
 
 import {
@@ -358,4 +358,59 @@ test('close() est idempotent et n’émet qu’un seul état « closed »', asyn
   link.close('test');
   link.close('test');
   assert.equal(messages.filter((m) => m.kind === 'link' && m.state === 'closed').length, 1);
+});
+
+
+/* ------------------------------------------------------------------ */
+/* onListen : ce que l'hôte annonce est le port qu'il ÉCOUTE           */
+/* ------------------------------------------------------------------ */
+
+test("onListen rend le port réellement écouté, une seule fois, après le bind", async () => {
+  const base = testBasePort();
+  const seen: Array<{ host: string; port: number }> = [];
+  const link = createSignalingLink({
+    role: 'host',
+    localId: 'local-test',
+    name: 'Hôte',
+    host: '127.0.0.1',
+    port: base,
+    now: () => Date.now(),
+    onMessage: () => undefined,
+    onListen: (listen) => seen.push(listen),
+  });
+
+  // Rien avant le bind : annoncer un port non écouté enverrait les autres postes dans le vide.
+  assert.equal(seen.length, 0, 'onListen ne doit pas précéder le bind');
+  await eventually(() => link.listen !== null);
+  assert.equal(seen.length, 1, 'onListen est appelé exactement une fois');
+  assert.deepEqual(seen[0], link.listen);
+  assert.equal(seen[0]?.host, '127.0.0.1');
+  assert.ok((seen[0]?.port ?? 0) > 0);
+
+  link.close('fin de test');
+});
+
+test('port demandé occupé : onListen rend le port suivant, celui qui est vraiment écouté', async () => {
+  const base = testBasePort();
+  const blocker = createServer();
+  await new Promise<void>((resolve) => blocker.listen({ host: '127.0.0.1', port: base }, resolve));
+
+  const seen: Array<{ host: string; port: number }> = [];
+  const link = createSignalingLink({
+    role: 'host',
+    localId: 'local-test',
+    name: 'Hôte',
+    host: '127.0.0.1',
+    port: base,
+    now: () => Date.now(),
+    onMessage: () => undefined,
+    onListen: (listen) => seen.push(listen),
+  });
+
+  await eventually(() => link.listen !== null);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]?.port, base + 1, 'le port publié doit être celui qui écoute, pas celui demandé');
+
+  link.close('fin de test');
+  await new Promise<void>((resolve) => blocker.close(() => resolve()));
 });
