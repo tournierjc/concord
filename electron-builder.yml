@@ -73,7 +73,11 @@ deb:
   recommends: []
 
 appImage:
-  license: LICENCE
+  # appImage.license embarquait « LICENCE », fichier ABSENT du dépôt : toute
+  # construction AppImage échouait (VERIF 029, 2026-10-31). Le titulaire des
+  # droits n'est pas tranché par le propriétaire du projet, donc aucun LICENCE
+  # n'est inventé ici. L'option est retirée pour que la cible reste
+  # constructible ; à rétablir (license: LICENCE) le jour où le fichier existe.
   artifactName: concord-${version}-${arch}.AppImage
 
 win:

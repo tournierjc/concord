@@ -105,3 +105,26 @@ Reste ouvert, hors de ma compétence : `package.json` déclare `"license": "MIT"
 paquet AppImage échouera sur cette ligne. Il faut un texte de licence et un nom de titulaire ; je
 n'en invente pas. À trancher par le propriétaire avant toute distribution, et avant tout passage du
 dépôt en public.
+
+## 7. Suite du même jour — le paquet AppImage est débloqué sans trancher le titulaire
+
+VERIF 029 (Banc, 2026-10-31T15:16–15:20Z) a reproduit l'échec annoncé en fin de §6 :
+`⨯ cannot find specified resource "LICENCE", nor relative to "…/build", neither relative to project
+dir`. Constat : une ligne de configuration suffisait à rendre la cible AppImage **inconstructible**
+pour une raison qui n'a rien à voir avec le code.
+
+Décision (Régie) : **retirer `appImage.license`** plutôt que créer un `LICENCE` de toutes pièces. Le
+titulaire des droits est une décision du propriétaire, pas une valeur par défaut ; en attendant, la
+cible redevient constructible et l'absence de licence embarquée est *dite* dans le fichier de
+configuration (commentaire de trois lignes) et dans `VERIF/smoke-desktop.md` §4. À rétablir
+(`license: LICENCE`) le jour où le fichier existe.
+
+Mesure : `electron-builder --linux AppImage` → **exit 0**, `release/concord-1.0.0-arm64.AppImage`,
+96 634 946 o. La cible deb, elle, reste bloquée par l'hôte (fpm embarqué x86 → `Exec format
+error` sur arm64) et non par la configuration : `homepage` et `author` ont été ajoutés à
+`package.json` pour lever `⨯ Please specify project homepage`, le paquet lui-même n'est **pas**
+vérifié.
+
+Réserve inchangée : rien de tout cela ne tranche le **nom du titulaire** ni le **texte** de la
+licence (`package.json` dit MIT). Tant que ce n'est pas tranché, le dépôt ne doit pas passer en
+public.

@@ -195,25 +195,48 @@ sample_proc() {
   done
 }
 
-# --- attribution : processus lan-voice / electron actifs --------------------
+# --- attribution : processus concord / electron actifs ---------------------
+# AD-28 (2026-10-31) : le motif historique était *desktop-lan* ; renommé en
+# *concord*. Effet de bord traité ici : « concord » est aussi le nom du
+# RÉPERTOIRE du dépôt, donc toute commande citant un chemin du dépôt (un
+# tcpdump écrivant dans VERIF/raw/…) était attribuée à l'application. Depuis,
+# l'attribution se fait sur le nom de l'EXÉCUTABLE (/proc/PID/exe), le motif
+# de ligne de commande ne servant plus que de repli quand /proc/PID/exe est
+# illisible. Les mesures datées antérieures au 2026-10-31 n'utilisaient pas ce
+# filtre : elles ne sont pas affectées par ce correctif.
 # Sans filtre -p, la mesure couvre TOUTE la machine : il faut pouvoir dire à
 # qui appartiennent les sockets vues. Si l'application ne tourne pas, aucune
 # adresse hors LAN relevée ne lui est imputable.
 attribution() {
-  say "--- attribution : processus lan-voice/electron actifs ---"
+  say "--- attribution : processus concord/electron actifs ---"
   FOUND=0
   for d in /proc/[0-9]*; do
     [ -r "$d/cmdline" ] || continue
     cl=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)
     case "$cl" in
       *measure-traffic.sh*) continue ;;   # ne pas s'attribuer soi-même
+      # Les outils de capture citent le chemin du dépôt (…/concord/VERIF/raw/…)
+      # et ne doivent jamais être pris pour l'application.
+      *tcpdump*|*dumpcap*|*tshark*) continue ;;
+    esac
+    attr=0
+    exe=$(readlink "$d/exe" 2>/dev/null)
+    exe=${exe##*/}
+    case "$exe" in
+      electron|concord) attr=1 ;;                 # exécutable de l'application
     esac
     case "$cl" in
-      *electron*|*concord*|*dist/main*)
-        say "  pid=${d#/proc/} $cl"
-        log "PROC pid=${d#/proc/} $cl"
-        FOUND=$((FOUND + 1)) ;;
+      *dist/main*) attr=1 ;;                      # main compilé (mode dev)
     esac
+    if [ -z "$exe" ]; then                        # /proc/…/exe illisible : repli
+      case "$cl" in *electron*|*concord*) attr=1 ;; esac
+    fi
+    if [ "$attr" -eq 1 ]; then
+      [ -n "$exe" ] || exe="(exe illisible)"
+      say "  pid=${d#/proc/} $exe $cl"
+      log "PROC pid=${d#/proc/} $exe $cl"
+      FOUND=$((FOUND + 1))
+    fi
   done
   if [ "$FOUND" -eq 0 ]; then
     say "  (aucun) -> aucune socket mesurée ne peut être imputée à l'application"

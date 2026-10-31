@@ -10,8 +10,14 @@
 #      bugsnag, rollbar, datadog, newrelic, countly, react-ga).
 #   2. node_modules/ : aucun de ces paquets n'est présent sur le disque
 #      (node_modules absent -> SKIP explicite, pas un succès).
-#   3. electron-builder : `publish` doit valoir null (racine et/ou build.publish
-#      de package.json ; electron-builder.yml|yaml ignoré s'il est présent).
+#   3. package.json : AUCUN champ `build` (AD-28). read-config-file lit
+#      package.json["build"] EN PRIORITÉ et n'ouvre electron-builder.yml que si
+#      ce champ est absent (node_modules/read-config-file/out/main.js:68-72) :
+#      un champ build rend le yml INERTE, donc c'est une double source de config
+#      = échec, même si le build qu'il contient est propre. `publish` doit en
+#      outre valoir null à la racine de package.json.
+#   3bis. electron-builder.yml : `publish: null` — SEULE source de config après
+#      AD-28 (invariant : pas de champ build + publish null dans le yml).
 #   4. src/ : aucune occurrence de autoUpdater / electron-updater / setFeedURL.
 #
 # Sortie : dernière ligne machine  CHECK_DEPS RESULT=PASS|FAIL|SKIP
@@ -67,12 +73,21 @@ else
       const top = has(p,"publish") ? p.publish : undefined;
       const inBuild = has(p.build,"publish") ? p.build.publish : undefined;
       const show = v => v===undefined ? "ABSENT" : (v===null ? "null" : JSON.stringify(v));
-      console.log("top-level="+show(top)+" build.publish="+show(inBuild));
+      const buildState = has(p,"build") ? "PRESENT" : "ABSENT";
+      // state = verdict explicite calcule ici, pas une heuristique sur la forme
+      // de la chaine : ajouter un champ ne peut plus changer un OK en FAIL muet.
+      const state = buildState==="PRESENT" ? "BAD-DOUBLE-SOURCE"
+                  : top===null              ? "OK-UNIQUE"
+                  :                           "BAD-PUBLISH";
+      console.log("top-level="+show(top)+" build.publish="+show(inBuild)+" build="+buildState+" state="+state);
     ' "$PKG" 2>/dev/null)
     case "$PUB" in
-      *"top-level=null build.publish=null"*) ok "publish=null aux deux endroits ($PUB)" ;;
+      *"state=OK-UNIQUE"*)
+        ok "pas de champ build ; publish=null (yml = seule source de config)" ;;
+      *"state=BAD-DOUBLE-SOURCE"*)
+        bad "double source de config : package.json contient un champ build, lu EN PRIORITÉ par read-config-file, electron-builder.yml est alors IGNORÉ — AD-28 ($PUB)" ;;
       ERR*) skip "package.json illisible par node ($PUB)" ;;
-      *) bad "publish n'est pas null partout ($PUB)" ;;
+      *) bad "publish n'est pas null à la racine de package.json ($PUB)" ;;
     esac
   else
     skip "node absent : contrôle JSON impossible, repli grep"
@@ -95,6 +110,10 @@ if [ -n "$YML" ]; then
   if grep -q -E '^[[:space:]]*publish[[:space:]]*:[[:space:]]*null' "$YML"; then
     ok "$(basename "$YML") : publish: null présent"
     YML_CHECKED=1
+    case "${PUB:-}" in
+      *build=PRESENT*)
+        say "  [INFO] ce publish: null est INERTE : package.json contient encore un champ build, lu en priorité (voir §3)" ;;
+    esac
   else
     bad "$(basename "$YML") : aucun 'publish: null'"
     YML_CHECKED=1

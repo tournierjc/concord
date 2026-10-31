@@ -177,3 +177,37 @@ npm run test:vitest # mesuré exit=1 (20/20), ne pas utiliser
 
 Les lignes plus anciennes de ce tableau sont **fausses aujourd'hui** : elles décrivent un état
 daté, utile seulement pour savoir depuis quand un chiffre a cessé d'être vrai.
+
+## Addendum 2026-10-31T15:2xZ (Régie) — installation et `npm test` sur clone nu, mesurés
+
+Comble le point « non mesuré » ci-dessus : une machine vierge a été essayée pour de vrai
+(VERIF 029, clone nu de `ba47de5`, node v22.23.4 / npm 10.9.9, arm64), puis rejouée par la Régie
+après correctifs.
+
+**Procédure qui marche, depuis un clone sans `node_modules`** :
+
+```bash
+env -u NODE_ENV npm ci     # exit 0, 433 paquets — lockfile désormais versionné
+env -u NODE_ENV npm test   # 664 tests · 664 pass · 0 fail · 49 suites · ~5,3 s
+```
+
+**Deux causes d'échec trouvées et corrigées le 2026-10-31** (elles rendaient la recette impossible
+sur un poste neuf) :
+
+1. **Aucun `package-lock.json` versionné** → `npm ci` refusait de démarrer
+   (`npm error code EUSAGE`). Le lockfile (lockfileVersion 3, 524 entrées) est maintenant dans le
+   dépôt ; il a été résolu depuis le registre, donc il porte les binaires optionnels de toutes les
+   architectures (esbuild/rollup x64 comme arm64), pas seulement ceux de cet hôte.
+2. **`tsx` n'était déclaré nulle part** alors que `test:node` faisait `npx tsx` → sur cache npm
+   vierge : `npm error code ENOTCACHED … registry.npmjs.org/tsx`. `tsx` est maintenant en
+   devDependency (`4.23.15`) et le script l'appelle directement. Le remplacer par `node --test`
+   natif ne marche pas : 621 tests, 3 échecs `ERR_MODULE_NOT_FOUND` (imports relatifs sans
+   extension).
+
+**Piège d'environnement à connaître** : si `NODE_ENV=production` traîne dans l'environnement (c'est
+le cas sur cet hôte), `npm install`/`npm ci` sautent les devDependencies et `npm test` rend un rouge
+trompeur « Cannot find module 'electron' » (640 tests, 639 pass / 1 fail). D'où le `env -u NODE_ENV`
+ci-dessus : ce n'est pas une précaution de style, c'est la différence entre 664/664 et un faux rouge.
+
+**Le dépôt est autosuffisant** une fois `node_modules` présent : aucun test ne lit `VERIF/raw/`, un
+journal ou un fichier non versionné. `tsc --noEmit` : 0 diagnostic. `npm run build` : OK.

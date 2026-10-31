@@ -55,21 +55,32 @@ cd /work/lan-voice
 npm ci
 ```
 
-**Mesuré avant vous** : le dépôt **ne contient aucun `package-lock.json`**
-(`ls package-lock.json` → `No such file or directory`, relevé du 2026-10-31T04:03Z). `npm ci` échoue
-donc par construction (« can only install with an existing package-lock.json »). **Ce n'est pas un
-résultat à trouver, c'est un fait à confirmer** : recopiez le message exact.
+**Corrigé le 2026-10-31 par la Régie, après VERIF 029 (clone nu, aucun `node_modules`)** : le
+`package-lock.json` **est désormais versionné** (524 entrées, lockfileVersion 3, résolu depuis le
+registre — 245 590 o) et `npm ci` passe (**exit 0**, 433 paquets) puis `npm test` rend **664 tests /
+49 suites / 0 échec**. L'échec EUSAGE décrit dans les versions antérieures de cette page n'est plus
+reproductible : si vous le revoyez, c'est un défaut de dépôt, pas une fatalité.
 
-Repli si l'échec est confirmé :
+Second piège, mesuré et à écrire dans la procédure : **sur cet hôte `NODE_ENV=production` traîne
+dans l'environnement**, donc `npm install` saute les devDependencies (6 paquets) et `npm test` tombe
+en « Cannot find module 'electron' » (640 tests, 639 pass / 1 fail). Précédez d'un
+`env -u NODE_ENV` (ou `NODE_ENV=development`) — c'est la façon dont les comptes ci-dessus ont été
+obtenus.
+
+`tsx` est désormais **déclaré en devDependency** (`4.23.15`) et `test:node` l'appelle directement
+(`tsx --test …`) au lieu de `npx tsx`, qui exigeait le registre (ou un cache npm chaud) sur un poste
+neuf : `npm error code ENOTCACHED … registry.npmjs.org/tsx`.
+
+Repli si l'installation refuse malgré tout :
 
 ```bash
-npm install            # écrit package-lock.json (fichier nouveau : le signaler à Régie)
+env -u NODE_ENV npm install --include=dev
 ```
 
 Hors ligne (poste sans Internet, cache npm déjà chaud) :
 
 ```bash
-npm install --offline
+env -u NODE_ENV npm ci --offline
 ```
 
 Attendu : exit 0, `node_modules/electron` et `node_modules/electron-builder` présents, aucune
@@ -344,23 +355,40 @@ PASS/FAIL : ☐ PASS ☐ FAIL      observé : __________________________________
 ### D1 — Linux (poste A)
 
 ```bash
-npm run dist                       # = npm run build && electron-builder
+env -u NODE_ENV npm run dist       # = npm run build && electron-builder
 echo "dist exit=$?"
 ls -l release
 ```
 
-Attendu (cibles déclarées `electron-builder.yml:41-46`) : un `.AppImage` x64 et un `.deb` x64 dans
-`release/`.
+Attendu (cibles déclarées dans `electron-builder.yml`) : un `.AppImage` et un `.deb` dans `release/`.
 
-**Points à surveiller, relevés en statique et NON vérifiés par une construction** :
+Sur un hôte **arm64**, `npm run dist` sort **non zéro** au seul titre de la cible deb (fpm embarqué
+x86, cf. plus bas) alors que l'AppImage est déjà construite. Pour valider l'AppImage seule :
 
-- `electron-builder.yml:76` déclare `appImage.license: LICENCE`, or **aucun fichier `LICENCE` n'existe
-  à la racine** (`ls LICENCE` → `No such file or directory`, 2026-10-31). Recopiez le message exact
-  d'electron-builder : s'il échoue, c'est un défaut à corriger (fichier hors du périmètre de cette
-  étape).
-- `buildResources: build` (`electron-builder.yml:20`) pointe vers un dossier `build/` **absent** :
-  l'icône sera celle d'Electron par défaut (avertissement, pas une erreur).
-- `release/` n'existe pas dans le dépôt : **aucune construction n'a jamais abouti ici**.
+```bash
+env -u NODE_ENV ./node_modules/.bin/electron-builder --linux AppImage   # attendu : exit 0
+```
+
+**Points relevés en statique, et état au 2026-10-31T15:22Z (mesuré par la Régie)** :
+
+- ~~`electron-builder.yml` déclare `appImage.license: LICENCE`, or aucun fichier `LICENCE` n'existe
+  à la racine~~ → **corrigé** : VERIF 029 a reproduit l'échec (`⨯ cannot find specified resource
+  "LICENCE"`). L'option `appImage.license` est **retirée** et commentée dans `electron-builder.yml`
+  (le titulaire des droits n'est pas tranché : aucun `LICENCE` n'est inventé). Résultat mesuré :
+  `./node_modules/.bin/electron-builder --linux AppImage` → **exit=0**, artefact réel
+  `release/concord-1.0.0-arm64.AppImage`, **96 634 946 o** (arm64, electron 30.5.1). **À rétablir**
+  (`license: LICENCE`) le jour où le fichier existe.
+- `homepage` et `author` ajoutés à `package.json` : l'absence de `homepage` faisait échouer la cible
+  deb (`⨯ Please specify project homepage`). Le paquet deb n'est **toujours pas produit** sur cet
+  hôte : le `fpm` embarqué par electron-builder est un binaire x86 (`fpm-1.9.3-2.3.1-linux-x86`) et
+  meurt en `Exec format error` sur arm64 — limitation d'hôte, pas de configuration. **La cible deb
+  reste donc NON vérifiée** : la rejouer sur une machine x64.
+- `buildResources: build` (`electron-builder.yml`) pointe vers un dossier `build/` **absent** :
+  l'icône est celle d'Electron par défaut (`• default Electron icon is used`), avertissement et non
+  erreur. Défaut d'ergonomie connu, non traité à ce stade.
+- `release/` **existe maintenant** : les deux constructions ci-dessus l'ont produit. Il reste hors
+  versionnement (`.gitignore`), donc non probant pour un tiers — d'où les ordres de grandeur
+  ci-dessus, datés et reproductibles.
 
 Vérifications sur les artefacts :
 
@@ -380,7 +408,7 @@ fichiers latest*/update* : ____   observé : ________________________________
 ### D2 — Windows (machine Windows x64)
 
 ```bash
-npm ci            # même réserve que P1 (aucun package-lock.json)
+env -u NODE_ENV npm ci   # cf. P1 : lockfile versionné depuis le 2026-10-31, NODE_ENV à neutraliser
 npm run dist
 dir release
 ```
