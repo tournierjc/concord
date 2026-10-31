@@ -12,11 +12,11 @@
 > `package.json` `be6c0e89…`, `tests/scripts-coverage.node.test.ts` `53326963…`,
 > `src/engine/README.md` `338df4a1…`, version précédente de la présente page `5085ad20…`.
 
-## TL;DR — état courant (T-ROOMNAME, 2026-10-31T20:11Z)
+## TL;DR — état courant (T-MDNS, 2026-10-31T20:16Z)
 
 | Script | Commande réelle | Sortie mesurée (début UTC) | Verdict |
 |---|---|---|---|
-| `npm test` (= `npm run test:node`) | `tsx --test` sur **27 fichiers** listés à la main (plus de `npx`) | **exit=0 · 678 tests · 678 pass · 0 fail · 0 skip · 53 suites · 5 208 ms** (`20:11:21Z`) | ✅ le seul runner de recette |
+| `npm test` (= `npm run test:node`) | `tsx --test` sur **27 fichiers** listés à la main (plus de `npx`) | **exit=0 · 675 tests · 675 pass · 0 fail · 0 skip · 49 suites · 5 238 ms** (`20:16:28Z`) | ✅ le seul runner de recette |
 | `npm run typecheck` | `tsc -p tsconfig.json --noEmit` | **exit=0 · 0 ligne de sortie** (`15:28:02Z`) | ✅ |
 | `npm run build:main` | `tsc -p tsconfig.main.json` | **exit=0** (`15:28:03Z`) | ✅ |
 | `npx vite build` | vite → `dist/` | **exit=0 · built in 459 ms** (`15:28:04Z`) | ✅ |
@@ -26,15 +26,16 @@
 | `npm run dev` / `npm start` | vite dev / electron | **non exécutés** | ⚠️ non vérifié — §« Points non vérifiés » |
 
 Déterminisme : `npm test` lancé **deux fois** dans la même session, mêmes comptes —
-run 1 (`20:11:21→20:11:26Z`) 678 / 678 / 0 fail / 53 suites / 5 208 ms ; run 2
-(`20:11:40→20:11:50Z`) 678 / 678 / 0 fail. Le second run a suivi `sh VERIF/run-all.sh` (`20:11:50Z`,
+run 1 (`20:16:28→20:16:34Z`) 675 / 675 / 0 fail / 49 suites / 5 238 ms ; run 2
+(`20:16:43→20:16:48Z`) 675 / 675 / 0 fail, suivi de `sh VERIF/run-all.sh` (`20:16:5xZ`,
 `LAN-VOICE VERIF RESULT=PASS`). La durée varie, jamais les comptes.
 
-Note T-ROOMNAME : `tests/room-bridge.node.test.ts` (10 tests, **nouveau**) couvre l'annuaire de salon
-du main — module qui n'avait aucun test alors qu'il tient l'état affiché (nom du salon, participants,
-mute/deafen/PTT, gain) et qu'il émet les `lan:event:*`. Il fige notamment l'émission par **valeur** de
-canal (le bug des noms de clé émettait des événements que `guardPayload` refusait en silence) et le
-fait que `payload.name` décrit le SALON, plus le participant.
+Note T-MDNS : l'hôte **annonce** désormais son salon (`_concord._udp`, port réellement écouté,
+TXT `roomName`/`participants`) et retire l'annonce à la fermeture — sans quoi la liste des salons
+restait vide sur un vrai réseau et « rejoindre » un salon distant était impossible.
+`tests/discovery-bridge.node.test.ts` (9 tests, **nouveau**) exerce la publication sur un port mDNS
+en mémoire (aucun socket, aucun port 5353) ; `tests/signaling-link.node.test.ts` gagne 2 tests
+`onListen` (le port publié est celui qui écoute — `base+1` quand le port demandé est occupé).
 
 **Le compte de `test:vitest` dépend de l'arbre de travail, pas du code** (mesuré T20) : `vitest run`
 n'a aucune configuration `test.exclude` dans `vite.config.ts`, il ramasse donc tout
@@ -51,7 +52,7 @@ Reproduire à l'identique (état de référence `15aed91`) :
 ```
 cd /work/lan-voice
 ls tests/*.test.ts | wc -l                     # 27
-env -u NODE_ENV npm test                       # attendu : exit=0, # tests 678, # fail 0
+env -u NODE_ENV npm test                       # attendu : exit=0, # tests 675, # fail 0
 env -u NODE_ENV npx tsc -p tsconfig.json --noEmit  # attendu : exit=0, 0 ligne
 env -u NODE_ENV npm run build:main             # attendu : exit=0
 env -u NODE_ENV npx vite build                 # attendu : exit=0
@@ -205,7 +206,7 @@ npm run test:vitest # mesuré exit=1 (26 en arbre propre, 1710 en arbre de trava
 | `2026-10-31T01:05Z` | 13 | 378 (378 pass) | exit=0 | — | VERIF-006 (T11) |
 | `2026-10-31T01:55Z` | 14 | 523 (523 pass) | exit=0 | exit=0 | VERIF-016 (T16b) |
 | `2026-10-31T02:0xZ` | 20 | 530 (530 pass) | exit=0 | exit=0 | T19 |
-| **`2026-10-31T20:11Z`** | **27** | **678 (678 pass)** | **exit=0** | **exit=0** | **T-ROOMNAME (branche `fix/room-name-semantics`)** |
+| **`2026-10-31T20:16Z`** | **27** | **675 (675 pass)** | **exit=0** | **exit=0** | **T-MDNS (branche `fix/mdns-announce`)** |
 | `2026-10-31T15:2xZ` | 26 | 664 (664 pass) | exit=0 | exit=0 | T20 (VERIF 031) |
 
 Les lignes plus anciennes de ce tableau sont **fausses aujourd'hui** : elles décrivent un état
