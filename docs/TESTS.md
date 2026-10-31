@@ -12,11 +12,11 @@
 > `package.json` `be6c0e89…`, `tests/scripts-coverage.node.test.ts` `53326963…`,
 > `src/engine/README.md` `338df4a1…`, version précédente de la présente page `5085ad20…`.
 
-## TL;DR — état courant (T-SIGNAL, 2026-10-31T20:21Z)
+## TL;DR — état courant (T-I18N, 2026-10-31T20:25Z)
 
 | Script | Commande réelle | Sortie mesurée (début UTC) | Verdict |
 |---|---|---|---|
-| `npm test` (= `npm run test:node`) | `tsx --test` sur **26 fichiers** listés à la main (plus de `npx`) | **exit=0 · 669 tests · 669 pass · 0 fail · 0 skip · 49 suites · 5 221 ms** (`20:21:40Z`) | ✅ le seul runner de recette |
+| `npm test` (= `npm run test:node`) | `tsx --test` sur **27 fichiers** listés à la main (plus de `npx`) | **exit=0 · 672 tests · 672 pass · 0 fail · 0 skip · 51 suites · 5 216 ms** (`20:25:54Z`) | ✅ le seul runner de recette |
 | `npm run typecheck` | `tsc -p tsconfig.json --noEmit` | **exit=0 · 0 ligne de sortie** (`15:28:02Z`) | ✅ |
 | `npm run build:main` | `tsc -p tsconfig.main.json` | **exit=0** (`15:28:03Z`) | ✅ |
 | `npx vite build` | vite → `dist/` | **exit=0 · built in 459 ms** (`15:28:04Z`) | ✅ |
@@ -26,15 +26,16 @@
 | `npm run dev` / `npm start` | vite dev / electron | **non exécutés** | ⚠️ non vérifié — §« Points non vérifiés » |
 
 Déterminisme : `npm test` lancé **deux fois** dans la même session, mêmes comptes —
-run 1 (`20:21:40→20:21:45Z`) 669 / 669 / 0 fail / 49 suites / 5 221 ms ; run 2
-(`20:21:5xZ`) 669 / 669 / 0 fail. La durée varie, jamais les comptes.
+run 1 (`20:25:54→20:25:59Z`) 672 / 672 / 0 fail / 51 suites / 5 216 ms ; run 2
+(`20:26:0xZ`) 672 / 672 / 0 fail. La durée varie, jamais les comptes.
 
-Note T-SIGNAL : le parseur de la signalisation entrante valide désormais **chaque champ** (et non plus
-seulement `type`) et la liste de pairs d'un `hello` est bornée. Un hôte hostile qui envoyait
-`{"type":"hello","peers":[null]}` provoquait un `TypeError` DANS le gestionnaire `data` de la socket,
-hors de tout `try` : le process principal mourait. 5 tests de plus dans
-`tests/signaling-link.node.test.ts`, dont un bout-en-bout où un faux hôte envoie la ligne piégée puis
-un `hello` sain — la liaison survit et le pair sain est annoncé.
+Note T-I18N : cinq libellés s'affichaient avec leur moustache (« Salon de {{name}} », « Volume de
+{{name}} — Léo », « … connecté à « {{name}} » », « Rétablir {{shortcut}} », «  dBFS »). Le catalogue
+était conforme (`design/check-i18n.mjs` : mêmes clés et mêmes moustaches FR/EN) mais **rien ne
+vérifiait que le code fournit les variables**. `tests/i18n-interpolation.node.test.ts` (8 tests,
+**nouveau**) ferme ce trou : il joue d'abord le détecteur sur des extraits fabriqués (il doit savoir
+échouer), puis scanne `src/` — 0 manque après correction, avec comptes d'appels et de fichiers
+vérifiés pour qu'un test ne passe pas parce qu'il ne lit rien.
 
 **Le compte de `test:vitest` dépend de l'arbre de travail, pas du code** (mesuré T20) : `vitest run`
 n'a aucune configuration `test.exclude` dans `vite.config.ts`, il ramasse donc tout
@@ -50,8 +51,8 @@ Reproduire à l'identique (état de référence `15aed91`) :
 
 ```
 cd /work/lan-voice
-ls tests/*.test.ts | wc -l                     # 26
-env -u NODE_ENV npm test                       # attendu : exit=0, # tests 669, # fail 0
+ls tests/*.test.ts | wc -l                     # 27
+env -u NODE_ENV npm test                       # attendu : exit=0, # tests 672, # fail 0
 env -u NODE_ENV npx tsc -p tsconfig.json --noEmit  # attendu : exit=0, 0 ligne
 env -u NODE_ENV npm run build:main             # attendu : exit=0
 env -u NODE_ENV npx vite build                 # attendu : exit=0
@@ -205,7 +206,7 @@ npm run test:vitest # mesuré exit=1 (26 en arbre propre, 1710 en arbre de trava
 | `2026-10-31T01:05Z` | 13 | 378 (378 pass) | exit=0 | — | VERIF-006 (T11) |
 | `2026-10-31T01:55Z` | 14 | 523 (523 pass) | exit=0 | exit=0 | VERIF-016 (T16b) |
 | `2026-10-31T02:0xZ` | 20 | 530 (530 pass) | exit=0 | exit=0 | T19 |
-| **`2026-10-31T20:21Z`** | **26** | **669 (669 pass)** | **exit=0** | **exit=0** | **T-SIGNAL (branche `fix/signal-hardening`)** |
+| **`2026-10-31T20:25Z`** | **27** | **672 (672 pass)** | **exit=0** | **exit=0** | **T-I18N (branche `fix/i18n-interpolation`)** |
 | `2026-10-31T15:2xZ` | 26 | 664 (664 pass) | exit=0 | exit=0 | T20 (VERIF 031) |
 
 Les lignes plus anciennes de ce tableau sont **fausses aujourd'hui** : elles décrivent un état

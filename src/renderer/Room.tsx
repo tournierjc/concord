@@ -196,7 +196,7 @@ export function Room({
             </span>
             <label className="participant__gain">
               <span className="visually-hidden">
-                {t('participant.volume')} — {participant.name}
+                {t('participant.volume', { name: participant.name })}
               </span>
               <input
                 type="range"
@@ -218,7 +218,7 @@ export function Room({
       {participants.length <= 1 ? (
         <div className="empty">
           <p className="empty__title">{t('room.empty.title')}</p>
-          <p className="empty__body">{t('room.empty.body')}</p>
+          <p className="empty__body">{t('room.empty.body', { name: room.roomName ?? '' })}</p>
         </div>
       ) : null}
 
