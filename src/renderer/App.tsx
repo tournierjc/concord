@@ -19,14 +19,24 @@ import type {
   RoomSummaryDto,
   ShortcutConflictDto,
 } from '../shell/ipc-contract';
+import {
+  NICKNAME_MAX_LENGTH,
+  type NicknameError,
+  nicknameError,
+  nicknameErrorKey,
+} from '../shell/nickname';
 import { MAX_ROOM_PARTICIPANTS, type Settings } from '../shell/settings-schema';
 import { lanApi } from './api';
+import { browserTimers } from './browser-timers';
 import { createTranslator, type Locale } from './i18n';
 import { Room } from './Room';
 import { SettingsPanel } from './Settings';
 import { applyTheme, watchSystemTheme } from './theme';
 
 type Screen = 'rooms' | 'room';
+
+/** Durée d'affichage du toast de confirmation (S1.11) : assez pour être lu, pas assez pour gêner. */
+const TOAST_MS = 2600;
 
 const EMPTY_CONTROL: ControlStateDto = {
   muted: false,
@@ -60,6 +70,89 @@ const EMPTY_DISCOVERY: DiscoveryState = { phase: 'loading', rooms: [], error: nu
 
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+/**
+ * IdentityRow — le pseudo, sous l'en-tête (SPEC-002 S1.11, arbre de composants §3.1).
+ *
+ * Le pseudo n'est PAS dans la barre de titre : S1.11 explique qu'un champ de 32 caractères dans une
+ * barre de 44 px ne peut porter ni le libellé, ni l'aide, ni le compteur `n/32`. Il vit donc ici.
+ *
+ * Validation NON bloquante (S1.11) : le pseudo précédent valide reste en vigueur, rien n'est
+ * désactivé. Le champ porte `aria-invalid` et son message est lié par `aria-describedby`.
+ */
+interface IdentityRowProps {
+  value: string;
+  locale: Locale;
+  onChange: (nickname: string) => void;
+  onSaved: () => void;
+}
+
+function IdentityRow({ value, locale, onChange, onSaved }: IdentityRowProps): JSX.Element {
+  const t = createTranslator(locale);
+  const [draft, setDraft] = useState<string>(value);
+  const [error, setError] = useState<NicknameError | null>(null);
+  const errorId = 'identity-error';
+
+  // Le champ suit la valeur des réglages tant que l'utilisateur ne l'a pas touché : un pseudo
+  // venu du prénom du compte OS (SPEC-001 A6) doit s'afficher, pas rester invisible.
+  const [touched, setTouched] = useState<boolean>(false);
+  useEffect(() => {
+    if (!touched) setDraft(value);
+  }, [value, touched]);
+
+  const accept = (next: string): void => {
+    const found = nicknameError(next);
+    setDraft(next);
+    // S1.11 distingue les deux déclencheurs : `tooLong` tombe à la frappe (c'est un collage),
+    // `empty` tombe à la SORTIE de champ — signaler « Entrez un pseudo. » pendant qu'on efface la
+    // ligne pour la réécrire serait un reproche en pleine saisie. Une frappe valide, elle, efface
+    // l'erreur immédiatement et met la valeur en vigueur.
+    if (found === 'tooLong') setError('tooLong');
+    else if (found === null) {
+      setError(null);
+      onChange(next);
+    }
+  };
+
+  return (
+    <div className="identity">
+      <label className="field" htmlFor="identity-input">
+        <span className="field__label">
+          {t('app.nickname.label')}
+          <span className="identity__counter">
+            {t('common.counter', { value: draft.length, max: NICKNAME_MAX_LENGTH })}
+          </span>
+        </span>
+        <input
+          id="identity-input"
+          className={error === null ? 'input' : 'input input--invalid'}
+          type="text"
+          value={draft}
+          maxLength={NICKNAME_MAX_LENGTH}
+          placeholder={t('app.nickname.placeholder')}
+          aria-invalid={error !== null}
+          aria-describedby={error === null ? 'identity-help' : `identity-help ${errorId}`}
+          onFocus={() => setTouched(true)}
+          onChange={(event) => accept(event.target.value)}
+          onBlur={() => {
+            // À la sortie de champ : l'erreur reste (le pseudo précédent gouverne), sinon on confirme.
+            const found = nicknameError(draft);
+            setError(found);
+            if (found === null) onSaved();
+          }}
+        />
+        <span className="field__help" id="identity-help">
+          {t('app.nickname.help')}
+        </span>
+        {error === null ? null : (
+          <span className="field__error" id={errorId}>
+            {t(nicknameErrorKey(error))}
+          </span>
+        )}
+      </label>
+    </div>
+  );
 }
 
 export function App(): JSX.Element {
@@ -141,6 +234,17 @@ export function App(): JSX.Element {
     };
   }, [api, refreshRooms]);
 
+  // Toast de confirmation (S1.11 : `app.nickname.saved` à la sortie de champ). Il vit dans une
+  // région `aria-live="polite"` et se referme tout seul ; l'horloge est celle de la page
+  // (`browser-timers`), seul endroit autorisé à poser un minuteur côté renderer.
+  const [toast, setToast] = useState<string | null>(null);
+  useEffect(() => {
+    if (toast === null) return undefined;
+    const timers = browserTimers();
+    const handle = timers.once(TOAST_MS, () => setToast(null));
+    return () => timers.cancel(handle);
+  }, [toast]);
+
   const patchSettings = useCallback(
     async (patch: Partial<Settings>) => {
       try {
@@ -191,12 +295,31 @@ export function App(): JSX.Element {
       <header className="titlebar">
         <h1 className="titlebar__title">{t('app.title')}</h1>
         <div className="titlebar__actions">
-          <span className="titlebar__identity">{settings.nickname || t('common.none')}</span>
           <button type="button" className="button" onClick={() => setSettingsOpen(true)}>
             {t('settings.title')}
           </button>
         </div>
       </header>
+
+      {screen === 'rooms' ? (
+        <IdentityRow
+          locale={locale}
+          value={settings.nickname}
+          onChange={(nickname) => void patchSettings({ nickname })}
+          onSaved={() => setToast(t('app.nickname.saved'))}
+        />
+      ) : null}
+
+      <div className="toast-region" role="status" aria-live="polite">
+        {toast === null ? null : (
+          <p className="toast">
+            {toast}
+            <button type="button" className="button button--compact" onClick={() => setToast(null)}>
+              {t('common.close')}
+            </button>
+          </p>
+        )}
+      </div>
 
       {error ? (
         <div className="banner banner--error" role="alert">

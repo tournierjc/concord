@@ -51,6 +51,7 @@
   "common.loading": "Loading…",
   "common.refresh": "Refresh",
   "common.percent": "{{value}} %",
+  "common.counter": "{{value}}/{{max}}",
   "common.seconds": "{{s}} s",
   "common.keyChord": "{{keys}}",
   "common.key.ctrl": "Ctrl",
