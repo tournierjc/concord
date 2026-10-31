@@ -205,9 +205,32 @@ test('eventRoomState : bornes respectées', () => {
     phase: 'connected',
     participantCount: 3,
     selfId: 'p1',
+    // Port de signalisation effectif : une MESURE (socket écoutée, ou port lu dans l'annonce), jamais
+    // la valeur des réglages. `null` hors salon, entier sinon (SPEC-001 A5, SPEC-002 D1).
+    signalingPort: 47821,
     notice: null,
   };
   assert.equal(guardPayload('event', IPC.eventRoomState, state).ok, true);
+  assert.equal(guardPayload('event', IPC.eventRoomState, { ...state, signalingPort: null }).ok, true);
+  assert.equal(
+    guardPayload('event', IPC.eventRoomState, { ...state, signalingPort: 47821.5 }).ok,
+    false,
+    'un port est un entier',
+  );
+  assert.equal(
+    guardPayload('event', IPC.eventRoomState, { ...state, signalingPort: '47821' }).ok,
+    false,
+    'un port est un nombre, pas une chaîne',
+  );
+  {
+    const withoutPort: Record<string, unknown> = { ...state };
+    delete withoutPort['signalingPort'];
+    assert.equal(
+      guardPayload('event', IPC.eventRoomState, withoutPort).ok,
+      false,
+      'le port effectif est exigé : un main qui oublie de le publier casse le contrat, pas l’UI',
+    );
+  }
   assert.equal(
     guardPayload('event', IPC.eventRoomState, { ...state, participantCount: 9 }).ok,
     false,

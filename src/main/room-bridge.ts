@@ -17,7 +17,7 @@ import type {
   ParticipantDto,
   RoomJoinPayload,
   RoomPhase,
-  RoomStateDto,
+  RoomStateCore,
   TalkModeDto,
 } from '../shell/ipc-contract';
 
@@ -27,7 +27,7 @@ import type {
  */
 export type BridgeEvent =
   | { channel: typeof IPC.eventParticipants; payload: ParticipantDto[] }
-  | { channel: typeof IPC.eventRoomState; payload: RoomStateDto }
+  | { channel: typeof IPC.eventRoomState; payload: RoomStateCore }
   | { channel: typeof IPC.eventControlState; payload: ControlStateDto };
 
 export type BridgeEmitter = (event: BridgeEvent) => void;
@@ -53,7 +53,7 @@ export class RoomBridge {
     this.emit = emit;
   }
 
-  getRoomState(): RoomStateDto {
+  getRoomState(): RoomStateCore {
     return {
       roomId: this.roomId,
       roomName: this.roomName,
@@ -79,7 +79,7 @@ export class RoomBridge {
   }
 
   /** Rejoint un salon. Le 9ᵉ participant est refusé, avec une clé de message pour l'UI. */
-  join(payload: RoomJoinPayload): RoomStateDto {
+  join(payload: RoomJoinPayload): RoomStateCore {
     if (this.participants.length >= IPC_MAX_PARTICIPANTS) {
       this.notice = 'room.row.fullReason';
       this.emitRoomState();
@@ -106,7 +106,7 @@ export class RoomBridge {
     return this.getRoomState();
   }
 
-  leave(): RoomStateDto {
+  leave(): RoomStateCore {
     this.roomId = null;
     this.roomName = null;
     this.phase = 'idle';
