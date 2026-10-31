@@ -28,6 +28,7 @@ import { registerPushToTalk, releasePushToTalk, type PttRegistration } from './p
 import { appUrl, registerAppProtocol, registerAppScheme } from './renderer-protocol';
 import { isPermissionAllowed, isPermissionCheckAllowed } from './permissions';
 import { RoomBridge, type BridgeEvent } from './room-bridge';
+import { effectiveSignalingPort } from './signaling-port';
 import { applySignalToRoster } from './roster-link';
 import { createSettingsStore, type SettingsStore } from './settings-store';
 import { systemTimers } from './timers';
@@ -377,10 +378,32 @@ function syncOverlayGeometry(): void {
   });
 }
 
+/**
+ * Port de signalisation RÉELLEMENT utilisé (SPEC-001 A5, SPEC-002 D1) — lu, jamais supposé.
+ *
+ * L'onglet Réseau affichait `settings.network.signalingPort`, la valeur demandée dans les réglages :
+ * le moteur ne la lit pas (il part de 47821 et incrémente si le port est pris), et SPEC-002 D1
+ * interdit d'afficher un port qu'on n'a pas lu. On publie donc la mesure : la socket écoutée quand ce
+ * poste héberge, le port annoncé par l'hôte quand il est client, rien hors salon.
+ */
+function currentSignalingPort(): number | null {
+  return effectiveSignalingPort({
+    listen: signalingLink?.listen ?? null,
+    roomId: bridge.getRoomState().roomId,
+    rooms: discovery.list(),
+  });
+}
+
 function forwardBridgeEvent(event: BridgeEvent): void {
   // `BridgeEvent.channel` porte les VALEURS du canon (`lan:event:participants`, …), pas les noms
   // de clés : on ne transmet donc aucune conversion, et le discriminant reste vérifié par le type.
-  sendEvent(event.channel, event.payload);
+  // L'état de salon part enrichi du port effectif : il n'existe que dans le main (socket d'écoute,
+  // annonces lues), et l'UI n'a pas le droit de l'inventer.
+  if (event.channel === IPC.eventRoomState) {
+    sendEvent(event.channel, { ...event.payload, signalingPort: currentSignalingPort() });
+  } else {
+    sendEvent(event.channel, event.payload);
+  }
   // Comparaison contre les VALEURS du canon (`IPC.*`). Un littéral repris du nom de clé est toujours
   // différent de la valeur `'lan:event:…'` correspondante : il rendrait ce branchement mort.
   // C'est le bug corrigé ici : `overlay.apply` n'était plus jamais rappelé, la pastille overlay

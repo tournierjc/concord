@@ -215,6 +215,14 @@ body {
   font-size: var(--text-xs);
 }
 
+.field__help--warn {
+  /* Port de signalisation incrémenté (SPEC-002 S3.15) : l'information passe en `state.warn`, 12 px.
+     `design/tokens.json` nomme ce jeton `state.warn` — la variable générée est `--color-state-warn`.
+     `--color-state-warning` (avec « ing ») n'existe dans AUCUN jeton : la couleur serait héritée, et
+     l'avertissement invisible en tant qu'avertissement. */
+  color: var(--color-state-warn);
+}
+
 .field__error {
   /* SPEC-002 §Palette : `state.mute` = « micro coupé, erreur ». Les jetons s'appellent `state.mute`,
      `state.warn`, `state.ok` : `--color-state-danger` n'existe dans aucun jeton, donc cette ligne

@@ -52,6 +52,8 @@ const EMPTY_ROOM: RoomStateDto = {
   phase: 'idle',
   participantCount: 0,
   selfId: null,
+  // Hors salon, aucun port n'a été lu : l'UI dit « aucun » au lieu d'afficher un chiffre supposé.
+  signalingPort: null,
   notice: null,
 };
 
@@ -376,6 +378,7 @@ export function App(): JSX.Element {
         <SettingsPanel
           settings={settings}
           locale={locale}
+          session={room}
           onChange={patchSettings}
           onClose={() => setSettingsOpen(false)}
         />
