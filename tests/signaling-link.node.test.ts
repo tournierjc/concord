@@ -415,6 +415,7 @@ test('port demandé occupé : onListen rend le port suivant, celui qui est vraim
 
   link.close('fin de test');
   await new Promise<void>((resolve) => blocker.close(() => resolve()));
+});
 /* parseServerLine : validation STRICTE, champ par champ               */
 /* ------------------------------------------------------------------ */
 
