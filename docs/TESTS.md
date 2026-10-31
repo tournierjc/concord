@@ -1,40 +1,55 @@
 # Tests — ce qui tourne réellement dans ce dépôt
 
-> Tenu par le Banc (desk-qa). Dernière re-mesure : **T19, 2026-10-31T02:00:57Z → 02:02:05Z**
-> (UTC), sur `/work/lan-voice`, `node v22.23.4`, `tsx v4.23.15`, `npm 10.9.9`.
+> Tenu par le Banc (desk-qa). Dernière re-mesure : **T20, 2026-10-31T15:25:09Z → 15:28:44Z**
+> (UTC), sur `/work/lan-voice` @ `15aed91` (« clone nu réparé »), `node v22.23.4`,
+> `tsx v4.23.15`, `npm 10.9.9`, arm64. Toutes les commandes sont lancées sous
+> `env -u NODE_ENV` (cet hôte exporte `NODE_ENV=production` — voir l'addendum Régie en fin de page).
 > Règle de la maison : **aucun compte publié sans exit code ni horodatage de début de run**.
 > Une ligne sans exit code est une ligne non mesurée. Un chiffre daté d'hier est un chiffre
 > périmé, pas un chiffre vrai : il est conservé en fin de page (§« Historique ») avec sa date.
 >
-> Empreintes des fichiers témoins de cette page (sha256, `2026-10-31T02:01:02Z`) :
-> `package.json` `030a8219…`, `tests/scripts-coverage.node.test.ts` `8ab8c1e8…`,
-> `src/engine/README.md` `d48932c8…`, version précédente de la présente page `d62b7768…`.
+> Empreintes des fichiers témoins de cette page (sha256, `2026-10-31T15:27:56Z`) :
+> `package.json` `be6c0e89…`, `tests/scripts-coverage.node.test.ts` `53326963…`,
+> `src/engine/README.md` `338df4a1…`, version précédente de la présente page `5085ad20…`.
 
-## TL;DR — état courant (T19, 2026-10-31T02:0xZ)
+## TL;DR — état courant (T20, 2026-10-31T15:2xZ)
 
 | Script | Commande réelle | Sortie mesurée (début UTC) | Verdict |
 |---|---|---|---|
-| `npm test` (= `npm run test:node`) | `npx tsx --test` sur **20 fichiers** listés à la main | **exit=0 · 530 tests · 530 pass · 0 fail · 0 skip · 28 suites · 580 ms** (`02:00:58.065Z`) | ✅ le seul runner de recette |
-| `npm run typecheck` | `tsc -p tsconfig.json --noEmit` | **exit=0 · 0 ligne de sortie** (`02:00:59.314Z`) | ✅ |
-| `npm run build:main` | `tsc -p tsconfig.main.json` | **exit=0** (`02:01:00.756Z`) | ✅ |
-| `npx vite build` | vite → `dist/` | **exit=0 · 48 modules · built in 444 ms** (`02:01:01.559Z`) | ✅ |
-| `npm run test:vitest` | `vitest run` | **exit=1 · 20 fichiers en échec · « Tests no tests » · 866 ms** (`02:01:27.112Z`) | ❌ inutilisable ici (rouge par construction) |
-| `npm run dev` / `npm start` / `npm run dist` | vite dev / electron / electron-builder | **non exécutés** | ⚠️ non vérifié — §« Points non vérifiés » |
+| `npm test` (= `npm run test:node`) | `tsx --test` sur **26 fichiers** listés à la main (plus de `npx`) | **exit=0 · 664 tests · 664 pass · 0 fail · 0 skip · 49 suites · 5 307 ms** (`15:25:09Z`) | ✅ le seul runner de recette |
+| `npm run typecheck` | `tsc -p tsconfig.json --noEmit` | **exit=0 · 0 ligne de sortie** (`15:28:02Z`) | ✅ |
+| `npm run build:main` | `tsc -p tsconfig.main.json` | **exit=0** (`15:28:03Z`) | ✅ |
+| `npx vite build` | vite → `dist/` | **exit=0 · built in 459 ms** (`15:28:04Z`) | ✅ |
+| `npm run test:vitest` | `vitest run` | **exit=1 · 26 fichiers en échec · « Tests no tests » · 1 s** (`15:27:47Z`, clone propre) — **1710 fichiers** dans l'arbre de travail (`15:25:48Z`), écart expliqué ci-dessous | ❌ inutilisable ici (rouge par construction) |
+| `npx electron-builder --linux AppImage` | electron-builder 24.13.3 | **exit=0 · 96 634 946 o** (`15:28:41Z → 15:28:44Z`), aucun `latest-linux.yml` | ✅ (depuis le retrait de `appImage.license`) |
+| `npx electron-builder --linux deb` | idem, cible `deb` | **exit=1 · `Exec format error`** (`15:28:23Z`) — `fpm` embarqué est un binaire **x86** | ❌ limitation d'hôte (arm64), cible **non vérifiée** |
+| `npm run dev` / `npm start` | vite dev / electron | **non exécutés** | ⚠️ non vérifié — §« Points non vérifiés » |
 
 Déterminisme : `npm test` lancé **deux fois** dans la même session, mêmes comptes —
-run 1 (`02:00:58.065Z`) 530 / 530 / 0 / 28 suites / 580 ms ; run 2 (`02:01:28.293Z`)
-530 / 530 / 0 / 28 suites / 512 ms. La durée varie, jamais les comptes.
+run 1 (`15:25:09Z`) 664 / 664 / 0 / 49 suites / 5 307 ms ; run 2 (`15:27:56Z`)
+664 / 664 / 0 / 49 suites / 5 302 ms. La durée varie, jamais les comptes.
 
-Reproduire à l'identique :
+**Le compte de `test:vitest` dépend de l'arbre de travail, pas du code** (mesuré T20) : `vitest run`
+n'a aucune configuration `test.exclude` dans `vite.config.ts`, il ramasse donc tout
+`*.{test,spec}.*` sous la racine, y compris les copies de captures **non versionnées** :
+26 (`tests/`) + 1 350 (`VERIF/raw/**/copies/…`) + 334 (`.verif-t17/`, `.verif-t18/`, `.verif-t19/`)
+= **1 710** dans l'arbre de travail, contre **26** dans un clone nu (`git clone`, `15:27:47Z`).
+Les deux runs sont `exit=1` et rendent « Tests no tests » (0 assertion exécutée). Conséquence
+pratique : citer « N fichiers en échec » pour vitest sans dire dans quel arbre est un chiffre
+non reproductible. Correctif proposé (non appliqué, `vite.config.ts` n'est pas à moi) :
+`test: { exclude: [...configDefaults.exclude, 'VERIF/**', '.verif-*/**'] }`.
+
+Reproduire à l'identique (état de référence `15aed91`) :
 
 ```
 cd /work/lan-voice
-ls tests/*.test.ts | wc -l          # 20
-npm test                            # attendu : exit=0, # tests 530, # fail 0
-npx tsc -p tsconfig.json --noEmit    # attendu : exit=0, 0 ligne
-npm run build:main                   # attendu : exit=0
-npx vite build                       # attendu : exit=0
-npm run test:vitest                  # attendu : exit=1 (20 fichiers) — c'est normal
+ls tests/*.test.ts | wc -l                     # 26
+env -u NODE_ENV npm test                       # attendu : exit=0, # tests 664, # fail 0
+env -u NODE_ENV npx tsc -p tsconfig.json --noEmit  # attendu : exit=0, 0 ligne
+env -u NODE_ENV npm run build:main             # attendu : exit=0
+env -u NODE_ENV npx vite build                 # attendu : exit=0
+env -u NODE_ENV npm run test:vitest            # attendu : exit=1 (26 fichiers en arbre propre,
+                                               #   1710 si VERIF/raw et .verif-t*/ sont présents)
 ```
 
 ## La liste des tests est écrite à la main — et désormais gardée
@@ -142,29 +157,38 @@ Règles pour tout nouveau fichier de test :
 ## Scripts
 
 ```
-npm test            # → npm run test:node (20 fichiers, liste explicite dans package.json)
-npm run test:node   # le runner de référence : npx tsx --test <20 fichiers>
-npm run test:vitest # mesuré exit=1 (20/20), ne pas utiliser
+npm test            # → npm run test:node (26 fichiers, liste explicite dans package.json)
+npm run test:node   # le runner de référence : tsx --test <26 fichiers>
+npm run test:vitest # mesuré exit=1 (26 en arbre propre, 1710 en arbre de travail), ne pas utiliser
 ```
 
 ## Points non vérifiés (nommés comme tels)
 
-- `npm run dev`, `npm start`, `npm run dist` : **pas lancés** par le Banc dans cette session
-  (Electron exige un affichage ; `electron-builder` exige un téléchargement réseau). Aucune
-  affirmation n'est faite ici sur leur comportement.
-- `src/engine/README.md` (sha `d48932c8…`) cite **7** fichiers de test sur les **20** du disque
-  et **en omet donc 13** : `audio-sink`, `contract-parity.node`, `ipc-contract`,
-  `local-signaling`, `media-plane.node`, `media-plane`, `mesh`, `overlay-geometry`,
-  `room-discovery-sec.node`, `room-discovery.node`, `scripts-coverage.node`, `settings-schema`,
-  `signaling-link.node`. Sa liste est un
+- `npm run dev` et `npm start` : **pas lancés** par le Banc dans cette session (Electron exige
+  un affichage). Aucune affirmation n'est faite ici sur leur comportement.
+- `npm run dist` : mesuré **par cible**, pas globalement. `npx electron-builder --linux AppImage`
+  → **exit=0**, 96 634 946 o (`15:28:41Z → 15:28:44Z`), sans `latest-linux.yml` ;
+  `npx electron-builder --linux deb` → **exit=1 `Exec format error`** (`15:28:23Z`, `fpm`
+  embarqué x86) ⇒ cible `deb` **non vérifiée**. Windows/`nsis` et cible `x64` : **non mesurés**
+  (hôte arm64, pas de Wine).
+- `src/engine/README.md` (sha `338df4a1…`) cite **7** fichiers de test sur les **26** du disque
+  et **en omet donc 19** : `audio-sink`, `contract-parity.node`, `engine-purity`, `ipc-contract`,
+  `local-signaling`, `main-timers.node`, `media-plane.node`, `media-plane`, `mesh`,
+  `overlay-controller`, `overlay-geometry`, `participant-state`, `peer-speech`,
+  `room-discovery-sec.node`, `room-discovery.node`, `settings-schema`, `signaling-link.node`,
+  `speaking-relay`, `voice-mesh.node`. Sa liste est un
   **sous-ensemble illustratif**, pas une énumération : à ne pas lire comme la liste des tests.
   Non corrigé ici (fichier tenu par un autre poste) — signalé à desk-engine. La liste de
   référence, gardée mécaniquement, est `package.json#test:node` ; la mesure datée est la
   présente page.
 - La couverture (lignes / branches) n'est mesurée par aucun script de ce dépôt : aucun chiffre
   de couverture n'est publié ici, faute d'instrument.
-- Le comportement de `npm test` **sur une machine vierge** (sans `node_modules`, sans cache
-  npx) n'est pas mesuré : les prérequis ci-dessus sont déclarés, pas vérifiés par exécution.
+- Machine vierge : **mesuré depuis T20**, partiellement. Le `package-lock.json` est **versionné**
+  depuis `15aed91` (lockfileVersion 3, 524 entrées, 245 590 o, `esbuild`/`rollup` x64 **et**
+  arm64 présents) et présent dans un clone nu ; `npm ci --include=dev` puis `npm test` y rendent
+  **664 / 664 / 0 fail / 49 suites** (mesure Régie, `15:24Z`, harnais du Banc). Restent **non
+  vérifiés par le Banc** : le clone depuis GitHub (dépôt privé, test fait en clone local), le
+  cache npm **froid** (le run a bénéficié du cache de l'hôte) et le cache `npx` vide.
 
 ## Historique des mesures (périmé, conservé pour la trace)
 
@@ -173,10 +197,16 @@ npm run test:vitest # mesuré exit=1 (20/20), ne pas utiliser
 | `2026-10-30T23:29–23:31Z` | 12 | 371 (371 pass) | exit=2 · 52 erreurs | exit=2 · 20 erreurs | VERIF-004 |
 | `2026-10-31T01:05Z` | 13 | 378 (378 pass) | exit=0 | — | VERIF-006 (T11) |
 | `2026-10-31T01:55Z` | 14 | 523 (523 pass) | exit=0 | exit=0 | VERIF-016 (T16b) |
-| **`2026-10-31T02:0xZ`** | **20** | **530 (530 pass)** | **exit=0** | **exit=0** | **T19 (cette page)** |
+| `2026-10-31T02:0xZ` | 20 | 530 (530 pass) | exit=0 | exit=0 | T19 |
+| **`2026-10-31T15:2xZ`** | **26** | **664 (664 pass)** | **exit=0** | **exit=0** | **T20 (cette page, VERIF 031)** |
 
 Les lignes plus anciennes de ce tableau sont **fausses aujourd'hui** : elles décrivent un état
 daté, utile seulement pour savoir depuis quand un chiffre a cessé d'être vrai.
+
+T20 précise deux choses que T19 ne pouvait pas dire : (a) les chiffres sont ceux de l'état
+`15aed91`, rejoués **deux fois** avec les mêmes comptes ; (b) le compte de `test:vitest`
+dépend de l'arbre de travail (26 en clone nu, 1 710 avec les copies de captures non
+versionnées) — c'est pourquoi cette page ne cite plus « 20/20 » pour vitest.
 
 ## Addendum 2026-10-31T15:2xZ (Régie) — installation et `npm test` sur clone nu, mesurés
 
