@@ -7,8 +7,11 @@
  * NON VÉRIFIÉ ici : React non installable dans cet environnement (voir la livraison T3).
  */
 
+import { useEffect, useState } from 'react';
 import type { ControlStateDto, ParticipantDto, RoomStateDto } from '../shell/ipc-contract';
+import { avatarEmojiFor, isAvatarRef } from '../shell/avatar';
 import { createTranslator, type Locale } from './i18n';
+import { lanApi } from './api';
 import { setTransmitting, SPEAKING_LEVEL, useVoicePlane, type VoiceSnapshot } from './voice';
 import {
   joinStates,
@@ -38,6 +41,54 @@ export interface RoomProps {
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).slice(0, 2);
   return parts.map((part) => part.charAt(0).toUpperCase()).join('') || '?';
+}
+
+/**
+ * La pastille d'un participant (SPEC-002, amendement 2026-10-31) : emoji de la galerie embarquée,
+ * image locale reçue du pair, ou initiales. Une empreinte dont le PNG n'est pas encore arrivé (ou
+ * n'arrivera jamais) rend les initiales — jamais un carré vide, jamais une image inventée.
+ */
+function AvatarOrInitials({ avatarRef, name }: { avatarRef: string | undefined; name: string }): JSX.Element {
+  const emoji = avatarEmojiFor(avatarRef);
+  const ref = avatarRef !== undefined && isAvatarRef(avatarRef) ? avatarRef : null;
+  const [png, setPng] = useState<string | null>(null);
+  useEffect(() => {
+    if (ref === null) {
+      setPng(null);
+      return;
+    }
+    let live = true;
+    void lanApi()
+      .getAvatarImage(ref)
+      .then((image) => {
+        if (live) setPng(image);
+      })
+      .catch(() => {
+        if (live) setPng(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [ref]);
+  if (emoji !== null) {
+    return (
+      <span className="participant__avatar" aria-hidden="true">
+        {emoji}
+      </span>
+    );
+  }
+  if (ref !== null && png !== null) {
+    return (
+      <span className="participant__avatar participant__avatar--image" aria-hidden="true">
+        <img className="participant__avatar-image" src={`data:image/png;base64,${png}`} alt="" />
+      </span>
+    );
+  }
+  return (
+    <span className="participant__avatar" aria-hidden="true">
+      {initials(name)}
+    </span>
+  );
 }
 
 export function Room({
@@ -140,9 +191,7 @@ export function Room({
               data-peer-stream={peer.hasStream ? 'true' : 'false'}
               data-speaking={peerSpeaking(peer.peerId, PEER_LEVELS, speakingClock)}
             >
-              <span className="participant__avatar" aria-hidden="true">
-                {initials(peer.name ?? peer.peerId)}
-              </span>
+              <AvatarOrInitials avatarRef={peer.avatarRef} name={peer.name ?? peer.peerId} />
               <span className="participant__name">{peer.name ?? peer.peerId}</span>
               <span className="participant__state">
                 {peer.state === 'connecting' ? t('voice.peer.connecting') : null}
@@ -176,9 +225,7 @@ export function Room({
             data-muted={mutedAttr(participant, room.selfId)}
             data-self={isSelf ? 'true' : 'false'}
           >
-            <span className="participant__avatar" aria-hidden="true">
-              {initials(participant.name)}
-            </span>
+            <AvatarOrInitials avatarRef={participant.avatarRef} name={participant.name} />
             <span className="participant__halo" aria-hidden="true" />
             <span className="participant__name">
               {participant.name}

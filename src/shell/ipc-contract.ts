@@ -15,6 +15,9 @@
 
 import type { Settings } from './settings-schema';
 
+import { AVATAR_REF_LENGTH, isAvatarRef, isCustomAvatarShape, isGalleryAvatarId, normalizeIncomingAvatarRef } from './avatar.ts';
+import type { AvatarSetting, CustomAvatar } from './avatar.ts';
+
 // --- Canaux ----------------------------------------------------------------------------------
 
 export const IPC = {
@@ -35,6 +38,11 @@ export const IPC = {
   speakingSet: 'lan:speaking-set',
   // T16 / SPEC-007 §4.1 — signalisation : un tuyau vers les pairs (contrat figé).
   signalSend: 'lan:signal:send',
+  // SPEC-002 (amendement 2026-10-31) — avatar local : choisir un fichier, et servir l'image
+  // qu'un pair réclame. Deux canaux dédiés : l'image ne passe JAMAIS par `signalSend` (le fil de
+  // signalisation est borné à des lignes JSON ; une image PNG de 256 px est binaire).
+  avatarChoose: 'lan:avatar:choose',
+  avatarGetImage: 'lan:avatar:get-image',
   // main → renderer (send/on)
   eventParticipants: 'lan:event:participants',
   // (AD-17 D1) `lan:event:speaking` retiré : le renderer mesure déjà le niveau, et le main n'a
@@ -65,7 +73,9 @@ export type IpcInvokeChannel = (typeof IPC)[
   | 'controlSetGain'
   | 'overlaySet'
   | 'speakingSet'
-  | 'signalSend'];
+  | 'signalSend'
+  | 'avatarChoose'
+  | 'avatarGetImage'];
 
 export type IpcEventChannel = (typeof IPC)[
   | 'eventParticipants'
@@ -92,6 +102,8 @@ export const INVOKE_CHANNELS: readonly IpcInvokeChannel[] = [
   IPC.overlaySet,
   IPC.speakingSet,
   IPC.signalSend,
+  IPC.avatarChoose,
+  IPC.avatarGetImage,
 ];
 
 export const EVENT_CHANNELS: readonly IpcEventChannel[] = [
@@ -115,6 +127,13 @@ export type OverlayScaleDto = 'sm' | 'md' | 'lg';
 export interface ParticipantDto {
   id: string;
   name: string;
+  /**
+   * Empreinte d'avatar du pair (SPEC-002 amendement 2026-10-31) : un id de la galerie embarquée
+   * ou les 16 hexadécimaux d'une image locale. JAMAIS l'image elle-même — un pair qui ne connaît
+   * pas l'empreinte la réclame par la signalisation (`avatar_get`) et retombe sur les initiales
+   * si la réponse manque. Facultatif : une version plus ancienne du pair n'en envoie pas.
+   */
+  avatarRef?: string;
   muted: boolean;
   deafened: boolean;
   /**
@@ -258,9 +277,22 @@ export type SignalOut =
 
 /** Main → renderer : messages entrants, ou état du lien de transport. */
 export type SignalIn =
-  | { kind: 'peer-joined'; peerId: string; name: string }
+  | { kind: 'peer-joined'; peerId: string; name: string; avatarRef?: string }
   | { kind: 'peer-left'; peerId: string }
   | { kind: SignalKind; from: string; payload: unknown }
+  | {
+      /**
+       * Image d'avatar reçue d'un pair (SPEC-002, amendement 2026-10-31) — la réponse du main à un
+       * `avatar_get` émis pour une empreinte inconnue. `data` est le PNG validé (empreinte revérifiée
+       * + taille bornée) ; `null` = l'empreinte est inconnue du répondant ou son contenu est
+       * corrompu, et l'affichage reste sur les initiales. Le renderer ne construit JAMAIS cet
+       * événement lui-même : il ne fait que le consommer.
+       */
+      kind: 'avatar-data';
+      from: string;
+      avatarRef: string;
+      data: string | null;
+    }
   | {
       kind: 'link';
       state: 'connecting' | 'connected' | 'refused' | 'closed';
@@ -300,6 +332,27 @@ export interface LanAPI {
   onShortcutConflict(listener: (conflict: ShortcutConflictDto) => void): () => void;
   /** Overlay : reçoit l'ensemble « qui parle » à chaque transition (et au plus 1×/s). */
   onSpeakingSet(listener: (payload: SpeakingSetPayload) => void): () => void;
+  /**
+   * Ouvre la boîte de dialogue de choix d'image (SPEC-002, amendement 2026-10-31). Le renderer ne
+   * voit JAMAIS le chemin : le main valide (formats, taille, signature), redimensionne et rend
+   * l'avatar persistable — ou le motif du refus, en clair.
+   */
+  chooseAvatar(): Promise<AvatarChooseResult>;
+  /**
+   * Le PNG d'un avatar local reçu d'un pair (empreinte déjà validée par le contrat). `null` si le
+   * fichier est absent ou corrompu : l'affichage reste sur les initiales, jamais une image inventée.
+   */
+  getAvatarImage(avatarRef: string): Promise<string | null>;
+}
+
+/** Ce que le choix d'une image rend au renderer — jamais un chemin, jamais un binaire. */
+export type AvatarChooseResult =
+  | { ok: true; avatar: CustomAvatar }
+  | { ok: false; reason: 'cancelled' | 'wrong-format' | 'too-large' | 'unreadable' | 'not-an-image' };
+
+/** Charge utile de `avatarGetImage` : la seule forme admise est une empreinte sous son nom exact. */
+export interface AvatarImagePayload {
+  avatarRef: string;
 }
 
 // --- Erreurs et gardes ------------------------------------------------------------------------
@@ -583,8 +636,21 @@ function guardInvoke(channel: string, raw: unknown): GuardResult<unknown> {
         : guardError(channel, guard);
     }
     case IPC.settingsSet: {
-      const payload = guard.object(raw, 'payload', ['locale', 'theme', 'nickname', 'audio', 'talk', 'overlay', 'network']);
+      const payload = guard.object(raw, 'payload', ['locale', 'theme', 'nickname', 'avatar', 'audio', 'talk', 'overlay', 'network']);
       if (payload === null) return guardError(channel, guard);
+      // `avatar` (SPEC-002 amendement 2026-10-31) : le patch peut apporter null, un id de galerie,
+      // ou un avatar local valide. `guard.object` ne connaît que les types de base — cette forme
+      //-là se vérifie ici, avec LA règle du schéma (mêmes fonctions partagées, aucune dérive).
+      if ('avatar' in payload) {
+        const avatar = (payload as Record<string, unknown>)['avatar'];
+        if (avatar !== null && typeof avatar === 'string' && !isGalleryAvatarId(avatar)) {
+          guard.invalid('payload.avatar', 'id d’avatar hors galerie embarquée');
+        } else if (avatar !== null && typeof avatar !== 'string') {
+          if (!isCustomAvatarShape(avatar) || !isAvatarRef(avatar.ref) || avatar.file !== `${avatar.ref}.png`) {
+            guard.invalid('payload.avatar', 'avatar local hors contrat ({kind:’custom’, file:’<empreinte>.png’})');
+          }
+        }
+      }
       if (Object.keys(payload).length === 0) {
         guard.invalid('payload', 'modification vide');
         return guardError(channel, guard);
@@ -676,6 +742,30 @@ function guardInvoke(channel: string, raw: unknown): GuardResult<unknown> {
       if (speaking === null || guard.errors.length > 0) return guardError(channel, guard);
       return { ok: true, value: { speaking } };
     }
+    case IPC.avatarChoose: {
+      // Le renderer ne choisit AUCUN chemin : c'est le main qui ouvre la boîte de dialogue
+      // Electron. Le payload est vide, comme `settingsGet` — une charge utile serait un essai
+      // de forcer un chemin depuis la page.
+      if (raw !== undefined && raw !== null) {
+        const payload = guard.object(raw, 'payload', EMPTY_PAYLOAD_KEYS);
+        if (payload === null || guard.errors.length > 0) return guardError(channel, guard);
+      }
+      return { ok: true, value: undefined };
+    }
+    case IPC.avatarGetImage: {
+      // Le renderer demande le binaire d'un avatar QU'IL A DÉJÀ REÇU d'un pair (l'empreinte lui
+      // est parvenue par `avatar-data`). Le main ne sert que `<empreinte>.png` dans
+      // `userData/avatars/` : jamais un chemin, jamais une autre empreinte.
+      const payload = guard.object(raw, 'payload', ['avatarRef'] as const);
+      if (payload === null) return guardError(channel, guard);
+      const avatarRef = guard.string(payload, 'avatarRef', 'payload', AVATAR_REF_LENGTH, AVATAR_REF_LENGTH);
+      if (avatarRef === null || !isAvatarRef(avatarRef)) {
+        guard.invalid('payload.avatarRef', 'empreinte d’avatar hors contrat');
+        return guardError(channel, guard);
+      }
+      if (guard.errors.length > 0) return guardError(channel, guard);
+      return { ok: true, value: { avatarRef } };
+    }
     default:
       return {
         ok: false,
@@ -703,7 +793,7 @@ const ROOM_PHASES: readonly RoomPhase[] = ['idle', 'discovering', 'joining', 'co
 const SIGNAL_KINDS = ['offer', 'answer', 'ice'] as const;
 const SIGNAL_OUT_KINDS = ['offer', 'answer', 'ice', 'leave'] as const;
 const SIGNAL_OUT_KEYS = ['kind', 'to', 'payload'] as const;
-const SIGNAL_IN_KINDS = ['peer-joined', 'peer-left', 'offer', 'answer', 'ice', 'link'] as const;
+const SIGNAL_IN_KINDS = ['peer-joined', 'peer-left', 'offer', 'answer', 'ice', 'avatar-data', 'link'] as const;
 const LINK_STATES = ['connecting', 'connected', 'refused', 'closed'] as const;
 
 function guardParticipant(guard: Guard, value: unknown, index: number): ParticipantDto | null {
@@ -714,12 +804,21 @@ function guardParticipant(guard: Guard, value: unknown, index: number): Particip
   }
   // (AD-17 D2) `speaking` n'est plus un champ connu : un annuaire qui en porterait un se fait
   // refuser au lieu de transmettre un silence supposé.
-  const allowed = ['id', 'name', 'muted', 'deafened', 'gain', 'connection'] as const;
+  const allowed = ['id', 'name', 'avatarRef', 'muted', 'deafened', 'gain', 'connection'] as const;
   for (const key of Object.keys(value)) {
     if (!allowed.includes(key as (typeof allowed)[number])) guard.invalid(`${path}.${key}`, 'champ inconnu');
   }
   const id = guard.string(value, 'id', path, 1, 64);
   const name = guard.string(value, 'name', path, 1, 32);
+  // Empreinte d'avatar : facultative, sous sa forme exacte uniquement (voir `ParticipantDto`).
+  const rawAvatarRef = (value as Record<string, unknown>)['avatarRef'];
+  const avatarRef =
+    rawAvatarRef === undefined || rawAvatarRef === null
+      ? null
+      : typeof rawAvatarRef === 'string' && normalizeIncomingAvatarRef(rawAvatarRef) !== null
+        ? rawAvatarRef
+        : undefined;
+  if (avatarRef === undefined) guard.invalid(`${path}.avatarRef`, 'empreinte d’avatar hors contrat');
   const muted = guard.boolean(value, 'muted', path);
   const deafened = guard.boolean(value, 'deafened', path);
   const gain = guard.number(value, 'gain', path, 0, 2);
@@ -727,7 +826,9 @@ function guardParticipant(guard: Guard, value: unknown, index: number): Particip
   if (id === null || name === null || muted === null || deafened === null || gain === null || connection === null) {
     return null;
   }
-  return { id, name, muted, deafened, gain, connection };
+  return avatarRef === null
+    ? { id, name, muted, deafened, gain, connection }
+    : { id, name, avatarRef, muted, deafened, gain, connection };
 }
 
 function guardEvent(channel: string, raw: unknown): GuardResult<unknown> {
@@ -832,12 +933,26 @@ function guardEvent(channel: string, raw: unknown): GuardResult<unknown> {
       if (kind === null) return guardError(channel, guard);
       switch (kind) {
         case 'peer-joined': {
-          const allowed = ['kind', 'peerId', 'name'] as const;
+          const allowed = ['kind', 'peerId', 'name', 'avatarRef'] as const;
           const payload = guard.object(raw, 'payload', allowed);
           const peerId = guard.string(payload, 'peerId', 'payload', 1, 64);
           const name = guard.string(payload, 'name', 'payload', 1, 32);
+          // Empreinte d'avatar (SPEC-002 amendement 2026-10-31) : facultative, et sous sa forme
+          // exacte (id de galerie ou 16 hexadécimaux). Le renderer ne reçoit jamais une chaîne
+          // arbitraire qu'il devrait deviner sûre.
+          const rawAvatarRef = (raw as Record<string, unknown>)['avatarRef'];
+          const avatarRef =
+            rawAvatarRef === undefined || rawAvatarRef === null
+              ? null
+              : typeof rawAvatarRef === 'string' && normalizeIncomingAvatarRef(rawAvatarRef) !== null
+                ? rawAvatarRef
+                : undefined;
+          if (avatarRef === undefined) {
+            guard.invalid('payload.avatarRef', 'empreinte d’avatar hors contrat');
+            return guardError(channel, guard);
+          }
           if (guard.errors.length > 0) return guardError(channel, guard);
-          return { ok: true, value: { kind, peerId, name } };
+          return { ok: true, value: avatarRef === null ? { kind, peerId, name } : { kind, peerId, name, avatarRef } };
         }
         case 'peer-left': {
           const allowed = ['kind', 'peerId'] as const;

@@ -16,6 +16,15 @@
  *    qu'écraser silencieusement la configuration d'une version plus récente.
  */
 
+import {
+  isAvatarFileName,
+  isAvatarRef,
+  isCustomAvatarShape,
+  isGalleryAvatarId,
+  type AvatarSetting,
+  type CustomAvatar,
+} from './avatar.ts';
+
 /** Version courante du schéma. Toute évolution de forme incrémente ce nombre. */
 export const SETTINGS_VERSION = 1;
 /** Version historique (clés plates du prototype) : lue, migrée, jamais écrite. */
@@ -86,6 +95,13 @@ export interface Settings {
   locale: Locale;
   theme: Theme;
   nickname: string;
+  /**
+   * Avatar du profil (SPEC-002, amendement 2026-10-31) : un id de la galerie embarquée, ou une
+   * image locale (`{ kind: 'custom', file, ref }`), ou `null` — l'affichage retombe alors sur les
+   * initiales du pseudo. Le défaut n'est pas stocké ici : c'est l'appelant qui dérive un choix de
+   * galerie stable depuis `instanceId` (voir `avatar.ts`), comme pour `nickname`.
+   */
+  avatar: AvatarSetting;
   audio: AudioSettings;
   talk: TalkSettings;
   overlay: OverlaySettings;
@@ -98,6 +114,9 @@ export function defaultSettings(): Settings {
     locale: 'fr',
     theme: 'system',
     nickname: '',
+    // Pas de défaut stocké : l'appelant dérive un choix de galerie stable depuis `instanceId`
+    // (`avatar.ts → defaultAvatarIdFor`). `null` ici veut dire « rien de choisi », initiales.
+    avatar: null,
     audio: {
       inputDeviceId: null,
       outputDeviceId: null,
@@ -401,7 +420,7 @@ export function signalingPortCandidates(): number[] {
 
 // --- Validation v1 ---------------------------------------------------------------------------
 
-const TOP_KEYS = ['version', 'locale', 'theme', 'nickname', 'audio', 'talk', 'overlay', 'network'] as const;
+const TOP_KEYS = ['version', 'locale', 'theme', 'nickname', 'avatar', 'audio', 'talk', 'overlay', 'network'] as const;
 const AUDIO_KEYS = [
   'inputDeviceId',
   'outputDeviceId',
@@ -432,6 +451,81 @@ function section(ctx: Ctx, source: Dict, key: string): Dict {
   return value;
 }
 
+/**
+ * Lit le réglage `avatar` (SPEC-002, amendement 2026-10-31). Les trois formes acceptées :
+ *  - `null` — pas d'avatar choisi, l'affichage retombera sur les initiales ;
+ *  - une chaîne — un id de la galerie embarquée (`isGalleryAvatarId`), rien d'autre : un id
+ *    inventé n'a pas de rendu, ce serait un trou noir visuel ;
+ *  - un objet `{ kind: 'custom', file, ref }` — une image locale, dont le NOM et l'EMPREINTE
+ *    doivent être valides ET coïncider (`<ref>.png`). Un nom qui ment est refusé, pas corrigé :
+ *    le fichier servi serait celui d'un autre avatar.
+ * Une valeur ABSENTE est de la rétro-compat (les fichiers écrits avant l'amendement n'ont pas la
+ * clé) et devient `null` = initiales ; une valeur PRÉSENTE mais hors forme est une erreur, jamais
+ * une réparation silencieuse.
+ */
+function readAvatar(ctx: Ctx, source: Dict, key: string, path: string): AvatarSetting {
+  const value = source[key];
+  const at = path.length > 0 ? `${path}.${key}` : key;
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'string') {
+    if (!isGalleryAvatarId(value)) {
+      fail(ctx, at, 'enum', `${at} doit être un id de la galerie embarquée, un objet custom, ou null`);
+      return null;
+    }
+    return value;
+  }
+  if (!isCustomAvatarShape(value)) {
+    fail(ctx, at, 'type', `${at} doit être une chaîne, un objet {kind:'custom',file,ref}, ou null`);
+    return null;
+  }
+  const custom: CustomAvatar = value;
+  if (!isAvatarFileName(custom.file)) {
+    fail(ctx, `${at}.file`, 'format', `${at}.file doit être 16 hexadécimaux suivis de « .png »`);
+    return null;
+  }
+  if (!isAvatarRef(custom.ref)) {
+    fail(ctx, `${at}.ref`, 'format', `${at}.ref doit être 16 hexadécimaux minuscules`);
+    return null;
+  }
+  if (custom.file !== `${custom.ref}.png`) {
+    fail(ctx, `${at}.file`, 'format', `${at}.file doit être l'empreinte suivie de « .png » (nom ≠ empreinte)`);
+    return null;
+  }
+  return custom;
+}
+
+/**
+ * Lit le réglage `avatar` (SPEC-002, amendement 2026-10-31). Les trois formes admises :
+ * `null` (rien de choisi → initiales), un id de galerie embarquée, ou `{kind:'custom',
+ * file:'<ref>.png'}`. Une valeur ABSENTE devient `null` (rétro-compat : les fichiers écrits avant
+ * l'amendement n'ont pas la clé, et le patch partiel `{...current.value, ...patch}` doit pouvoir
+ * écrire un objet sans la clé) ; une valeur hors forme est une erreur, jamais une réparation
+ * silencieuse — l'avatar est choisi par la personne, pas déviné.
+ */
+function readAvatarOptional(ctx: Ctx, source: Dict, key: string, path: string): AvatarSetting {
+  const value = source[key];
+  const at = path.length === 0 ? key : `${path}.${key}`;
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'string') {
+    if (!isGalleryAvatarId(value)) {
+      fail(ctx, at, 'range', `${at} doit être un identifiant d'avatar de la galerie embarquée`);
+      return null;
+    }
+    return value;
+  }
+  if (isCustomAvatarShape(value)) {
+    // La paire (file, ref) est vérifiée ensemble : un fichier dont le nom ne correspond pas à
+    // son contenu est une incohérence, pas une variante.
+    if (!isAvatarFileName(value.file) || !isAvatarRef(value.ref) || value.file !== `${value.ref}.png`) {
+      fail(ctx, at, 'range', `${at} doit décrire un avatar local : {kind:'custom', file:'<empreinte>.png'}`);
+      return null;
+    }
+    return { kind: 'custom', file: value.file, ref: value.ref };
+  }
+  fail(ctx, at, 'type', `${at} doit être null, un identifiant de galerie ou un avatar local`);
+  return null;
+}
+
 function readPosition(ctx: Ctx, source: Dict, key: string, path: string): Point | null {
   const value = source[key];
   if (value === undefined) {
@@ -458,6 +552,7 @@ function validateV1(source: Dict): SettingsResult {
   const locale = readEnum(ctx, source, 'locale', '', LOCALES);
   const theme = readEnum(ctx, source, 'theme', '', THEMES);
   const nickname = readString(ctx, source, 'nickname', '', { maxLength: 32, allowEmpty: true });
+  const avatar = readAvatar(ctx, source, 'avatar', '');
 
   const audioSource = section(ctx, source, 'audio');
   checkUnknownKeys(ctx, audioSource, AUDIO_KEYS, 'audio');
@@ -519,7 +614,7 @@ function validateV1(source: Dict): SettingsResult {
   return {
     ok: true,
     migratedFrom: null,
-    value: { version, locale, theme, nickname, audio, talk, overlay, network },
+    value: { version, locale, theme, nickname, avatar, audio, talk, overlay, network },
   };
 }
 
@@ -627,7 +722,7 @@ export function parseSettings(input: unknown): SettingsResult {
   return validateV1(input);
 }
 
-const PATCHABLE_TOP_KEYS = ['locale', 'theme', 'nickname', 'audio', 'talk', 'overlay', 'network'] as const;
+const PATCHABLE_TOP_KEYS = ['locale', 'theme', 'nickname', 'avatar', 'audio', 'talk', 'overlay', 'network'] as const;
 
 /**
  * Applique une modification partielle (`setSettings` côté IPC), puis revalide l'objet complet.

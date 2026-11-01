@@ -80,6 +80,12 @@ export interface VoicePeer {
   readonly cause: PeerStateCause | null;
   /** `true` seulement si un `MediaStream` a été branché sur son `<audio>`. */
   readonly hasStream: boolean;
+  /**
+   * Empreinte d'avatar reçue au `join` (SPEC-002, amendement 2026-10-31). Id de galerie sous sa
+   * forme brute, empreinte de 16 hex pour une image personnalisée. Jamais une image : l'affichage
+   * retombe sur les initiales tant que le binaire n'est pas arrivé.
+   */
+  readonly avatarRef?: string;
 }
 
 /** État du tuyau de signalisation (miroir du `SignalIn` de type `link`). */
@@ -197,6 +203,7 @@ function upsertPeer(
     state?: VoicePeerState;
     cause?: PeerStateCause | null;
     hasStream?: boolean;
+    avatarRef?: string | null;
   },
 ): VoicePeer {
   const previous = state.peers.get(peerId);
@@ -206,6 +213,11 @@ function upsertPeer(
     state: patch.state ?? previous?.state ?? 'connecting',
     cause: patch.cause ?? previous?.cause ?? null,
     hasStream: patch.hasStream ?? previous?.hasStream ?? false,
+    ...(patch.avatarRef !== undefined && patch.avatarRef !== null
+      ? { avatarRef: patch.avatarRef }
+      : previous?.avatarRef !== undefined
+        ? { avatarRef: previous.avatarRef }
+        : {}),
   };
   state.peers.set(peerId, next);
   return next;
@@ -301,7 +313,12 @@ function handleSignal(state: LinkState, message: SignalIn): void {
       // L'élément audio existe AVANT le flux : aucune arrivée de flux ne peut le précéder.
       // Aucun candidat n'est rejoué ici : l'ICE appartient au maillage (SPEC-009 §1(b)).
       state.sinks.ensure(message.peerId);
-      upsertPeer(state, message.peerId, { name: message.name, state: 'connecting' });
+      upsertPeer(state, message.peerId, {
+        name: message.name,
+        state: 'connecting',
+        // SPEC-002 (amendement 2026-10-31) : l'empreinte arrive avec le pseudo, l'image suivra.
+        ...(message.avatarRef !== undefined ? { avatarRef: message.avatarRef } : {}),
+      });
       publishPeers(state);
       return;
     }

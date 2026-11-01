@@ -201,6 +201,20 @@ export class RoomBridge {
     return true;
   }
 
+  /**
+   * L'empreinte d'avatar du participant local (SPEC-002, amendement 2026-10-31). Appelé à
+   * l'entrée en salon et à chaque changement de réglage : la ligne « vous » de l'annuaire porte la
+   * MÊME empreinte que le `join`, sinon la salle afficherait des initiales là où les pairs voient
+   * un dessin. `null` retire l'avatar (retour aux initiales).
+   */
+  setSelfAvatar(avatarRef: string | null): void {
+    const self = this.participants.find((entry) => entry.id === SELF_ID);
+    if (!self) return;
+    if (avatarRef === null) delete self.avatarRef;
+    else self.avatarRef = avatarRef;
+    this.emitParticipants();
+  }
+
   private updateSelf(patch: Partial<ParticipantDto>): void {
     const self = this.participants.find((entry) => entry.id === SELF_ID);
     if (!self) return;

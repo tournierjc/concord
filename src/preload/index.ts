@@ -32,6 +32,7 @@ import {
   type SignalIn,
   type SignalOut,
   type SpeakingSetPayload,
+  type AvatarChooseResult,
 } from '../shell/ipc-contract';
 import type { Settings } from '../shell/settings-schema';
 
@@ -104,6 +105,11 @@ const lanAPI: LanAPI = {
   onSignal: (listener: (message: SignalIn) => void) => subscribe<SignalIn>(IPC.eventSignal, listener),
   onSpeakingSet: (listener: (payload: SpeakingSetPayload) => void) =>
     subscribe<SpeakingSetPayload>(IPC.eventSpeakingSet, listener),
+  // SPEC-002 (amendement 2026-10-31) : le choix d'une image se fait DANS LE MAIN (boîte de
+  // dialogue + validation + redimensionnement). Le renderer ne voit qu'un résultat typé — jamais
+  // un chemin, jamais des octets.
+  chooseAvatar: () => invoke<AvatarChooseResult>(IPC.avatarChoose, {}),
+  getAvatarImage: (avatarRef: string) => invoke<string | null>(IPC.avatarGetImage, { avatarRef }),
 };
 
 // Gel : le renderer ne peut ni ajouter, ni remplacer, ni supprimer une méthode du pont.

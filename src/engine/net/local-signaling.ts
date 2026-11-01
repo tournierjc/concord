@@ -32,8 +32,18 @@ import {
   isLanCandidate
 } from '../rtc/ice-filter.ts'
 
+import { isAvatarRef, normalizeIncomingAvatarRef } from '../../shell/avatar.ts'
+
 /** Premier port essayé. */
 export const SIGNALING_BASE_PORT = 47821
+
+/**
+ * Plafond du base64 dans une réponse `avatar_data` : une ligne JSON est bornée à 64 Ko
+ * (`MAX_LINE_BYTES` chez le client qui la lit), l'enveloppe JSON fait une centaine d'octets.
+ * Une réponse plus lourde est refusée AVANT écriture — le demandeur garde ses initiales, le
+ * lien survit.
+ */
+export const MAX_AVATAR_BASE64_CHARS = 63 * 1024
 /** Nombre de tentatives (47821 → 47830 inclus). */
 export const SIGNALING_PORT_RANGE = 10
 /** Unique route HTTP exposée par le serveur local. */
@@ -121,6 +131,13 @@ export type SignalingMessageType = (typeof SIGNALING_MESSAGE_TYPES)[number]
 export interface PeerSummary {
   peerId: string
   name: string
+  /**
+   * Empreinte d'avatar (SPEC-002 amendement 2026-10-31) : un id de galerie (`"fox"`) ou les 16
+   * hexadécimaux d'une image locale. JAMAIS l'image — elle est trop lourde pour une ligne JSON
+   * bornée à 64 Ko ; un pair qui ne la connaît pas la réclame (`avatar_get`). Facultatif : une
+   * ancienne version du pair n'en envoie pas, l'affichage retombe sur les initiales.
+   */
+  avatarRef?: string
 }
 
 /* --- Sens client → serveur ---------------------------------------- */
@@ -128,6 +145,11 @@ export interface PeerSummary {
 export interface JoinRequest {
   type: 'join'
   name: string
+  /**
+   * Empreinte d'avatar du nouvel arrivant (voir `PeerSummary.avatarRef`). Facultatif, et validé
+   * à l'entrée : toute autre forme est traitée comme « rien d'annoncé », jamais stockée telle quelle.
+   */
+  avatarRef?: string
 }
 
 export interface LeaveRequest {
@@ -153,9 +175,34 @@ export interface IceRequest {
   candidate: string
 }
 
+/**
+ * Demande d'image d'avatar (SPEC-002, amendement 2026-10-31) : un pair rencontre une empreinte
+ * qu'il n'a jamais vue et réclame le binaire à qui l'a annoncée. La réponse (`avatar_data`) est
+ * un serveur→client, émise par `answerAvatarGet` — ce type-ci n'est jamais accepté en entrée.
+ */
+export interface AvatarGetRequest {
+  type: 'avatar_get'
+  to: string
+  avatarRef: string
+}
+
+/**
+ * Réponse à `avatar_get` (SPEC-002, amendement 2026-10-31) : le binaire PNG d'un avatar stocké,
+ * en base64 (le fil ne transporte que des lignes JSON bornées). Émise par l'appelant qui possède
+ * l'image (le main, via `answerAvatarGet`) — jamais acceptée en entrée. `null` = l'empreinte est
+ * inconnue ici : le demandeur retombe sur ses initiales, sans insister.
+ */
+export interface AvatarDataMessage {
+  type: 'avatar_data'
+  from: string
+  to: string
+  avatarRef: string
+  pngBase64: string | null
+}
+
 /** Messages qu'un client a le droit d'émettre. */
 export type RelayableMessage = OfferRequest | AnswerRequest | IceRequest
-export type ClientMessage = JoinRequest | LeaveRequest | RelayableMessage
+export type ClientMessage = JoinRequest | LeaveRequest | RelayableMessage | AvatarGetRequest
 
 /* --- Sens serveur → client --------------------------------------- */
 
@@ -220,6 +267,7 @@ export type ServerMessage =
   | RelayedOffer
   | RelayedAnswer
   | RelayedIce
+  | AvatarDataMessage
   | RefuseMessage
   | ByeMessage
 
@@ -274,7 +322,17 @@ export type LeaveResult = LeaveSuccess | SignalingFailure
  * l'appelant discrimine par `result.ok` puis, pour le détail, par la présence
  * du champ (`'peerId' in result`, `'delivered' in result`) — sans cast.
  */
-export type ReceiveAccepted = JoinSuccess | RelaySuccess | LeaveSuccess
+/** Issue d'un « avatar_get » accepté : la demande est remontée à l'appelant qui tient les images. */
+export interface AvatarGetSuccess {
+  readonly ok: true
+  /** Le pair qui demande. */
+  readonly from: string
+  /** Le pair qui doit répondre (celui qui a annoncé cette empreinte). */
+  readonly to: string
+  readonly avatarRef: string
+}
+
+export type ReceiveAccepted = JoinSuccess | RelaySuccess | LeaveSuccess | AvatarGetSuccess
 
 export type ReceiveResult = ReceiveAccepted | SignalingFailure
 
@@ -297,6 +355,12 @@ export type SignalingEventKind =
   | 'relayed'
   | 'refused'
   | 'closed'
+  /**
+   * Un pair a demandé une image d'avatar (SPEC-002, amendement 2026-10-31). La demande est
+   * remontée à l'appelant — c'est lui qui tient les images, jamais le serveur — et celui-ci
+   * répond lui-même sur la connexion du demandeur.
+   */
+  | 'avatar-get'
 
 export interface SignalingEvent {
   kind: SignalingEventKind
@@ -304,6 +368,8 @@ export interface SignalingEvent {
   peerId?: string
   peerName?: string
   detail?: string
+  /** Présent sur `avatar-get` uniquement : la demande validée par le parseur. */
+  avatarGet?: AvatarGetSuccess
 }
 
 export interface CreateLocalSignalingOptions {
@@ -325,6 +391,8 @@ export interface CreateLocalSignalingOptions {
 export interface JoinPeer {
   connection: SignalingConnection
   name?: string
+  /** Empreinte d'avatar de l'arrivant (voir `PeerSummary.avatarRef`). `null`/absent = rien d'annoncé. */
+  avatarRef?: string | null
 }
 
 export interface LocalSignaling {
@@ -334,6 +402,13 @@ export interface LocalSignaling {
   join(peer: JoinPeer): JoinResult
   leave(peerId: string): void
   relay(from: string, message: ClientMessage): RelayResult
+  /**
+   * Répond à une demande `avatar_get` (SPEC-002, amendement 2026-10-31). L'appelant (le main) a
+   * lu l'image ; le serveur l'écrit sur la connexion du demandeur. `pngBase64 === null` est la
+   * réponse honnête « je ne connais pas cette empreinte ». Écriture bornée : si la ligne dépassait
+   * 64 Ko, rien ne sort et la demande est refusée (`invalid-message`) — jamais le lien ne crève.
+   */
+  answerAvatarGet(request: { from: string; to: string; avatarRef: string }, pngBase64: string | null): RelayResult
   participants(): PeerSummary[]
   close(): void
 }
@@ -372,13 +447,29 @@ export function parseClientMessage(input: unknown): ClientMessage | null {
   if (type === 'join') {
     const name = input.name
     if (name !== undefined && typeof name !== 'string') return null
-    return { type: 'join', name: typeof name === 'string' ? name : '' }
+    // L'empreinte d'avatar est conservée telle quelle ICI (le parseur ne juge pas le contenu) ;
+    // c'est `joinFor` qui la normalise avant tout stockage. Une forme non-contractuelle reste un
+    // `join` valide — elle devient simplement « rien d'annoncé ».
+    const rawAvatarRef = input.avatarRef
+    if (rawAvatarRef !== undefined && typeof rawAvatarRef !== 'string') return null
+    const parsed = { type: 'join' as const, name: typeof name === 'string' ? name : '' }
+    const avatarRef = typeof rawAvatarRef === 'string' ? rawAvatarRef : undefined
+    return avatarRef === undefined ? parsed : { ...parsed, avatarRef }
   }
 
   if (type === 'leave') {
     const peerId = input.peerId
     if (peerId !== undefined && typeof peerId !== 'string') return null
     return peerId === undefined ? { type: 'leave' } : { type: 'leave', peerId }
+  }
+
+  if (type === 'avatar_get') {
+    // Un pair réclame une image d'avatar. Forme stricte : destinataire non vide + empreinte sous
+    // sa forme exacte. `avatar_data` n'est PAS ici : c'est une réponse serveur→client, un client
+    // qui l'émettrait est hors contrat (et serait refusé comme type inconnu).
+    if (!isNonEmptyString(input.to)) return null
+    if (!isAvatarRef(input.avatarRef)) return null
+    return { type: 'avatar_get', to: input.to.trim(), avatarRef: input.avatarRef }
   }
 
   if (type === 'offer' || type === 'answer') {
@@ -405,6 +496,8 @@ export function parseClientMessage(input: unknown): ClientMessage | null {
 interface PeerState {
   peerId: string
   name: string
+  /** Empreinte d'avatar reçue au `join` (voir `PeerSummary.avatarRef`). `null` = rien d'annoncé. */
+  avatarRef: string | null
   connectionId: string
 }
 
@@ -489,7 +582,13 @@ export function createLocalSignaling(options: CreateLocalSignalingOptions): Loca
     const list: PeerSummary[] = []
     for (const peer of peers.values()) {
       if (peer.peerId === peerId) continue
-      list.push({ peerId: peer.peerId, name: peer.name })
+      // `avatarRef` n'apparaît que s'il existe : un pair sans avatar rend exactement
+      // `{ peerId, name }`, pas une clé à `undefined` (le contrat du fil est une forme exacte).
+      list.push(
+        peer.avatarRef === null || peer.avatarRef === undefined
+          ? { peerId: peer.peerId, name: peer.name }
+          : { peerId: peer.peerId, name: peer.name, avatarRef: peer.avatarRef }
+      )
     }
     return list
   }
@@ -512,7 +611,11 @@ export function createLocalSignaling(options: CreateLocalSignalingOptions): Loca
     return { ok: false, code, reason }
   }
 
-  function joinFor(state: ConnectionState, rawName: string | undefined): JoinResult {
+  function joinFor(
+    state: ConnectionState,
+    rawName: string | undefined,
+    rawAvatarRef?: string | null,
+  ): JoinResult {
     if (closed) return fail(state, 'closed', 'serveur de signalisation local fermé')
     if (state.closed) return fail(state, 'closed', 'connexion fermée')
 
@@ -534,8 +637,11 @@ export function createLocalSignaling(options: CreateLocalSignalingOptions): Loca
     // Identifiant éphémère : tiré à la session, jamais persisté.
     const peerId = `p${peerCounter}`
     const name = normalizeName(rawName, peerCounter)
+    // L'empreinte est validée, jamais stockée telle quelle : une forme inconnue devient
+    // « rien d'annoncé » (le pair affichera les initiales) plutôt qu'une chaîne arbitraire.
+    const avatarRef = normalizeIncomingAvatarRef(rawAvatarRef)
     state.peerId = peerId
-    peers.set(peerId, { peerId, name, connectionId: state.id })
+    peers.set(peerId, { peerId, name, avatarRef, connectionId: state.id })
 
     writeMessage(state, {
       type: 'hello',
@@ -545,7 +651,7 @@ export function createLocalSignaling(options: CreateLocalSignalingOptions): Loca
       peers: summariesExcept(peerId)
     })
 
-    const announcement: PeerJoinedMessage = { type: 'join', peer: { peerId, name } }
+    const announcement: PeerJoinedMessage = { type: 'join', peer: { peerId, name, avatarRef: avatarRef ?? undefined } }
     for (const other of peers.values()) {
       if (other.peerId === peerId) continue
       const target = connections.get(other.connectionId)
@@ -661,7 +767,7 @@ export function createLocalSignaling(options: CreateLocalSignalingOptions): Loca
       return fail(state, 'invalid-message', 'message de signalisation invalide ou non conforme')
     }
 
-    if (message.type === 'join') return joinFor(state, message.name)
+    if (message.type === 'join') return joinFor(state, message.name, message.avatarRef)
 
     if (state.peerId === null) {
       return fail(state, 'not-joined', 'entrez d’abord dans le salon avec un message « join »')
@@ -676,7 +782,57 @@ export function createLocalSignaling(options: CreateLocalSignalingOptions): Loca
       return { ok: true }
     }
 
+    if (message.type === 'avatar_get') {
+      // Le serveur ne tient AUCUNE image : il valide la forme, vérifie que le demandeur est bien
+      // dans le salon, et remonte la demande à l'appelant (le main), qui répondra lui-même.
+      if (message.to === state.peerId) {
+        return fail(state, 'invalid-message', 'un pair ne peut pas se demander son propre avatar')
+      }
+      if (!peers.has(message.to)) {
+        return fail(state, 'unknown-peer', `destinataire ${message.to} absent du salon`)
+      }
+      const success: AvatarGetSuccess = { ok: true, from: state.peerId, to: message.to, avatarRef: message.avatarRef }
+      emit({ kind: 'avatar-get', at: now(), peerId: state.peerId, avatarGet: success })
+      return success
+    }
+
     return relay(state.peerId, message)
+  }
+
+  function answerAvatarGet(
+    request: { from: string; to: string; avatarRef: string },
+    pngBase64: string | null
+  ): RelayResult {
+    // La réponse ne suit PAS le chemin `relay` : elle part du SERVEUR (qui tient la vérité du
+    // salon) vers le demandeur, et elle est la seule charge utile binaire du protocole.
+    if (closed) return { ok: false, code: 'closed', reason: 'serveur de signalisation local fermé' }
+    if (!isAvatarRef(request.avatarRef)) {
+      return { ok: false, code: 'invalid-message', reason: 'empreinte d’avatar hors contrat' }
+    }
+    const target = connectionOf(request.from)
+    if (target === null) {
+      return { ok: false, code: 'closed', reason: `le demandeur ${request.from} n'a plus de connexion ouverte` }
+    }
+    // `from` est LE pair qui répond (nous, côté main) ; il doit être dans le salon, sinon la
+    // réponse n'a pas de sens. `to` est la demande d'origine — vérifiée à la réception.
+    if (!peers.has(request.to)) {
+      return { ok: false, code: 'unknown-peer', reason: `destinataire ${request.to} absent du salon` }
+    }
+    if (pngBase64 !== null && pngBase64.length > MAX_AVATAR_BASE64_CHARS) {
+      return fail(target, 'invalid-message', 'image d’avatar trop lourde pour une ligne de signalisation')
+    }
+    const message: AvatarDataMessage = {
+      type: 'avatar_data',
+      from: request.to,
+      to: request.from,
+      avatarRef: request.avatarRef,
+      pngBase64
+    }
+    if (!writeMessage(target, message)) {
+      return fail(target, 'closed', 'écriture impossible vers le demandeur')
+    }
+    emit({ kind: 'relayed', at: now(), peerId: request.to, detail: `avatar_data → ${request.from}` })
+    return { ok: true, delivered: [request.from] }
   }
 
   function closeConnection(state: ConnectionState, reason: string): void {
@@ -738,7 +894,7 @@ export function createLocalSignaling(options: CreateLocalSignalingOptions): Loca
         reason: 'connexion inconnue de ce serveur (utilisez handleConnection)'
       }
     }
-    return joinFor(state, peer.name)
+    return joinFor(state, peer.name, peer.avatarRef)
   }
 
   function close(): void {
@@ -772,6 +928,7 @@ export function createLocalSignaling(options: CreateLocalSignalingOptions): Loca
     join,
     leave,
     relay,
+    answerAvatarGet,
     participants(): PeerSummary[] {
       return summariesExcept(null)
     },

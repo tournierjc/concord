@@ -37,8 +37,8 @@ function currentSection(): string {
 test('les comptes annoncés sont ceux du contrat', () => {
   const section = currentSection();
   const total = INVOKE_CHANNELS.length + EVENT_CHANNELS.length;
-  assert.equal(total, 22, `canaux du contrat : ${total}`);
-  assert.equal(INVOKE_CHANNELS.length, 13);
+  assert.equal(total, 24, `canaux du contrat : ${total}`);
+  assert.equal(INVOKE_CHANNELS.length, 15);
   assert.equal(EVENT_CHANNELS.length, 9);
   assert.match(section, new RegExp(`${total} canaux`));
   assert.match(section, new RegExp(`${INVOKE_CHANNELS.length} invoke`));

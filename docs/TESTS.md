@@ -250,5 +250,19 @@ le cas sur cet hôte), `npm install`/`npm ci` sautent les devDependencies et `np
 trompeur « Cannot find module 'electron' » (640 tests, 639 pass / 1 fail). D'où le `env -u NODE_ENV`
 ci-dessus : ce n'est pas une précaution de style, c'est la différence entre 664/664 et un faux rouge.
 
+**Ajout 2026-11-01 (feature/profile-lobby — profil pseudo + avatar, SPEC-002 amendement 2026-10-31)** :
+`tests/avatar-profile.node.test.ts` ajouté à `test:node` (38ᵉ fichier, 23 tests) — galerie embarquée
+close et défaut déterministe par `instanceId` ; forme exacte de l'avatar local (nom = empreinte,
+refus sans réparation) ; magasin sur disque temporaire injecté (extension, taille, signature,
+empreinte menteuse → repli `corrupt`/`unknown-ref`, jamais d'exception ni de lecture hors du
+magasin) ; bornes du fil (`encodeAvatarPngForWire`/`decodeAvatarPngFromWire` refusent tout ce qui
+dépasse la ligne 64 Ko ou n'est pas un PNG) ; rétro-compat réglages sans la clé `avatar` (→ `null`,
+initiales) ; `join` portant l'empreinte, `avatar_get` remonté au main, `answerAvatarGet` écrivant
+`avatar_data` sur la connexion du demandeur (null honnête si inconnu, refus sans troncature si trop
+lourd, refus vers soi-même ou un absent) ; gardes IPC `settingsSet`/`avatarGetImage` sur la forme
+exacte. `npm run test:node` : exit 0 (38 fichiers) ; `npx tsc -p tsconfig.json --noEmit` et
+`npx tsc -p tsconfig.main.json --noEmit` : exit 0 ; `npm run build` : exit 0 ;
+`node design/check-i18n.mjs` : PASS (parité FR/EN des clés `app.avatar.*`).
+
 **Le dépôt est autosuffisant** une fois `node_modules` présent : aucun test ne lit `VERIF/raw/`, un
 journal ou un fichier non versionné. `tsc --noEmit` : 0 diagnostic. `npm run build` : OK.

@@ -713,6 +713,73 @@ body {
   background-size: var(--space-1) var(--space-2);
 }
 
+/* --- Profil : galerie d'avatars + choix d'image (SPEC-002, amendement 2026-10-31) ---------- */
+
+.identity__avatars {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.avatar-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--space-8), 1fr));
+  gap: var(--space-2);
+}
+
+.avatar-grid__cell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1;
+  font-size: var(--text-lg);
+  background: var(--color-bg-raised);
+  border: var(--component-hairline) solid var(--color-border-subtle);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: border-color var(--motion-hover) var(--ease-standard);
+}
+
+.avatar-grid__cell[aria-pressed='true'] {
+  border-color: var(--color-accent-default);
+  box-shadow: 0 0 0 var(--component-focus-width) var(--color-accent-default);
+}
+
+.avatar-grid__cell--custom {
+  overflow: hidden;
+  background: var(--color-bg-inset);
+}
+
+.avatar-grid__image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--radius-circle);
+}
+
+.identity__avatar-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.participant__avatar--image {
+  overflow: hidden;
+  padding: 0;
+}
+
+.participant__avatar-image,
+.overlay__avatar-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--radius-circle);
+}
+
+.overlay__initials--image {
+  overflow: hidden;
+  padding: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     transition-duration: 1ms !important;

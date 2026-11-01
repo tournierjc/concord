@@ -59,9 +59,16 @@ export type SignalOut =
   | { kind: 'leave' }
 
 export type SignalIn =
-  | { kind: 'peer-joined'; peerId: string; name: string }
+  | { kind: 'peer-joined'; peerId: string; name: string; avatarRef?: string }
   | { kind: 'peer-left'; peerId: string }
   | { kind: SignalKind; from: string; payload: unknown }
+  /**
+   * Image d'avatar reçue d'un pair (SPEC-002, amendement 2026-10-31) — réponse du main à un
+   * `avatar_get` portant une empreinte inconnue. `data` = PNG validé, `null` = le répondant ne
+   * la connaît pas (repli sur les initiales). Le maillage ne consomme pas cet événement, il le
+   * laisse passer vers l'affichage.
+   */
+  | { kind: 'avatar-data'; from: string; avatarRef: string; data: string | null }
   | {
       kind: 'link'
       state: 'connecting' | 'connected' | 'refused' | 'closed'

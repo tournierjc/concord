@@ -30,12 +30,15 @@ import {
   isRefuseCode,
   SIGNALING_BASE_PORT,
   SIGNALING_PORT_RANGE,
+  type AvatarGetSuccess,
   type ClientMessage,
   type LocalSignaling,
   type ServerMessage,
   type SocketLike,
 } from '../engine/net/local-signaling';
 import { isLanCandidate } from '../engine/rtc/ice-filter';
+import { isAvatarRef } from '../shell/avatar';
+import { AVATAR_WIRE_BASE64_MAX_CHARS, encodeAvatarPngForWire, type AvatarStore } from './avatar-store';
 import { systemTimers, type MainTimers } from './timers';
 import { SIGNAL_MAX_LINE_BYTES, type SignalIn, type SignalOut } from '../shell/ipc-contract';
 
@@ -61,6 +64,15 @@ export interface SignalingLinkOptions {
   now: () => number;
   onMessage: (message: SignalIn) => void;
   timeoutMs?: number;
+  /** Empreinte d'avatar annoncée au `join` (SPEC-002, amendement 2026-10-31) ; absente = initiales. */
+  avatarRef?: string;
+  /** Le magasin d'images locales (hôte uniquement) : répond aux `avatar_get` des pairs. */
+  avatarStore?: AvatarStore;
+  /**
+   * Demande `avatar_get` reçue d'un pair (hôte uniquement — c'est le serveur qui la reconnaît).
+   * Le main répond via `avatarStore` et le lien écrit la réponse sur la connexion du demandeur.
+   */
+  onAvatarGet?: (request: { from: string; to: string; avatarRef: string }) => void;
   /** Minuteur injecté (SPEC-012 §4) : le délai de connexion passe par `src/main/timers.ts`. */
   timers?: MainTimers;
   /**
@@ -89,6 +101,18 @@ export interface SignalingLink {
   readonly selfId: string | null;
   readonly stats: SignalingLinkStats;
   send(message: SignalOut): void;
+  /**
+   * Réclame l'image d'une empreinte inconnue au pair qui l'a annoncée (SPEC-002, amendement
+   * 2026-10-31). La réponse revient par `onMessage` sous `{ kind: 'avatar-data' }` — `data: null`
+   * si le pair ne la connaît pas. Un lien fermé ne demande rien.
+   */
+  requestAvatar(to: string, avatarRef: string): void;
+  /**
+   * Réponse à un `avatar_get` reçu d'un pair (SPEC-002, amendement 2026-10-31). Le main fournit le
+   * PNG déjà encodé, ou `null` (empreinte inconnue, fichier absent). L'acheminement — socket du
+   * demandeur côté hôte, aller-retour par le serveur côté client — appartient au lien.
+   */
+  answerAvatarGet(request: { from: string; to: string; avatarRef: string }, pngBase64: string | null): void;
   close(detail?: string): void;
 }
 
@@ -211,9 +235,24 @@ export function fromWire(message: ServerMessage): SignalIn | null {
       if (!isLanCandidate(candidateText(message.candidate))) return null;
       return { kind: 'ice', from: message.from, payload: decodeCandidatePayload(message.candidate) };
     }
+    case 'avatar_data': {
+      // Réponse à notre `avatar_get` : le PNG validé par l'empreinte remonte au renderer, qui
+      // l'affiche. Un `null` (empreinte inconnue du répondant) est une réponse HONNÊTE : le
+      // renderer garde les initiales — mais ce n'est pas une faute de contrat, ça se relaie.
+      if (typeof message.from !== 'string' || message.from.length === 0) return null;
+      if (!isAvatarRef(message.avatarRef)) return null;
+      if (message.pngBase64 !== null && typeof message.pngBase64 !== 'string') return null;
+      return { kind: 'avatar-data', from: message.from, avatarRef: message.avatarRef, data: message.pngBase64 };
+    }
+
     case 'join':
       if (message.peer === undefined) return null;
-      return { kind: 'peer-joined', peerId: message.peer.peerId, name: message.peer.name };
+      return {
+        kind: 'peer-joined',
+        peerId: message.peer.peerId,
+        name: message.peer.name,
+        ...(message.peer.avatarRef !== undefined ? { avatarRef: message.peer.avatarRef } : {}),
+      };
     case 'leave':
       if (typeof message.peerId !== 'string') return null;
       return { kind: 'peer-left', peerId: message.peerId };
@@ -235,13 +274,21 @@ function isMessageObject(value: unknown): value is Record<string, unknown> {
 }
 
 /** Résumé de pair d'un `hello`/`join`, ou `null` si le champ n'en est pas un. */
-function asPeerSummary(value: unknown): { peerId: string; name: string } | null {
+function asPeerSummary(value: unknown): { peerId: string; name: string; avatarRef?: string } | null {
   if (!isMessageObject(value)) return null;
   const peerId = value.peerId;
   if (typeof peerId !== 'string' || peerId.length === 0) return null;
   const name = value.name;
   if (name !== undefined && typeof name !== 'string') return null;
-  return { peerId, name: typeof name === 'string' ? name : '' };
+  // Empreinte d'avatar (SPEC-002 amendement 2026-10-31) : soit absente, soit sous sa forme exacte.
+  // Une chaîne arbitraire est une ligne HORS CONTRAT, pas une empreinte : la ligne entière tombe.
+  const rawRef = value.avatarRef;
+  if (rawRef !== undefined && !isAvatarRef(rawRef)) return null;
+  return {
+    peerId,
+    name: typeof name === 'string' ? name : '',
+    ...(typeof rawRef === 'string' ? { avatarRef: rawRef } : {}),
+  };
 }
 
 /**
@@ -271,7 +318,7 @@ export function parseServerLine(line: string): ServerMessage | null {
       if (typeof parsed.peerId !== 'string' || parsed.peerId.length === 0) return null;
       const rawPeers = parsed.peers;
       if (rawPeers !== undefined && !Array.isArray(rawPeers)) return null;
-      const peers: Array<{ peerId: string; name: string }> = [];
+      const peers: Array<{ peerId: string; name: string; avatarRef?: string }> = [];
       for (const entry of rawPeers ?? []) {
         // Au-delà de la borne : la ligne entière est refusée, on n'en garde pas une moitié.
         if (peers.length >= MAX_PEERS_PER_HELLO) return null;
@@ -310,6 +357,26 @@ export function parseServerLine(line: string): ServerMessage | null {
       if (typeof parsed.from !== 'string' || typeof parsed.candidate !== 'string') return null;
       if (typeof parsed.to !== 'string') return null;
       return { type: 'ice', from: parsed.from, to: parsed.to, candidate: parsed.candidate };
+    }
+    case 'avatar_data': {
+      // La réponse à notre `avatar_get` (SPEC-002, amendement 2026-10-31). Bornes : empreinte sous
+      // sa forme exacte ; base64 borné pour que la ligne reste sous les 64 Ko du protocole ; et
+      // signature PNG revérifiée APRÈS décodage — un contenu qui ne serait pas le PNG annoncé est
+      // une ligne hors contrat (comptée `malformed`), jamais une image.
+      if (typeof parsed.from !== 'string' || parsed.from.length === 0) return null;
+      if (typeof parsed.to !== 'string') return null;
+      if (!isAvatarRef(parsed.avatarRef)) return null;
+      const pngBase64 = parsed.pngBase64;
+      if (pngBase64 === null) return { type: 'avatar_data', from: parsed.from, to: parsed.to, avatarRef: parsed.avatarRef, pngBase64: null };
+      if (typeof pngBase64 !== 'string' || pngBase64.length === 0 || pngBase64.length > AVATAR_WIRE_BASE64_MAX_CHARS) return null;
+      let png: Buffer;
+      try {
+        png = Buffer.from(pngBase64, 'base64');
+      } catch {
+        return null;
+      }
+      if (png.byteLength < 8 || png[0] !== 0x89 || png[1] !== 0x50 || png[2] !== 0x4e || png[3] !== 0x47) return null;
+      return { type: 'avatar_data', from: parsed.from, to: parsed.to, avatarRef: parsed.avatarRef, pngBase64 };
     }
     case 'refuse': {
       const code = parsed.code;
@@ -372,6 +439,8 @@ function refuseLine(detail: string): string {
 export function createSignalingLink(options: SignalingLinkOptions): SignalingLink {
   const role = options.role;
   const name = options.name.slice(0, 32);
+  // Empreinte validée AVANT d'être annoncée : une forme douteuse compte comme « pas d'avatar ».
+  const avatarRef = typeof options.avatarRef === 'string' && isAvatarRef(options.avatarRef) ? options.avatarRef : undefined;
   const maxPeers = options.maxPeers;
   const timeoutMs = options.timeoutMs ?? CONNECT_TIMEOUT_MS;
   const timers = options.timers ?? systemTimers;
@@ -414,7 +483,11 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
   }
 
   function joinRequest(): string {
-    return JSON.stringify({ type: 'join', name } satisfies ClientMessage);
+    return JSON.stringify(
+      avatarRef === undefined
+        ? ({ type: 'join', name } satisfies ClientMessage)
+        : ({ type: 'join', name, avatarRef } satisfies ClientMessage),
+    );
   }
 
   function handleServerRefuse(message: { code: string; reason: string }): void {
@@ -443,7 +516,12 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
       connected = true;
       emitLink('connected', `pair=${message.peerId} port=${listen?.port ?? basePort}`);
       for (const peer of message.peers ?? []) {
-        emit({ kind: 'peer-joined', peerId: peer.peerId, name: peer.name });
+        emit({
+          kind: 'peer-joined',
+          peerId: peer.peerId,
+          name: peer.name,
+          ...(peer.avatarRef !== undefined ? { avatarRef: peer.avatarRef } : {}),
+        });
       }
       return;
     }
@@ -551,6 +629,40 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
           port,
           now: options.now,
           ...(maxPeers === undefined ? {} : { maxParticipants: maxPeers }),
+          // Un pair demande une image : le serveur ne la tient pas — c'est le magasin du lien
+          // (`avatarStore`), rempli par le main, qui la lit ; la réponse part par
+          // `answerAvatarGet`. Une empreinte que le magasin ne connaît pas reçoit un `null`
+          // honnête : le demandeur garde ses initiales. Si aucun magasin n'est injecté (tests,
+          // fenêtre sans profil), `onAvatarGet` laisse la main au main — sans lien vivant, la
+          // demande expirera côté demandeur, ce qui vaut aussi « initiales ».
+          ...(options.avatarStore === undefined && options.onAvatarGet === undefined
+            ? {}
+            : {
+                onEvent: (event) => {
+                  if (event.kind !== 'avatar-get' || event.avatarGet === undefined) return;
+                  const request = event.avatarGet;
+                  const store = options.avatarStore;
+                  if (store !== undefined) {
+                    try {
+                      const loaded = store.load(request.avatarRef);
+                      const pngBase64 = loaded.ok ? encodeAvatarPngForWire(loaded.data) : null;
+                      signaling?.answerAvatarGet(
+                        { from: request.from, to: selfId ?? '', avatarRef: request.avatarRef },
+                        pngBase64,
+                      );
+                    } catch {
+                      // Un répondant qui lève ne doit pas casser le serveur : pas de réponse vaut
+                      // « initiales » côté demandeur.
+                    }
+                    return;
+                  }
+                  try {
+                    options.onAvatarGet?.({ from: request.from, to: selfId ?? '', avatarRef: request.avatarRef });
+                  } catch {
+                    // Même règle : une exception remonte du callback ne doit jamais fermer le salon.
+                  }
+                },
+              }),
         });
         candidateServer.on('connection', (socket: Socket) => acceptIncoming(socket));
         candidateServer.on('error', (error: Error) => {
@@ -654,6 +766,38 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
         outbound.end();
         emitLink('closed', 'départ du salon');
       }
+    },
+    requestAvatar(to: string, avatarRef: string): void {
+      // La demande d'image (SPEC-002, amendement 2026-10-31) part par le môme tuyau que le SDP,
+      // sous la même borne de 64 Ko. Un lien fermé ne demande rien ; une empreinte douteuse non
+      // plus (le demandeur garderait ses initiales, sans traffic inutile).
+      if (closed || outbound === null || outbound.destroyed) return;
+      if (!isAvatarRef(avatarRef)) return;
+      const wire = { type: 'avatar_get', to, avatarRef } satisfies ClientMessage;
+      outbound.write(`${JSON.stringify(wire)}\n`);
+    },
+    answerAvatarGet(request: { from: string; to: string; avatarRef: string }, pngBase64: string | null): void {
+      // Réponse à un `avatar_get` (SPEC-002, amendement 2026-10-31). Côté CLIENT, la demande est
+      // tombée du serveur intermédiaire : la réponse repart par le socket sortant et le serveur
+      // l'écrira sur la connexion du demandeur. Côté HÔTE, c'est le serveur du lien qui tient la
+      // vérité du salon et écrit directement sur la connexion du demandeur. Un lien fermé ne
+      // répond pas : le demandeur retombe sur ses initiales, comme pour une absence de réponse.
+      if (closed) return;
+      if (!isAvatarRef(request.avatarRef)) return;
+      if (pngBase64 !== null && pngBase64.length > AVATAR_WIRE_BASE64_MAX_CHARS) return;
+      if (role === 'host') {
+        signaling?.answerAvatarGet(request, pngBase64);
+        return;
+      }
+      if (outbound === null || outbound.destroyed) return;
+      const wire = {
+        type: 'avatar_data',
+        from: request.to,
+        to: request.from,
+        avatarRef: request.avatarRef,
+        pngBase64,
+      } satisfies ServerMessage;
+      outbound.write(`${JSON.stringify(wire)}\n`);
     },
     close(detail?: string): void {
       if (closed) return;
