@@ -1,0 +1,86 @@
+# Publie une version à partir d'un tag vX.Y.Z.
+#
+# Chaque installeur est construit sur un hôte natif x86_64 (la v0.4.0, construite à la main sur
+# aarch64, livrait un désinstalleur ARM et un preload périmé). Le corps de la publication contient
+# les empreintes SHA-256 au format lu par src/main/update.ts (`<hash>  <fichier>`) : sans elles,
+# la mise à jour intégrée refuse d'installer l'artefact.
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Version du tag = version du paquet
+        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run dist:linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            release/*.AppImage
+            release/*.deb
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run dist:win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: release/*-setup-x64.exe
+          if-no-files-found: error
+
+  publish:
+    needs: [linux, windows]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Notes et empreintes
+        run: |
+          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          {
+            if [ -f "$notes" ]; then cat "$notes"; echo; fi
+            echo "Empreintes SHA-256"
+            cd out
+            for f in *; do
+              echo "sha256sum $f"
+              sha256sum "$f"
+            done
+          } > "$RUNNER_TEMP/body.md"
+          cat "$RUNNER_TEMP/body.md"
+      - name: Publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Concord ${GITHUB_REF_NAME#v}" \
+            --notes-file "$RUNNER_TEMP/body.md"
