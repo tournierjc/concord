@@ -24,7 +24,7 @@ import {
   type TalkMode,
 } from '../shell/settings-schema';
 import { isValidAccelerator, normalizeAccelerator } from '../shell/settings-schema';
-import type { RoomStateDto } from '../shell/ipc-contract';
+import type { LobbyStatusDto, RoomStateDto } from '../shell/ipc-contract';
 import { createTranslator, type Locale } from './i18n';
 import { lanApi } from './api';
 
@@ -38,6 +38,12 @@ export interface SettingsPanelProps {
    * qu'on n'a pas lu, et `settings.network.signalingPort` n'est pas le port utilisé.
    */
   session: RoomStateDto;
+  /**
+   * La vue du pied de lobby, lue du main (port, méthode, santé). L'onglet Réseau s'en sert pour la
+   * ligne « Découverte » : la méthode RÉELLEMENT en service, jamais une méthode supposée
+   * (SPEC-002 S3.15 — hors-ligne, le main rend `'none'`, et c'est ce qui s'affiche).
+   */
+  lobbyStatus: LobbyStatusDto;
   onChange: (patch: Partial<Settings>) => Promise<void> | void;
   onClose: () => void;
 }
@@ -68,13 +74,21 @@ function acceleratorFromEvent(event: React.KeyboardEvent<HTMLInputElement>): str
   return [...modifiers, normalizedKey].join('+');
 }
 
-export function SettingsPanel({ settings, locale, session, onChange, onClose }: SettingsPanelProps): JSX.Element {
+/** Traduit un nom de périphérique rendu vide par `enumerateDevices()` (permission manquante). */
+function deviceLabelOrNone(label: string, noneLabel: string, index: number): string {
+  return label !== '' && label !== `#${index + 1}` ? label : noneLabel;
+}
+
+export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange, onClose }: SettingsPanelProps): JSX.Element {
   const t = createTranslator(locale);
   const [inputs, setInputs] = useState<DeviceOption[]>([]);
   const [outputs, setOutputs] = useState<DeviceOption[]>([]);
   const [recording, setRecording] = useState(false);
   const [shortcutDraft, setShortcutDraft] = useState<string>(settings.talk.pttAccelerator);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
+  // Message d'annonce (S3.6 : la séquence finale enregistrée s'annonce). Il vit dans la région
+  // `aria-live` du pied du lobby — le panneau ne rend que l'annonce, l'appelant tient la région.
+  const [announcement, setAnnouncement] = useState<string | null>(null);
 
   useEffect(() => {
     void listDevices('audioinput').then(setInputs);
@@ -90,6 +104,34 @@ export function SettingsPanel({ settings, locale, session, onChange, onClose }: 
   const overlayPatch = (patch: Partial<Settings['overlay']>): void => {
     void onChange({ overlay: { ...settings.overlay, ...patch } });
   };
+
+  // Le PTT global est-il RÉELLEMENT tenu par le système ? L'unique fait mesuré disponible côté
+  // renderer est le message publié par le main quand `globalShortcut.register()` a refusé le
+  // raccourci demandé (canal `onShortcutConflict`, émis à l'enregistrement puis à chaque
+  // changement d'accélérateur). Tant qu'aucune mesure n'est tombée, aucune étiquette : « Actif »
+  // sans preuve serait un mensonge (SPEC-002 D1). `lanApi()` est appelé dans un `try/catch` :
+  // hors application (document ouvert dans un navigateur de développement), il lève — rien à
+  // mesurer, rien à afficher, et le panneau reste utilisable.
+  const [pttConflict, setPttConflict] = useState(false);
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null;
+    try {
+      unsubscribe = lanApi().onShortcutConflict(() => setPttConflict(true));
+    } catch {
+      // Main absent : pas de mesure possible, l'étiquette reste éteinte.
+    }
+    return () => unsubscribe?.();
+  }, []);
+  useEffect(() => {
+    // Un changement d'accélérateur est une nouvelle tentative d'enregistrement : la mesure
+    // précédente ne décrit plus le raccourci courant, on repart de « non mesuré ».
+    setPttConflict(false);
+  }, [settings.talk.pttAccelerator]);
+  // Preuve du refus (message du main) → « Inactif ». Aucune preuve → rien. L'étiquette positive
+  // (« le raccourci est tenu ») n'est JAMAIS rendue ici : rien, côté renderer, ne mesure qu'un
+  // raccourci global est bien enregistré — tant que le main ne publie pas l'état d'enregistrement,
+  // un libellé optimiste est supprimé plutôt qu'aligné sur une absence de mesure (SPEC-002 D1).
+  const shortcutStatusKey = pttConflict ? 'settings.ptt.inactive' : null;
 
   return (
     <div className="sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -117,9 +159,9 @@ export function SettingsPanel({ settings, locale, session, onChange, onClose }: 
               onChange={(event) => audioPatch({ inputDeviceId: event.target.value || null })}
             >
               <option value="">{t('settings.audio.systemDefault')}</option>
-              {inputs.map((device) => (
+              {inputs.map((device, index) => (
                 <option key={device.id} value={device.id}>
-                  {device.label}
+                  {deviceLabelOrNone(device.label, t('settings.audio.inputNone'), index)}
                 </option>
               ))}
             </select>
@@ -134,9 +176,9 @@ export function SettingsPanel({ settings, locale, session, onChange, onClose }: 
               onChange={(event) => audioPatch({ outputDeviceId: event.target.value || null })}
             >
               <option value="">{t('settings.audio.systemDefault')}</option>
-              {outputs.map((device) => (
+              {outputs.map((device, index) => (
                 <option key={device.id} value={device.id}>
-                  {device.label}
+                  {deviceLabelOrNone(device.label, t('settings.audio.outputNone'), index)}
                 </option>
               ))}
             </select>
@@ -178,8 +220,8 @@ export function SettingsPanel({ settings, locale, session, onChange, onClose }: 
           </label>
 
           <div className="field">
-            <span className="field__label">{t('control.mode')}</span>
-            <div className="segmented" role="group" aria-label={t('control.mode')}>
+            <span className="field__label">{t('settings.audio.mode')}</span>
+            <div className="segmented" role="group" aria-label={t('settings.audio.mode')}>
               {(['ptt', 'vad'] as TalkMode[]).map((mode) => (
                 <button
                   key={mode}
@@ -228,6 +270,11 @@ export function SettingsPanel({ settings, locale, session, onChange, onClose }: 
             <span className="field__label">{t('settings.ptt.current')}</span>
             <div className="shortcut">
               <kbd className="shortcut__keys">{settings.talk.pttAccelerator}</kbd>
+              {shortcutStatusKey ? (
+                // État mesuré du raccourci global (voir le commentaire de l'état plus haut) —
+                // jamais une déduction du simple fait que le réglage porte une valeur.
+                <span className="field__help">{t(shortcutStatusKey)}</span>
+              ) : null}
               <button
                 type="button"
                 className="button button--compact"
@@ -268,6 +315,9 @@ export function SettingsPanel({ settings, locale, session, onChange, onClose }: 
                 setShortcutDraft(normalized);
                 setRecording(false);
                 setShortcutError(null);
+                // La séquence finale est annoncée (S3.6) : `aria-live="assertive"` inline, comme
+                // le prescrit l'état (pas de region live concurrente : l'annonce vit ici).
+                setAnnouncement(t('settings.ptt.recorded', { shortcut: normalized }));
                 talkPatch({ pttAccelerator: normalized });
               }}
               onBlur={() => setRecording(false)}
@@ -278,6 +328,11 @@ export function SettingsPanel({ settings, locale, session, onChange, onClose }: 
               </span>
             ) : null}
             <span className="field__help">{t('settings.ptt.globalHelp')}</span>
+            {/* S3.6 : la zone de capture annonce la séquence finale dans une région
+                `aria-live="assertive"` — ici, inline, sous la zone. */}
+            <span className="field__help" aria-live="assertive">
+              {announcement ?? ''}
+            </span>
           </div>
         </section>
 
@@ -335,6 +390,10 @@ export function SettingsPanel({ settings, locale, session, onChange, onClose }: 
                 ? t('settings.overlay.screen.n', { n: settings.overlay.screenId })
                 : t('settings.overlay.screen.n', { n: 1 })}
             </span>
+          </div>
+
+          <div className="field">
+            <span className="field__label">{t('settings.overlay.position')}</span>
             <button
               type="button"
               className="button button--compact"
@@ -346,6 +405,9 @@ export function SettingsPanel({ settings, locale, session, onChange, onClose }: 
               <span className="field__help">{t('settings.overlay.disabledHint')}</span>
             ) : null}
           </div>
+          {/* Aide permanente de la section (SPEC-002 S3.12) : rappel du contrat de l'incrustat —
+              jamais de focus, clics traversants, seule la poignée répond. */}
+          <span className="field__help">{t('settings.overlay.help')}</span>
         </section>
 
         {/* --- Réseau ----------------------------------------------------------------------- */}
@@ -353,6 +415,25 @@ export function SettingsPanel({ settings, locale, session, onChange, onClose }: 
           <h3 id="settings-network" className="sheet__section-title">
             {t('settings.tab.network')}
           </h3>
+          {/* Nom sur le réseau : la MÊME source que le champ pseudo de E1 (réglage `nickname`) —
+              deux éditeurs d'un même fait, alignés par le réglage, pas recopiés l'un dans l'autre
+              (S3.15 : « même source que E1 »). Lecture seule ici : on le change dans le lobby. */}
+          <p className="field">
+            <span className="field__label">{t('settings.network.name')}</span>
+            <span className="field__value">{settings.nickname === '' ? t('common.none') : settings.nickname}</span>
+          </p>
+          {/* Découverte : l'état RÉEL du service, mesuré par le main (la santé remontée par le
+              bridge pilote déjà le bandeau et le pied du lobby). « Activé » dit qu'une interface
+              réseau est présente et la découverte en service ; « Désactivé » dit le contraire.
+              La MÉTHODE (mDNS) ne s'affiche pas ici : elle est déjà dans le pied du lobby, et la
+              répéter sous un libellé « active » sans nommer la méthode serait une promesse de
+              plus que la mesure n'en porte (S3.15). */}
+          <p className="field">
+            <span className="field__label">{t('settings.network.discovery')}</span>
+            <span className="field__value">
+              {lobbyStatus.health === 'offline' ? t('common.off') : t('common.on')}
+            </span>
+          </p>
           <p className="field">
             <span className="field__label">{t('settings.network.port')}</span>
             <span className="field__value">
