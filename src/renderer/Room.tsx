@@ -276,7 +276,8 @@ export function Room({
           aria-pressed={control.muted}
           onClick={() => onMute(!control.muted)}
         >
-          {control.muted ? t('control.mute.on') : t('control.mute.off')}
+          {/* The label names the action the click performs: `mute.on` = "Mute my mic". */}
+          {control.muted ? t('control.mute.off') : t('control.mute.on')}
         </button>
 
         <button
@@ -285,7 +286,7 @@ export function Room({
           aria-pressed={control.deafened}
           onClick={() => onDeafen(!control.deafened)}
         >
-          {control.deafened ? t('control.deafen.on') : t('control.deafen.off')}
+          {control.deafened ? t('control.deafen.off') : t('control.deafen.on')}
         </button>
 
         <div className="controls__mode">

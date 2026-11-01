@@ -11,6 +11,7 @@ import { createRoot } from 'react-dom/client';
 import type { ParticipantDto } from '../shell/ipc-contract';
 import { lanApi } from './api';
 import { browserTimers } from './browser-timers';
+import { ErrorBoundary } from './ErrorBoundary';
 import type { Locale } from './i18n';
 import { Overlay } from './Overlay';
 import { createSpeakingSurface, type SpeakingIds } from './speaking-surface';
@@ -78,6 +79,8 @@ applyTheme(document.documentElement, 'dark');
 
 createRoot(container).render(
   <StrictMode>
-    <OverlayRoot />
+    <ErrorBoundary compact>
+      <OverlayRoot />
+    </ErrorBoundary>
   </StrictMode>,
 );

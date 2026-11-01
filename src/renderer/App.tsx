@@ -365,9 +365,10 @@ export function App(): JSX.Element {
           });
       }),
       api.onProfileOpen(() => {
-        // Sur `feature/profile-lobby`, cet appel ouvrira le panneau profil complet (pseudo +
-        // avatar). En attendant, rien d'autre à faire ici : c'est cette branche qui possédera
-        // le panneau — poser un ersatz ici garantirait un conflit de fusion et deux panneaux.
+        // The profile editor is the lobby's identity card (absent from the room screen).
+        const input = document.getElementById('identity-input');
+        input?.scrollIntoView({ block: 'nearest' });
+        input?.focus();
       }),
       // Mises à jour (avenant SPEC-006b, 2026-11-01) : l'état de la machine du main, suivi en
       // direct. Le renderer ne DÉCIDE rien — il rend ce que le main publie, rien de plus.
@@ -514,6 +515,11 @@ export function App(): JSX.Element {
       <header className="titlebar">
         <h1 className="titlebar__title">{t('app.title')}</h1>
         <div className="titlebar__actions">
+          {screen === 'rooms' ? (
+            <button type="button" className="button button--ghost identity-chip" onClick={openProfile}>
+              {settings.nickname.trim().length > 0 ? settings.nickname.trim() : t('app.nickname.placeholder')}
+            </button>
+          ) : null}
           <button type="button" className="button" onClick={() => setSettingsOpen(true)}>
             {t('settings.title')}
           </button>
@@ -539,17 +545,6 @@ export function App(): JSX.Element {
             onDismiss={() => setUpdateDismissedAt(updateBannerKey(updateState))}
           />
         </div>
-      ) : null}
-
-      {screen === 'rooms' ? (
-        <IdentityRow
-          locale={locale}
-          value={settings.nickname}
-          onChange={(nickname) => void patchSettings({ nickname })}
-          onSaved={() => setToast(t('app.nickname.saved'))}
-          avatar={settings.avatar}
-          onAvatarChange={(avatar) => void patchSettings({ avatar })}
-        />
       ) : null}
 
       <div className="toast-region" role="status" aria-live="polite">
@@ -591,17 +586,28 @@ export function App(): JSX.Element {
       ) : null}
 
       {screen === 'rooms' ? (
-        <RoomList
-          locale={locale}
-          discovery={discovery}
-          nickname={(settings?.nickname ?? '').trim()}
-          lobbyStatus={lobbyStatus}
-          hosting={room.roomId !== null}
-          localRoom={{ roomId: room.roomId, participantCount: room.participantCount }}
-          onJoin={(roomId, roomName) => void joinRoom(roomId, roomName)}
-          onRefresh={() => void refreshRooms()}
-          onOpenProfile={openProfile}
-        />
+        <div className="lobby">
+          <aside className="panel lobby__identity">
+            <IdentityRow
+              locale={locale}
+              value={settings.nickname}
+              onChange={(nickname) => void patchSettings({ nickname })}
+              onSaved={() => setToast(t('app.nickname.saved'))}
+              avatar={settings.avatar}
+              onAvatarChange={(avatar) => void patchSettings({ avatar })}
+            />
+          </aside>
+          <RoomList
+            locale={locale}
+            discovery={discovery}
+            nickname={(settings?.nickname ?? '').trim()}
+            lobbyStatus={lobbyStatus}
+            hosting={room.roomId !== null}
+            localRoom={{ roomId: room.roomId, participantCount: room.participantCount }}
+            onJoin={(roomId, roomName) => void joinRoom(roomId, roomName)}
+            onRefresh={() => void refreshRooms()}
+          />
+        </div>
       ) : (
         <Room
           locale={locale}
@@ -683,8 +689,6 @@ interface RoomListProps {
   localRoom: { roomId: string | null; participantCount: number };
   onJoin: (roomId: string, roomName: string) => void;
   onRefresh: () => void;
-  /** Bouton d'identité : ouvre le panneau profil (implémentation complète : `feature/profile-lobby`). */
-  onOpenProfile: () => void;
 }
 
 /**
@@ -703,7 +707,6 @@ export function RoomList({
   localRoom,
   onJoin,
   onRefresh,
-  onOpenProfile,
 }: RoomListProps): JSX.Element {
   const t = createTranslator(locale);
   const [draftName, setDraftName] = useState('');
@@ -746,14 +749,14 @@ export function RoomList({
         <h2 id="rooms-title" className="panel__title">
           {t('room.list.title')}
         </h2>
-        {/* Emplacement identité, en haut à droite : le panneau profil complet (avatar, galerie,
-            upload) est la propriété de `feature/profile-lobby` — ici, le bouton ouvre, point. */}
-        <button type="button" className="button button--compact" onClick={onOpenProfile}>
-          {nickname.length > 0 ? nickname : t('app.nickname.placeholder')}
+        <button type="button" className="button button--compact" onClick={onRefresh} disabled={busy}>
+          {t('common.refresh')}
         </button>
       </div>
 
-      <p className="panel__status" role="status" aria-live="polite">
+      {/* With no rooms the empty card below already says it: keep the live region for screen
+          readers, but don't print the same sentence twice. */}
+      <p className={grouped.length === 0 ? 'visually-hidden' : 'panel__status'} role="status" aria-live="polite">
         {status}
       </p>
 
@@ -847,9 +850,6 @@ export function RoomList({
         {/* Places : le plafond du maillage (8) est une CONSTANTE du schéma, pas une mesure — c'est
             ce que la création garantira, pas ce qu'un salon donné contient. */}
         <span className="field__help">{t('room.create.capacity')}</span>
-        <button type="button" className="button" onClick={onRefresh} disabled={busy}>
-          {t('common.refresh')}
-        </button>
         <button
           type="button"
           className="button button--primary"
