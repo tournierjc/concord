@@ -94,6 +94,9 @@ win:
   executableName: concord
 
 nsis:
+  # makensis 3.11 du système (build Linux sans wine, 2026-11-01) émet des avertissements
+  # sur le gabarit d'electron-builder 24 ; ils ne doivent pas faire échouer le build.
+  warningsAsErrors: false
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
