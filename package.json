@@ -1,7 +1,7 @@
 {
   "name": "concord",
   "productName": "Concord",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Chat vocal sur réseau local — sans compte, sans cloud, sans télémétrie.",
   "license": "MIT",
   "private": true,
