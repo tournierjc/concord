@@ -163,6 +163,17 @@ export function SettingsPanel({ settings, locale, session, onChange, onClose }: 
             <span className="field__help">{t('settings.audio.aecHelp')}</span>
           </label>
 
+          {/* Ducking (2026-11-01) : un seul interrupteur, activé par défaut — rien à régler. */}
+          <label className="field field--inline">
+            <input
+              type="checkbox"
+              checked={settings.audio.duckOthers}
+              onChange={(event) => audioPatch({ duckOthers: event.target.checked })}
+            />
+            <span className="field__label">{t('settings.audio.duck.others')}</span>
+            <span className="field__help">{t('settings.audio.duck.help')}</span>
+          </label>
+
           <label className="field">
             <span className="field__label">
               {t('settings.audio.level')} — {t('common.percent', { value: Math.round(settings.audio.inputGain * 100) })}

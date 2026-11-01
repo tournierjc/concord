@@ -48,6 +48,10 @@ export const IPC = {
   // signalisation est borné à des lignes JSON ; une image PNG de 256 px est binaire).
   avatarChoose: 'lan:avatar:choose',
   avatarGetImage: 'lan:avatar:get-image',
+  // Ducking (2026-11-01) : le renderer sait QUI parle (pairs mesurés, soi jamais inclus ici) ;
+  // le main applique la baisse/restauration du volume des AUTRES applications. Une seule forme :
+  // l'intention `{ active: boolean }` horodatée par le producteur — le main ne décide rien.
+  duckingApply: 'lan:ducking:apply',
   // main → renderer (send/on)
   eventParticipants: 'lan:event:participants',
   // (AD-17 D1) `lan:event:speaking` retiré : le renderer mesure déjà le niveau, et le main n'a
@@ -88,7 +92,8 @@ export type IpcInvokeChannel = (typeof IPC)[
   | 'speakingSet'
   | 'signalSend'
   | 'avatarChoose'
-  | 'avatarGetImage'];
+  | 'avatarGetImage'
+  | 'duckingApply'];
 
 export type IpcEventChannel = (typeof IPC)[
   | 'eventParticipants'
@@ -121,6 +126,7 @@ export const INVOKE_CHANNELS: readonly IpcInvokeChannel[] = [
   IPC.signalSend,
   IPC.avatarChoose,
   IPC.avatarGetImage,
+  IPC.duckingApply,
 ];
 
 export const EVENT_CHANNELS: readonly IpcEventChannel[] = [
@@ -298,6 +304,18 @@ export interface SpeakingSetPayload {
 /** Plafond d'ids dans `speaking[]` : soi + le plafond du salon (8, cf. SPEC-015 C1). */
 export const SPEAKING_SET_MAX = 9;
 
+/**
+ * Signal de ducking (2026-11-01) — le renderer publie l'ensemble des PAIRS mesurés en train de
+ * parler, soi JAMAIS (l'auto-exclusion est une règle de la source, vérifiée à la garde du main
+ * contre `signalingLink.selfId`). Charge utile bornée comme `speakingSet`.
+ */
+export interface DuckingApplyPayload {
+  speaking: readonly string[];
+}
+
+/** Plafond d'ids dans le signal de ducking : le plafond du salon (les pairs), soi est refusé. */
+export const DUCKING_SPEAKING_MAX = 8;
+
 export interface OverlayPatchPayload {
   visible?: boolean;
   opacity?: number;
@@ -365,6 +383,12 @@ export interface LanAPI {
   setOverlay(patch: OverlayPatchPayload): Promise<void>;
   /** Publie l'ensemble « qui parle » (ids de signalisation) vers la fenêtre d'overlay. */
   setSpeaking(speaking: readonly string[]): Promise<void>;
+  /**
+   * Ducking (2026-11-01) : publier l'ensemble des PAIRS mesurés en train de parler (soi JAMAIS
+   * inclus ici — le main refuse d'ailleurs son propre id). Le main applique la baisse des autres
+   * applications ; un ensemble vide demande la restauration. Refus silencieux hors salon.
+   */
+  setDucking(speaking: readonly string[]): Promise<void>;
   /** Envoie un message de signalisation à un pair (tuyau TCP porté par le process principal). */
   sendSignal(message: SignalOut): Promise<void>;
   /** Abonnement aux messages entrants et à l'état du lien ; rend la fonction de désabonnement. */
@@ -796,6 +820,14 @@ function guardInvoke(channel: string, raw: unknown): GuardResult<unknown> {
       if (speaking === null || guard.errors.length > 0) return guardError(channel, guard);
       return { ok: true, value: { speaking } };
     }
+    case IPC.duckingApply: {
+      // Comme `speakingSet` : un tableau d'ids borné, sans doublon. L'EXCLUSION de soi-même est
+      // vérifiée par le main (seul lui connaît son id de signalisation) ; ici, la forme.
+      const payload = guard.object(raw, 'payload', ['speaking'] as const);
+      const speaking = guard.idList(payload, 'speaking', 'payload', DUCKING_SPEAKING_MAX, SPEAKING_ID_MAX);
+      if (speaking === null || guard.errors.length > 0) return guardError(channel, guard);
+      return { ok: true, value: { speaking } };
+    }
     case IPC.avatarChoose: {
       // Le renderer ne choisit AUCUN chemin : c'est le main qui ouvre la boîte de dialogue
       // Electron. Le payload est vide, comme `settingsGet` — une charge utile serait un essai
@@ -1090,6 +1122,31 @@ function guardEvent(channel: string, raw: unknown): GuardResult<unknown> {
         error: { code: 'unknown-channel', channel, path: null, message: `canal inconnu : ${channel}` },
       };
   }
+}
+
+// --- Ducking (2026-11-01) ------------------------------------------------------------------
+
+/**
+ * Vrai si au moins un PAIR (jamais soi) est mesuré en train de parler. Le signal vient du
+ * renderer qui mesure (`voice.ts` — table des pairs tenus) et l'id de l'appelant est passé en
+ * dur par le contrat : `selfId` est ici le `signalingLink.selfId` que le main connaît seul.
+ * Un id identique à celui de soi est refusé, pas fondu : un producteur qui glisse soi-même
+ * dans l'ensemble trahirait la sémantique (« les AUTRES applications », jamais Concord).
+ *
+ * Fonction PURE, exécutée sous `node --test` (tests/ducking-gate.node.test.ts) : c'est la
+ * seule façon de prouver que « soi-même qui parle ⇒ AUCUN ducking » tient à la garde du main.
+ */
+export function shouldDuckForPeers(speaking: readonly string[], selfId: string | null): boolean {
+  for (const id of speaking) {
+    if (typeof id !== 'string' || id.trim().length === 0) continue;
+    if (selfId !== null && id === selfId) {
+      // L'ensemble porte soi : le ducking ne se déclenche pas là-dessus. On continue d'examiner
+      // les autres ids — un pair qui parle vraiment reste un déclencheur légitime.
+      continue;
+    }
+    return true;
+  }
+  return false;
 }
 
 // --- API publique -----------------------------------------------------------------------------
