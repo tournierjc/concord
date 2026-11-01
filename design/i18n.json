@@ -173,7 +173,20 @@
     "voice.peer.failed": "Audio échoué",
     "voice.peer.pending": "Audio en attente…",
     "voice.peer.noFlow": "Pas de flux audio",
-    "voice.peers.title": "Pairs distants"
+    "voice.peers.title": "Pairs distants",
+    "update.available": "Nouvelle version {{version}} disponible.",
+    "update.downloading": "Téléchargement en cours ({{percent}} %).",
+    "update.ready": "Mise à jour prête.",
+    "update.installNow": "Installer",
+    "update.later": "Plus tard",
+    "update.checkNow": "Vérifier",
+    "update.checking": "Vérification…",
+    "update.upToDate": "Vous êtes à jour.",
+    "update.failed": "Échec de la mise à jour : {{reason}}",
+    "update.settings.auto": "Mises à jour automatiques",
+    "update.settings.help": "Concord consulte les publications GitHub officielles ; rien d’autre ne quitte votre réseau.",
+    "update.settings.lastCheck": "Dernière vérification : {{date}}",
+    "update.settings.title": "Mise à jour"
   },
   "en": {
     "common.cancel": "Cancel",
@@ -349,6 +362,19 @@
     "voice.peer.failed": "Audio failed",
     "voice.peer.pending": "Waiting for audio…",
     "voice.peer.noFlow": "No audio stream",
-    "voice.peers.title": "Remote peers"
+    "voice.peers.title": "Remote peers",
+    "update.available": "New version {{version}} is available.",
+    "update.downloading": "Downloading ({{percent}}%).",
+    "update.ready": "Update ready.",
+    "update.installNow": "Install",
+    "update.later": "Later",
+    "update.checkNow": "Check",
+    "update.checking": "Checking…",
+    "update.upToDate": "You are up to date.",
+    "update.failed": "Update failed: {{reason}}",
+    "update.settings.auto": "Automatic updates",
+    "update.settings.help": "Concord checks the official GitHub releases; nothing else leaves your network.",
+    "update.settings.lastCheck": "Last check: {{date}}",
+    "update.settings.title": "Update"
   }
 }

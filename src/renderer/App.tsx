@@ -19,6 +19,7 @@ import type {
   RoomStateDto,
   RoomSummaryDto,
   ShortcutConflictDto,
+  UpdateStateDto,
 } from '../shell/ipc-contract';
 import {
   groupDiscoveredRooms,
@@ -36,7 +37,7 @@ import {
   avatarInitials,
   customAvatarRef,
 } from '../shell/avatar';
-import { MAX_ROOM_PARTICIPANTS, type Settings } from '../shell/settings-schema';
+import { MAX_ROOM_PARTICIPANTS, type Settings, type SettingsPatch } from '../shell/settings-schema';
 import { lanApi } from './api';
 import { browserTimers } from './browser-timers';
 import { createTranslator, type Locale } from './i18n';
@@ -368,6 +369,9 @@ export function App(): JSX.Element {
         // avatar). En attendant, rien d'autre à faire ici : c'est cette branche qui possédera
         // le panneau — poser un ersatz ici garantirait un conflit de fusion et deux panneaux.
       }),
+      // Mises à jour (avenant SPEC-006b, 2026-11-01) : l'état de la machine du main, suivi en
+      // direct. Le renderer ne DÉCIDE rien — il rend ce que le main publie, rien de plus.
+      api.onUpdateState(setUpdateState),
     ];
     return () => {
       active = false;
@@ -431,6 +435,12 @@ export function App(): JSX.Element {
   // région `aria-live="polite"` et se referme tout seul ; l'horloge est celle de la page
   // (`browser-timers`), seul endroit autorisé à poser un minuteur côté renderer.
   const [toast, setToast] = useState<string | null>(null);
+  // Mises à jour (avenant SPEC-006b, 2026-11-01) : la dernière publication du main, rien de plus.
+  // `null` tant qu'aucun état n'est tombé — un bandeau sans publication serait une affirmation.
+  const [updateState, setUpdateState] = useState<UpdateStateDto | null>(null);
+  // Le bandeau peut être renvoyé par [Plus tard] sans que la machine du main change d'état :
+  // c'est un choix d'affichage local, pas un fait mesuré, et il ne dure pas au-delà de l'état.
+  const [updateDismissedAt, setUpdateDismissedAt] = useState<string | null>(null);
   useEffect(() => {
     if (toast === null) return undefined;
     const timers = browserTimers();
@@ -439,7 +449,7 @@ export function App(): JSX.Element {
   }, [toast]);
 
   const patchSettings = useCallback(
-    async (patch: Partial<Settings>) => {
+    async (patch: SettingsPatch) => {
       try {
         const next = await api.setSettings(patch);
         setSettings(next);
@@ -479,6 +489,18 @@ export function App(): JSX.Element {
     if (leftName !== null) setToast(t('room.leave.toast', { name: leftName }));
   }, [api, room.roomName, t]);
 
+  // Bandeau de mise à jour (avenant SPEC-006b, 2026-11-01) : non bloquant, réservé aux états qui
+  // demandent une attention — `available`, `downloading`, `downloaded`. Masqué PENDANT un salon
+  // (la machine, elle, garde ses gardes) et après un [Plus tard] sur le MÊME état (clé = état +
+  // version + pourcentage) : changer d'état fait réapparaître le bandeau tout seul.
+  const updateBannerKey = (state: UpdateStateDto): string =>
+    `${state.state}|${state.version ?? ''}|${state.percent ?? ''}`;
+  const updateBannerVisible =
+    updateState !== null &&
+    (updateState.state === 'available' || updateState.state === 'downloading' || updateState.state === 'downloaded') &&
+    room.roomId === null &&
+    updateDismissedAt !== updateBannerKey(updateState);
+
   if (!settings) {
     return (
       <main className="app app--loading" aria-busy="true">
@@ -505,6 +527,17 @@ export function App(): JSX.Element {
               ? `${t('discovery.offline.title')} ${t('discovery.offline.body')}`
               : `${t('discovery.error.mdns.title')} ${t('discovery.error.mdns.body')}`}
           </p>
+        </div>
+      ) : null}
+
+      {updateBannerVisible && updateState !== null ? (
+        <div className="banner banner--info" role="status">
+          <UpdateBanner
+            locale={locale}
+            state={updateState}
+            onInstall={() => void api.installUpdateNow()}
+            onDismiss={() => setUpdateDismissedAt(updateBannerKey(updateState))}
+          />
         </div>
       ) : null}
 
@@ -596,6 +629,43 @@ export function App(): JSX.Element {
         />
       ) : null}
     </main>
+  );
+}
+
+interface UpdateBannerProps {
+  locale: Locale;
+  /** L'état publié par le main — le bandeau ne rend QUE ce qui a été publié. */
+  state: UpdateStateDto;
+  onInstall: () => void;
+  onDismiss: () => void;
+}
+
+/**
+ * Bandeau discret des mises à jour (avenant SPEC-006b, 2026-11-01) : il ne bloque rien et ne
+ * décide rien. `available` annonce la version, `downloading` affiche le pourcentage publié par le
+ * main, `downloaded` propose [Installer maintenant] (la machine refuse elle-même en salon actif —
+ * le bandeau est déjà masqué en salon, le main reste l'autorité) et [Plus tard] le renvoie.
+ */
+function UpdateBanner({ locale, state, onInstall, onDismiss }: UpdateBannerProps): JSX.Element {
+  const t = createTranslator(locale);
+  return (
+    <span className="banner__row">
+      {state.state === 'available' && state.version !== null ? (
+        <span>{t('update.available', { version: state.version })}</span>
+      ) : null}
+      {state.state === 'downloading' ? (
+        <span>{t('update.downloading', { percent: state.percent ?? 0 })}</span>
+      ) : null}
+      {state.state === 'downloaded' ? <span>{t('update.ready')}</span> : null}
+      {state.state === 'downloaded' ? (
+        <button type="button" className="button button--primary button--compact" onClick={onInstall}>
+          {t('update.installNow')}
+        </button>
+      ) : null}
+      <button type="button" className="button button--compact" onClick={onDismiss}>
+        {t('update.later')}
+      </button>
+    </span>
   );
 }
 

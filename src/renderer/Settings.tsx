@@ -21,10 +21,11 @@ import {
   SIGNALING_PORT_DEFAULT,
   type OverlayScale,
   type Settings,
+  type SettingsPatch,
   type TalkMode,
 } from '../shell/settings-schema';
 import { isValidAccelerator, normalizeAccelerator } from '../shell/settings-schema';
-import type { LobbyStatusDto, RoomStateDto } from '../shell/ipc-contract';
+import type { LobbyStatusDto, RoomStateDto, UpdateStateDto } from '../shell/ipc-contract';
 import { createTranslator, type Locale } from './i18n';
 import { lanApi } from './api';
 
@@ -44,7 +45,7 @@ export interface SettingsPanelProps {
    * (SPEC-002 S3.15 — hors-ligne, le main rend `'none'`, et c'est ce qui s'affiche).
    */
   lobbyStatus: LobbyStatusDto;
-  onChange: (patch: Partial<Settings>) => Promise<void> | void;
+  onChange: (patch: SettingsPatch) => Promise<void> | void;
   onClose: () => void;
 }
 
@@ -79,6 +80,39 @@ function deviceLabelOrNone(label: string, noneLabel: string, index: number): str
   return label !== '' && label !== `#${index + 1}` ? label : noneLabel;
 }
 
+type Translator = (key: string, params?: Record<string, string | number>) => string;
+
+/**
+ * L'état de la machine de mise à jour, rendu HONNÊTEMENT depuis la dernière publication du main
+ * (avenant SPEC-006b, 2026-11-01). `null` (rien de publié) rend la ligne muette — pas de « à jour »
+ * sans mesure (SPEC-002 D1). `downloading` affiche le pourcentage publié ; `failed` dit la raison
+ * lisible du main, jamais un code ; `downloaded` avec une raison porte la commande du `.deb`
+ * (rendue à côté par l'appelant).
+ */
+function updateStatusLabel(t: Translator, state: UpdateStateDto | null): string {
+  if (state === null) return '';
+  switch (state.state) {
+    case 'checking':
+      return t('update.checking');
+    case 'up-to-date':
+      return t('update.upToDate');
+    case 'available':
+      return state.version === null ? '' : t('update.available', { version: state.version });
+    case 'downloading':
+      return t('update.downloading', { percent: state.percent ?? 0 });
+    case 'downloaded':
+      return t('update.ready');
+    case 'failed':
+      return t('update.failed', { reason: state.reason ?? '' });
+    case 'disabled':
+      // La dérogation est coupée (réglage `auto=false`) : le cycle cadencé ne sort plus du LAN.
+      return t('update.settings.auto');
+    default:
+      // `idle`/`installing` : rien à affirmer tant que la machine ne l'a pas dit autrement.
+      return '';
+  }
+}
+
 export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange, onClose }: SettingsPanelProps): JSX.Element {
   const t = createTranslator(locale);
   const [inputs, setInputs] = useState<DeviceOption[]>([]);
@@ -89,6 +123,18 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
   // Message d'annonce (S3.6 : la séquence finale enregistrée s'annonce). Il vit dans la région
   // `aria-live` du pied du lobby — le panneau ne rend que l'annonce, l'appelant tient la région.
   const [announcement, setAnnouncement] = useState<string | null>(null);
+  // Mises à jour (avenant SPEC-006b, 2026-11-01) : la dernière publication du main, rendue
+  // honnêtement — `null` tant que rien n'a été publié, jamais un état inventé au montage.
+  const [updateState, setUpdateState] = useState<UpdateStateDto | null>(null);
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null;
+    try {
+      unsubscribe = lanApi().onUpdateState(setUpdateState);
+    } catch {
+      // Main absent (document hors application) : rien à publier, la section reste muette.
+    }
+    return () => unsubscribe?.();
+  }, []);
 
   useEffect(() => {
     void listDevices('audioinput').then(setInputs);
@@ -103,6 +149,13 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
   };
   const overlayPatch = (patch: Partial<Settings['overlay']>): void => {
     void onChange({ overlay: { ...settings.overlay, ...patch } });
+  };
+  // Mises à jour (2026-11-01) : patch partiel sans propagation des mesures. `checkedAt` et
+  // `lastSeenVersion` sont des MESURES du service : le copier `{...settings.update, ...}` les
+  // reciterait au main comme une ecriture du renderer — refusee par `applySettingsPatch`. Seule
+  // l'interrupteur `auto` est un reglage ; le patch ne nomme que lui.
+  const updatePatch = (auto: boolean): void => {
+    void onChange({ update: { auto } });
   };
 
   // Le PTT global est-il RÉELLEMENT tenu par le système ? L'unique fait mesuré disponible côté
@@ -478,6 +531,79 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
             </span>
             <span className="field__help">{t('settings.network.identityHelp')}</span>
           </p>
+        </section>
+
+        {/* --- Mise à jour (avenant SPEC-006b, 2026-11-01) ---------------------------------- */}
+        <section className="sheet__section" aria-labelledby="settings-update">
+          <h3 id="settings-update" className="sheet__section-title">
+            {t('update.settings.title')}
+          </h3>
+
+          <label className="field field--inline">
+            <input
+              type="checkbox"
+              checked={settings.update.auto}
+              onChange={(event) => {
+                // Patch partiel : SEULE la cle modifiee est nommee. Propager les mesures par copie
+                // serait une ecriture du renderer — le contrat la refuse (`applySettingsPatch`).
+                void onChange({ update: { auto: event.target.checked } });
+              }}
+            />
+            <span className="field__label">{t('update.settings.auto')}</span>
+            <span className="field__help">{t('update.settings.help')}</span>
+          </label>
+
+          <div className="field">
+            <span className="field__label">{updateStatusLabel(t, updateState)}</span>
+            {/* Bouton forcer le check : désactivé PENDANT un cycle (checking/downloading) — le main
+                ignore la reentrance, l'UI le dit plutôt que de laisser croire à un second essai. */}
+            <button
+              type="button"
+              className="button button--compact"
+              disabled={updateState !== null && (updateState.state === 'checking' || updateState.state === 'downloading')}
+              onClick={() => {
+                try {
+                  void lanApi().checkForUpdatesNow();
+                } catch {
+                  // Main absent : rien à vérifier, le bouton ne ment pas sur ce qu'il n'a pas fait.
+                }
+              }}
+            >
+              {t('update.checkNow')}
+            </button>
+            {/* Installation immédiate quand l'artefact est prêt (la machine refuse elle-même en
+                salon actif ; l'UI masque en plus sous le même nez, la mesure vient du main). */}
+            {updateState !== null && updateState.state === 'downloaded' ? (
+              <button
+                type="button"
+                className="button button--primary button--compact"
+                disabled={session.roomId !== null}
+                onClick={() => {
+                  try {
+                    void lanApi().installUpdateNow();
+                  } catch {
+                    // Main absent : aucun installateur à lancer.
+                  }
+                }}
+              >
+                {t('update.installNow')}
+              </button>
+            ) : null}
+            {/* Le `.deb` téléchargé rend sa commande (publiée par le main dans `reason`), jamais
+                un faux « installing » : l'UI ne l'invente pas, elle n'affiche que ce qui l'est. */}
+            {updateState !== null && updateState.state === 'downloaded' && updateState.reason !== null ? (
+              <code className="field__value">{updateState.reason}</code>
+            ) : null}
+            <span className="field__help">
+              {settings.update.checkedAt === null
+                ? t('update.settings.lastCheck', { date: t('common.none') })
+                : t('update.settings.lastCheck', {
+                    date: new Date(settings.update.checkedAt).toLocaleString(
+                      locale === 'fr' ? 'fr-FR' : 'en-US',
+                    ),
+                  })}
+            </span>
+          </div>
         </section>
       </div>
 
