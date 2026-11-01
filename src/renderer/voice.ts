@@ -448,6 +448,16 @@ function publishSpeaking(current: VoiceSession, selfLevel: number, now: number):
   } catch {
     /* pas de pont : la mesure continue, l'overlay ne verra simplement rien */
   }
+  // Parole distante seule : la table des pairs mesurés ('true') est le SEUL déclencheur du
+  // ducking. `self` n'y entre jamais — le ducking baisse les AUTRES applications, la voix des
+  // pairs reste à volume plein et la nôtre ne concerne pas le système. Le même ensemble tenu
+  // part à l'extinction (relâchement du relay), donc la restauration suit la fin de tenue.
+  // Hors application (pas de preload) : rien n'est prétendu, la mesure continue.
+  try {
+    void lanApi().setDucking(peers).catch(() => {});
+  } catch {
+    /* pas de pont : le ducking ne verra simplement rien */
+  }
 }
 
 /** `level()` réel du plan média ; une erreur de lecture vaut silence, jamais une valeur inventée. */

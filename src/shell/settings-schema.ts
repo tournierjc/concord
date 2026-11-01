@@ -65,6 +65,13 @@ export interface AudioSettings {
   echoCancellation: boolean;
   /** Gain d'entrée, 0..2 (1 = neutre). */
   inputGain: number;
+  /**
+   * Ducking (2026-11-01) : pendant qu'un PAIR parle, les AUTRES applications du système sont
+   * baissées (jamais Concord — la voix des pairs reste à volume plein). `true` par défaut :
+   * zéro réglage requis pour un utilisateur non technique. Absent d'un fichier écrit avant ce
+   * changement ⇒ `true` (rétro-compat, même profil que `avatar` en 2026-10-31).
+   */
+  duckOthers: boolean;
 }
 
 export interface TalkSettings {
@@ -123,6 +130,8 @@ export function defaultSettings(): Settings {
       noiseSuppression: true,
       echoCancellation: true,
       inputGain: 1,
+      // Zéro réglage requis : le ducking est actif dès le premier lancement.
+      duckOthers: true,
     },
     talk: {
       mode: 'ptt',
@@ -288,6 +297,29 @@ function readBoolean(ctx: Ctx, source: Dict, key: string, path: string): boolean
   return value;
 }
 
+/**
+ * Lit le booléen de ducking avec sa RÉTRO-COMPAT (2026-11-01) : absent du fichier (écrit avant
+ * l'amendement, ou patch partiel `{...current.audio, ...patch}` sans la clé) ⇒ `true`. Le ducking
+ * est un comportement par défaut voulu — un fichier ancien ne doit pas l'éteindre en silence ;
+ * une valeur PRÉSENTE mais non booléenne est une erreur, jamais une réparation silencieuse
+ * (même politique que `readAvatarOptional` pour `avatar`).
+ */
+function readBooleanWithDefault(
+  ctx: Ctx,
+  source: Dict,
+  key: string,
+  path: string,
+  fallback: boolean,
+): boolean {
+  const value = source[key];
+  if (value === undefined) return fallback;
+  if (typeof value !== 'boolean') {
+    fail(ctx, `${path}.${key}`, 'type', `${path}.${key} doit être un booléen`);
+    return fallback;
+  }
+  return value;
+}
+
 function readNumber(
   ctx: Ctx,
   source: Dict,
@@ -427,6 +459,7 @@ const AUDIO_KEYS = [
   'noiseSuppression',
   'echoCancellation',
   'inputGain',
+  'duckOthers',
 ] as const;
 const TALK_KEYS = ['mode', 'pttAccelerator', 'vadThresholdDb'] as const;
 const OVERLAY_KEYS = ['enabled', 'opacity', 'scale', 'screenId', 'position'] as const;
@@ -562,6 +595,8 @@ function validateV1(source: Dict): SettingsResult {
     noiseSuppression: readBoolean(ctx, audioSource, 'noiseSuppression', 'audio'),
     echoCancellation: readBoolean(ctx, audioSource, 'echoCancellation', 'audio'),
     inputGain: readNumber(ctx, audioSource, 'inputGain', 'audio', { min: 0, max: 2 }),
+    // Rétro-compat assumée : absent ⇒ ON (le ducking est le comportement par défaut voulu).
+    duckOthers: readBooleanWithDefault(ctx, audioSource, 'duckOthers', 'audio', true),
   };
 
   const talkSource = section(ctx, source, 'talk');

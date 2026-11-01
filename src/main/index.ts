@@ -43,6 +43,7 @@ import { effectiveSignalingPort } from './signaling-port';
 import { applySignalToRoster } from './roster-link';
 import { createSettingsStore, type SettingsStore } from './settings-store';
 import { systemTimers } from './timers';
+import { createDuckingController, electronDuckExec, type DuckingController } from './ducking';
 import {
   createSignalingLink,
   pickListenHost,
@@ -53,6 +54,7 @@ import {
   IPC,
   IpcContractError,
   guardPayload,
+  shouldDuckForPeers,
   type DiscoveryHealthDto,
   type GainPayload,
   type IpcEventChannel,
@@ -154,6 +156,8 @@ app.on('activate', () => {
 
 app.on('will-quit', () => {
   releasePushToTalk();
+  // Le ducking ne survit pas à la fermeture : si une baisse était en cours, elle est annulée.
+  resetDucking();
   // Le tuyau de signalisation ne survit pas à la fermeture (leave émis, sockets fermées).
   stopSignalingLink('fermeture de l’application');
   // Browse mDNS + timer de scan : rien ne doit survivre à la fermeture.
@@ -169,6 +173,9 @@ async function bootstrap(): Promise<void> {
   // Le magasin d'avatars vit à côté des réglages, sous `userData` : un dossier que l'application
   // possède, que le renderer ne voit pas (sandbox), et que le réseau ne voit pas (LAN only).
   avatarStore = createAvatarStore(join(app.getPath('userData'), 'avatars'), electronAvatarIo());
+  // Le ducking est créé dès le démarrage : son seam (`execFile`) n'est appelé QUE si un pair est
+  // mesuré parlant ET que l'option `audio.duckOthers` est active — jamais avant, jamais à vide.
+  duckingController = createDuckingController({ exec: electronDuckExec(), timers: systemTimers });
   const loaded = store.load();
   settings = loaded.settings;
   if (loaded.recovered) {
@@ -399,6 +406,48 @@ function publishSpeaking(speaking: readonly string[]): void {
   sendEvent(IPC.eventSpeakingSet, { speaking }, 'overlay');
 }
 
+/* ------------------------------------------------------------------ */
+/* Ducking (2026-11-01)                                                */
+/* ------------------------------------------------------------------ */
+
+/**
+ * L'exécuteur système du ducking, créé au démarrage (`bootstrap`) avec le seam Electron
+ * (`execFile`, timeout 2 s, kill). `null` avant le démarrage : hors bootstrap, aucun geste.
+ */
+let duckingController: DuckingController | null = null;
+/** Dernière intention appliquée (idempotence par changement, comme la santé de découverte). */
+let duckingActive = false;
+
+/**
+ * Le renderer qui MESURE (voice.ts) publie ici l'ensemble des pairs parlants — jamais soi.
+ * La décision vient de la garde `shouldDuckForPeers` (pure, testée) avec l'id LOCAL que seul
+ * le main connaît (`signalingLink.selfId`) : un producteur qui glisserait soi-même dans la
+ * liste ne déclenche rien. L'option `audio.duckOthers` éteinte ⇒ AUCUN exec, aucune commande.
+ */
+function applyDuckingSignal(speaking: readonly string[]): void {
+  const controller = duckingController;
+  if (controller === null) return;
+  if (!settings.audio.duckOthers) {
+    // Option désactivée : le système n'est pas touché, même si un pair parle. Si le ducking
+    // tournait encore (option coupée en cours de parole), on restaure une fois, puis silence.
+    if (duckingActive) {
+      duckingActive = false;
+      controller.stop({ active: false, at: systemTimers.now() });
+    }
+    return;
+  }
+  const active = shouldDuckForPeers(speaking, signalingLink?.selfId ?? null);
+  if (active === duckingActive) return;
+  duckingActive = active;
+  controller.apply({ active, at: systemTimers.now() });
+}
+
+/** Départ de salon / fermeture : le ducking ne survit jamais à la session qui l'a déclenché. */
+function resetDucking(): void {
+  duckingActive = false;
+  duckingController?.stop({ active: false, at: systemTimers.now() });
+}
+
 /**
  * Liste des salons repérée sur le LAN. L'overlay ne consomme pas cet événement (il ne montre que
  * les participants d'un salon déjà rejoint) : on ne cible que la fenêtre principale.
@@ -566,6 +615,14 @@ function isGainPayload(raw: unknown): raw is GainPayload {
 }
 
 function isSpeakingSetPayload(raw: unknown): raw is SpeakingSetPayload {
+  if (!isRecord(raw)) return false;
+  const speaking = raw['speaking'];
+  return Array.isArray(speaking) && speaking.every((id: unknown) => typeof id === 'string');
+}
+
+// Ducking (2026-11-01) : même forme que `isSpeakingSetPayload` — le contrat a déjà borné la
+// liste, ce prédicat ne fait que la rendre typée au handler (jamais un cast).
+function isDuckingApplyPayload(raw: unknown): raw is { speaking: string[] } {
   if (!isRecord(raw)) return false;
   const speaking = raw['speaking'];
   return Array.isArray(speaking) && speaking.every((id: unknown) => typeof id === 'string');
@@ -772,6 +829,9 @@ function registerIpcHandlers(): void {
     },
     [IPC.roomLeave]: () => {
       stopSignalingLink('départ du salon');
+      // Le salon n'est plus : plus personne n'est mesuré, la baisse des autres applications
+      // s'arrête immédiatement (restaurée par le contrôleur).
+      resetDucking();
       return bridge.leave();
     },
     // La charge utile a déjà été validée par `guardPayload(IPC.signalSend, …)` : ici on ne
@@ -819,6 +879,12 @@ function registerIpcHandlers(): void {
         throw new Error(`overlay refusé (${detail})`);
       }
       persist(result.value);
+    },
+    // Ducking (2026-11-01) : le renderer qui mesure publie les pairs parlants ; le main garde
+    // la décision (garde pure `shouldDuckForPeers`, option, horodatage) et l'exécution (seam).
+    [IPC.duckingApply]: (payload: unknown) => {
+      const speaking = expectPayload(IPC.duckingApply, payload, isDuckingApplyPayload).speaking;
+      applyDuckingSignal(speaking);
     },
   };
 

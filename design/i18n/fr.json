@@ -118,6 +118,8 @@
   "settings.audio.permissionRetry": "Redemander l’accès",
   "settings.audio.mode": "Mode de prise de parole",
   "settings.audio.modeHelp": "Appuyer pour parler n’émet que pendant l’appui. La détection de voix ouvre le micro au-dessus du seuil.",
+  "settings.audio.duck.others": "Baisser les autres applications",
+  "settings.audio.duck.help": "Pendant qu’on vous parle, le son des autres logiciels baisse tout seul et revient après.",
   "settings.vad.title": "Détection de voix",
   "settings.vad.threshold": "Seuil d’ouverture",
   "settings.vad.thresholdValue": "{{db}} dBFS",

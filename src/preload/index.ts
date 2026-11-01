@@ -119,6 +119,10 @@ const lanAPI: LanAPI = {
   // un chemin, jamais des octets.
   chooseAvatar: () => invoke<AvatarChooseResult>(IPC.avatarChoose, {}),
   getAvatarImage: (avatarRef: string) => invoke<string | null>(IPC.avatarGetImage, { avatarRef }),
+  // Ducking (2026-11-01) : dernière méthode ajoutée, en queue de liste (aucun réordonnancement).
+  setDucking: async (speaking: readonly string[]) => {
+    await invoke<void>(IPC.duckingApply, { speaking });
+  },
 };
 
 // Gel : le renderer ne peut ni ajouter, ni remplacer, ni supprimer une méthode du pont.

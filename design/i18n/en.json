@@ -118,6 +118,8 @@
   "settings.audio.permissionRetry": "Ask again",
   "settings.audio.mode": "Talk mode",
   "settings.audio.modeHelp": "Push to talk transmits only while held. Voice detection opens the mic above the threshold.",
+  "settings.audio.duck.others": "Lower other apps",
+  "settings.audio.duck.help": "While someone speaks to you, other apps quietly turn down and come back after.",
   "settings.vad.title": "Voice detection",
   "settings.vad.threshold": "Open threshold",
   "settings.vad.thresholdValue": "{{db}} dBFS",
