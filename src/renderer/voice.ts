@@ -275,9 +275,9 @@ function attachRemoteStream(state: LinkState, peerId: string, stream: unknown): 
   if (stream === null || stream === undefined) return;
   // Défaut (c), SPEC-008 §1 : la piste branchée est la preuve de flux — le maillage
   // l'a déjà comptée telle (il publie `connected` depuis `onRemoteStream`). Ici,
-  // plus aucun `connected` auto-proclamé : on branche le `<audio>`, on note la
-  // preuve (`hasStream`), et le palier reste celui du maillage. Un flux branché ne
-  // fait pas non plus tomber un `failed` que le maillage vient de mesurer.
+  // plus aucun `connected` auto-proclamé : on branche la sortie, on note la preuve
+  // (`hasStream`), et le palier reste celui du maillage. Un flux branché ne fait
+  // pas non plus tomber un `failed` que le maillage vient de mesurer.
   state.sinks.ensure(peerId);
   state.sinks.attach(peerId, stream);
   upsertPeer(state, peerId, { hasStream: true });

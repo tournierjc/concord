@@ -287,6 +287,16 @@ export class FakePeerConnection {
     this.closed = true
     this.connectionState = 'closed'
   }
+
+  /**
+   * Défaut (b) : fait évoluer `connectionState` et prévient `onconnectionstatechange`,
+   * comme Chromium. C'est par là qu'un test dit « la connexion de CE pair est passée
+   * à failed/connected » — et vérifie que l'événement porte son pair.
+   */
+  public fireConnectionState(state: string): void {
+    this.connectionState = state
+    this.onconnectionstatechange?.()
+  }
 }
 
 /** Analyseur doublure : échantillons constants ⇒ RMS = 0,25 par défaut (vumètre non muet). */
