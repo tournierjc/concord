@@ -49,11 +49,16 @@ const REPO_NAME = 'concord';
  * `browser_download_url` d'un asset pointe sur `/releases/download/…` et REDIRIGE vers le CDN ;
  * le contrat nomme `objects.githubusercontent.com` (+ redirections CDN) — la première cible
  * `github.com` fait partie du chemin public standard de GitHub. `api.github.com` porte l'API.
+ * `release-assets.githubusercontent.com` : mesuré le 2026-11-01 contre la release live v0.4.0,
+ * la redirection de `github.com/…/releases/download/…` aboutit sur CET hôte de CDN GitHub
+ * (pré-signé Azure Blob), et non sur `objects.githubusercontent.com`. Il est suffixé sous
+ * `githubusercontent.com` comme le prévoit le contrat ; sous-domaine épinglé, pas de wildcard.
  */
 export const UPDATE_ALLOWED_HOSTS: readonly string[] = [
   'api.github.com',
   'github.com',
   'objects.githubusercontent.com',
+  'release-assets.githubusercontent.com',
 ];
 
 /** Condition 3 : un seul User-Agent, fixe, sans identifiant. */

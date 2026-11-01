@@ -32,3 +32,5 @@ VERIF/__pycache__/
 VERIF/*.tmp
 VERIF/.*.tmp
 VERIF/.t[0-9]*
+__uninstaller-nsis-concord.exe
+release/

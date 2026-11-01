@@ -245,16 +245,21 @@ describe('chooseInstallerStrategy', () => {
 /* ------------------------------------------------------------------ */
 
 describe('isAllowedUpdateHost', () => {
-  it("les trois hôtes GitHub de l'avenant passent", () => {
+  it("les hôtes GitHub de l'avenant passent", () => {
     assert.equal(isAllowedUpdateHost('https://api.github.com/repos/tournierjc/concord/releases/latest'), true);
     assert.equal(isAllowedUpdateHost('https://github.com/tournierjc/concord/releases/download/v0.5.0/x.exe'), true);
     assert.equal(isAllowedUpdateHost('https://objects.githubusercontent.com/asset'), true);
+    // Mesuré le 2026-11-01 contre la release live v0.4.0 : la redirection de
+    // github.com/…/releases/download aboutit sur ce CDN GitHub pré-signé.
+    assert.equal(isAllowedUpdateHost('https://release-assets.githubusercontent.com/asset'), true);
     assert.equal(isAllowedUpdateHost('https://API.GITHUB.COM/x'), true, 'insensible à la casse');
   });
   it('tout le reste est refusé (evil.com, http, schéma exotique)', () => {
     assert.equal(isAllowedUpdateHost('https://evil.com/x'), false);
     assert.equal(isAllowedUpdateHost('https://api.github.com.evil.com/x'), false);
     assert.equal(isAllowedUpdateHost('https://evil.com/api.github.com/x'), false);
+    assert.equal(isAllowedUpdateHost('https://release-assets.githubusercontent.com.evil.com/x'), false, 'suffixe collé refusé');
+    assert.equal(isAllowedUpdateHost('https://evil-githubusercontent.com/x'), false);
     assert.equal(isAllowedUpdateHost('http://api.github.com/x'), false, 'http refusé');
     assert.equal(isAllowedUpdateHost('ftp://objects.githubusercontent.com/x'), false);
     assert.equal(isAllowedUpdateHost('pas une URL'), false);
