@@ -40,6 +40,8 @@ jobs:
     runs-on: windows-latest
     steps:
       # VERIF/ contient des noms de fichiers avec « : », impossibles à créer sous Windows ; le build n'en a pas besoin.
+      # protectNTFS refuserait ces chemins dès l'index, avant que le sparse-checkout ne les écarte du disque.
+      - run: git config --global core.protectNTFS false
       - uses: actions/checkout@v4
         with:
           sparse-checkout-cone-mode: false
