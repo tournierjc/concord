@@ -34,6 +34,7 @@ import {
   type SignalIn,
   type SignalOut,
   type SpeakingSetPayload,
+  type UpdateStateDto,
   type AvatarChooseResult,
 } from '../shell/ipc-contract';
 import type { Settings } from '../shell/settings-schema';
@@ -123,6 +124,16 @@ const lanAPI: LanAPI = {
   setDucking: async (speaking: readonly string[]) => {
     await invoke<void>(IPC.duckingApply, { speaking });
   },
+  // Mises à jour (avenant SPEC-006b, 2026-11-01) : trois méthodes en queue, jamais un tri.
+  // Charge utile vide imposée par le contrat — le renderer ne choisit ni URL, ni version, ni chemin.
+  checkForUpdatesNow: async () => {
+    await invoke<void>(IPC.updateCheckNow);
+  },
+  installUpdateNow: async () => {
+    await invoke<void>(IPC.updateInstallNow);
+  },
+  onUpdateState: (listener: (state: UpdateStateDto) => void) =>
+    subscribe<UpdateStateDto>(IPC.eventUpdateState, listener),
 };
 
 // Gel : le renderer ne peut ni ajouter, ni remplacer, ni supprimer une méthode du pont.

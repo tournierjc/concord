@@ -97,6 +97,34 @@ export interface NetworkSettings {
   discovery: DiscoveryMode;
 }
 
+/**
+ * Mises à jour (avenant SPEC-006b, 2026-11-01).
+ *
+ * `auto` : la dérogation « hors LAN » est-elle ACTIVE ? `false` ⇒ plus AUCUN cycle automatique
+ * (retour CA20 intégral) ; la demande manuelle (bouton « Vérifier maintenant ») reste autorisée —
+ * c'est une commande explicite, pas une initiative de l'app. `true` par défaut : JC veut
+ * l'automatique par défaut, et un fichier écrit avant ce changement ne doit rien éteindre en
+ * silence (même rétro-compat que `duckOthers`).
+ *
+ * `checkedAt` et `lastSeenVersion` sont des MESURES du service (jamais saisies par l'UI) : la
+ * date de la dernière vérification et la dernière version vue. Les deux sont optionnels à la
+ * LECTURE (absents d'un fichier ancien) et ne portent aucune promesse d'affichage sans mesure.
+ */
+export interface UpdateSettings {
+  auto: boolean;
+  checkedAt: number | null;
+  lastSeenVersion: string | null;
+}
+
+/** Un patch du groupe `update` : l'interrupteur seul. Les MESURES du service ne se patchent pas. */
+export type UpdateSettingsPatch = { auto: boolean };
+
+/**
+ * Un patch partiel des réglages : même forme que `Partial<Settings>`, sauf le groupe `update`
+ * — l'UI n'a le droit d'écrire que l'interrupteur `auto`, jamais les mesures du service.
+ */
+export type SettingsPatch = Partial<Omit<Settings, 'update'>> & { update?: UpdateSettingsPatch };
+
 export interface Settings {
   version: number;
   locale: Locale;
@@ -113,6 +141,8 @@ export interface Settings {
   talk: TalkSettings;
   overlay: OverlaySettings;
   network: NetworkSettings;
+  /** Mises à jour (avenant SPEC-006b, 2026-11-01) — la dérogation et ses mesures, voir `UpdateSettings`. */
+  update: UpdateSettings;
 }
 
 export function defaultSettings(): Settings {
@@ -148,6 +178,13 @@ export function defaultSettings(): Settings {
     network: {
       signalingPort: SIGNALING_PORT_DEFAULT,
       discovery: 'auto',
+    },
+    update: {
+      // La dérogation est ACTIVE par défaut (JC veut l'automatique) ; les mesures sont vides
+      // tant qu'aucun cycle n'a eu lieu — rien n'est affirmé sans mesure (SPEC-002 D1).
+      auto: true,
+      checkedAt: null,
+      lastSeenVersion: null,
     },
   };
 }
@@ -452,7 +489,7 @@ export function signalingPortCandidates(): number[] {
 
 // --- Validation v1 ---------------------------------------------------------------------------
 
-const TOP_KEYS = ['version', 'locale', 'theme', 'nickname', 'avatar', 'audio', 'talk', 'overlay', 'network'] as const;
+const TOP_KEYS = ['version', 'locale', 'theme', 'nickname', 'avatar', 'audio', 'talk', 'overlay', 'network', 'update'] as const;
 const AUDIO_KEYS = [
   'inputDeviceId',
   'outputDeviceId',
@@ -464,6 +501,9 @@ const AUDIO_KEYS = [
 const TALK_KEYS = ['mode', 'pttAccelerator', 'vadThresholdDb'] as const;
 const OVERLAY_KEYS = ['enabled', 'opacity', 'scale', 'screenId', 'position'] as const;
 const NETWORK_KEYS = ['signalingPort', 'discovery'] as const;
+const UPDATE_KEYS = ['auto', 'checkedAt', 'lastSeenVersion'] as const;
+/** Les cles de mesure du service : le renderer n'a aucun droit d'ecriture dessus (2026-11-01). */
+const UPDATE_MEASURE_KEYS: readonly string[] = ['checkedAt', 'lastSeenVersion'];
 const POSITION_KEYS = ['x', 'y'] as const;
 const LOCALES: readonly Locale[] = ['fr', 'en'];
 const THEMES: readonly Theme[] = ['dark', 'light', 'system'];
@@ -559,6 +599,44 @@ function readAvatarOptional(ctx: Ctx, source: Dict, key: string, path: string): 
   return null;
 }
 
+/**
+ * Lit le groupe `update` (avenant SPEC-006b, 2026-11-01) avec sa RÉTRO-COMPAT : le groupe ENTIER
+ * peut être absent d'un fichier écrit avant l'amendement ⇒ défauts (`auto: true`, mesures vides) ;
+ * un groupe PRÉSENT doit être un objet, et `auto` PRÉSENT doit être un booléen — une valeur hors
+ * forme est une erreur, jamais une réparation silencieuse. `checkedAt` (millisecondes epoch) et
+ * `lastSeenVersion` (`X.Y.Z` ou `null`) sont des mesures du service : absentes ⇒ `null`, jamais un
+ * zéro ou une version inventée.
+ */
+function readUpdateSection(ctx: Ctx, source: Dict): UpdateSettings {
+  const value = source['update'];
+  if (value === undefined) return defaultSettings().update;
+  if (!isPlainObject(value)) {
+    fail(ctx, 'update', 'type', 'section update doit être un objet');
+    return defaultSettings().update;
+  }
+  checkUnknownKeys(ctx, value, UPDATE_KEYS, 'update');
+  const auto = readBooleanWithDefault(ctx, value, 'auto', 'update', true);
+  const rawCheckedAt = value['checkedAt'];
+  let checkedAt: number | null = null;
+  if (rawCheckedAt !== undefined && rawCheckedAt !== null) {
+    if (typeof rawCheckedAt !== 'number' || !Number.isFinite(rawCheckedAt) || rawCheckedAt < 0) {
+      fail(ctx, 'update.checkedAt', 'type', 'update.checkedAt doit être un nombre (millisecondes epoch) ou null');
+    } else {
+      checkedAt = rawCheckedAt;
+    }
+  }
+  const rawLastSeen = value['lastSeenVersion'];
+  let lastSeenVersion: string | null = null;
+  if (rawLastSeen !== undefined && rawLastSeen !== null) {
+    if (typeof rawLastSeen !== 'string' || !/^\d+\.\d+\.\d+$/.test(rawLastSeen)) {
+      fail(ctx, 'update.lastSeenVersion', 'format', 'update.lastSeenVersion doit être « X.Y.Z » ou null');
+    } else {
+      lastSeenVersion = rawLastSeen;
+    }
+  }
+  return { auto, checkedAt, lastSeenVersion };
+}
+
 function readPosition(ctx: Ctx, source: Dict, key: string, path: string): Point | null {
   const value = source[key];
   if (value === undefined) {
@@ -645,11 +723,15 @@ function validateV1(source: Dict): SettingsResult {
     discovery: readEnum(ctx, networkSource, 'discovery', 'network', DISCOVERY_MODES),
   };
 
+  // Le groupe `update` est OPTIONNEL à la lecture (rétro-compat 2026-11-01) : absent ⇒ défauts
+  // (`auto: true`). `section()` n'est pas utilisé ici — l'absence EST une valeur, pas une erreur.
+  const update = readUpdateSection(ctx, source);
+
   if (ctx.errors.length > 0) return { ok: false, errors: ctx.errors };
   return {
     ok: true,
     migratedFrom: null,
-    value: { version, locale, theme, nickname, avatar, audio, talk, overlay, network },
+    value: { version, locale, theme, nickname, avatar, audio, talk, overlay, network, update },
   };
 }
 
@@ -757,7 +839,7 @@ export function parseSettings(input: unknown): SettingsResult {
   return validateV1(input);
 }
 
-const PATCHABLE_TOP_KEYS = ['locale', 'theme', 'nickname', 'avatar', 'audio', 'talk', 'overlay', 'network'] as const;
+const PATCHABLE_TOP_KEYS = ['locale', 'theme', 'nickname', 'avatar', 'audio', 'talk', 'overlay', 'network', 'update'] as const;
 
 /**
  * Applique une modification partielle (`setSettings` côté IPC), puis revalide l'objet complet.
@@ -782,12 +864,24 @@ export function applySettingsPatch(current: Settings, patch: unknown): SettingsR
   for (const key of PATCHABLE_TOP_KEYS) {
     if (!(key in patch)) continue;
     const incoming = patch[key];
-    if (key === 'audio' || key === 'talk' || key === 'overlay' || key === 'network') {
+    if (key === 'audio' || key === 'talk' || key === 'overlay' || key === 'network' || key === 'update') {
       if (!isPlainObject(incoming)) {
         fail(ctx, key, 'type', `section ${key} doit être un objet`);
         continue;
       }
       const existing = isPlainObject(merged[key]) ? (merged[key] as Dict) : {};
+      // Mises à jour (2026-11-01) : `update.checkedAt` et `update.lastSeenVersion` sont des MESURES
+      // du service (le main les écrit après chaque cycle), pas des réglages saisis. Un patch du
+      // renderer qui les porte est refusé — la date de dernière vérification ne se décrète pas.
+      if (key === 'update') {
+        // `undefined` = la cle est ABSENTE du patch (le droit du patch partiel : « ne pas y
+        // toucher ») ; `null` est une ECRIRE (effacer une mesure) et reste refuse.
+        for (const measure of UPDATE_MEASURE_KEYS) {
+          if (measure in incoming && incoming[measure] !== undefined) {
+            fail(ctx, `${key}.${measure}`, 'forbidden-field', `${key}.${measure} est une mesure du service, non modifiable par patch`);
+          }
+        }
+      }
       merged[key] = { ...existing, ...incoming };
     } else {
       merged[key] = incoming;

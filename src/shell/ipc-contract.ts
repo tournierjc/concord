@@ -13,7 +13,7 @@
  * ce qui permet à ce module d'être chargé par Node sans résoudre `./settings-schema`.
  */
 
-import type { Settings } from './settings-schema';
+import type { Settings, SettingsPatch } from './settings-schema';
 
 import { AVATAR_REF_LENGTH, isAvatarRef, isCustomAvatarShape, isGalleryAvatarId, normalizeIncomingAvatarRef } from './avatar.ts';
 import type { AvatarSetting, CustomAvatar } from './avatar.ts';
@@ -52,6 +52,11 @@ export const IPC = {
   // le main applique la baisse/restauration du volume des AUTRES applications. Une seule forme :
   // l'intention `{ active: boolean }` horodatée par le producteur — le main ne décide rien.
   duckingApply: 'lan:ducking:apply',
+  // Mises à jour (avenant SPEC-006b, 2026-11-01) : le renderer DEMANDE et AFFICHE, le main
+  // vérifie, télécharge et installe (process principal seul, `node:https`, hôtes allowlistés).
+  // Deux invoke à charge utile VIDE — le renderer ne choisit ni URL, ni version, ni chemin.
+  updateCheckNow: 'lan:update:check-now',
+  updateInstallNow: 'lan:update:install-now',
   // main → renderer (send/on)
   eventParticipants: 'lan:event:participants',
   // (AD-17 D1) `lan:event:speaking` retiré : le renderer mesure déjà le niveau, et le main n'a
@@ -73,6 +78,9 @@ export const IPC = {
   eventSignal: 'lan:event:signal',
   // AD-19 D1 / AD-20 D1 — l'ensemble « qui parle », relayé tel quel vers la fenêtre d'overlay.
   eventSpeakingSet: 'lan:event:speaking-set',
+  // Mises à jour (avenant SPEC-006b, 2026-11-01) : l'état de la machine du main, publié à chaque
+  // transition (checking/available/downloading NN %/downloaded/installing/up-to-date/disabled/failed).
+  eventUpdateState: 'lan:event:update-state',
 } as const;
 
 export type IpcInvokeChannel = (typeof IPC)[
@@ -93,7 +101,9 @@ export type IpcInvokeChannel = (typeof IPC)[
   | 'signalSend'
   | 'avatarChoose'
   | 'avatarGetImage'
-  | 'duckingApply'];
+  | 'duckingApply'
+  | 'updateCheckNow'
+  | 'updateInstallNow'];
 
 export type IpcEventChannel = (typeof IPC)[
   | 'eventParticipants'
@@ -106,7 +116,8 @@ export type IpcEventChannel = (typeof IPC)[
   | 'eventProfileOpen'
   | 'eventDiscoveryStatus'
   | 'eventSignal'
-  | 'eventSpeakingSet'];
+  | 'eventSpeakingSet'
+  | 'eventUpdateState'];
 
 export const INVOKE_CHANNELS: readonly IpcInvokeChannel[] = [
   IPC.settingsGet,
@@ -127,6 +138,8 @@ export const INVOKE_CHANNELS: readonly IpcInvokeChannel[] = [
   IPC.avatarChoose,
   IPC.avatarGetImage,
   IPC.duckingApply,
+  IPC.updateCheckNow,
+  IPC.updateInstallNow,
 ];
 
 export const EVENT_CHANNELS: readonly IpcEventChannel[] = [
@@ -141,6 +154,7 @@ export const EVENT_CHANNELS: readonly IpcEventChannel[] = [
   IPC.eventDiscoveryStatus,
   IPC.eventSignal,
   IPC.eventSpeakingSet,
+  IPC.eventUpdateState,
 ];
 
 // --- DTO -------------------------------------------------------------------------------------
@@ -324,6 +338,36 @@ export interface OverlayPatchPayload {
   position?: { x: number; y: number } | null;
 }
 
+// --- Mises à jour (avenant SPEC-006b, 2026-11-01) ------------------------------------------
+
+/**
+ * L'état de la machine à états du service de mise à jour (`src/main/update.ts`), tel qu'il
+ * traverse l'IPC. Sérialisable champ par champ, validé dans les deux sens :
+ *  - `version` : `null` ou une version `X.Y.Z` — un texte libre serait une promesse ;
+ *  - `percent` : `null` ou un ENTIER 0..100 (un flottant n'a rien à afficher) ;
+ *  - `reason`  : `null` ou une chaîne courte, lisible (raison d'échec, ou commande `deb-only`).
+ */
+export interface UpdateStateDto {
+  state: UpdatePhaseDto;
+  version: string | null;
+  percent: number | null;
+  reason: string | null;
+}
+
+export type UpdatePhaseDto =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'downloaded'
+  | 'installing'
+  | 'up-to-date'
+  | 'disabled'
+  | 'failed';
+
+/** Longueur maximale d'une raison publiée (`failed`, commande `deb-only`). */
+export const UPDATE_REASON_MAX = 240;
+
 // --- Signalisation (T16 / SPEC-007 §4.1) ---------------------------------------------------
 
 /**
@@ -379,7 +423,11 @@ export interface LanAPI {
   /** Ouvre le panneau profil (pseudo + avatar) — l'implémentation vient de `feature/profile-lobby`. */
   openProfile(): Promise<void>;
   getSettings(): Promise<Settings>;
-  setSettings(patch: Partial<Settings>): Promise<Settings>;
+  /**
+   * Patch partiel des réglages. Le groupe `update` n'accepte QUE l'interrupteur `auto` — ses deux
+   * mesures (`checkedAt`, `lastSeenVersion`) sont écrites par le service seul, jamais par l'UI.
+   */
+  setSettings(patch: SettingsPatch): Promise<Settings>;
   setOverlay(patch: OverlayPatchPayload): Promise<void>;
   /** Publie l'ensemble « qui parle » (ids de signalisation) vers la fenêtre d'overlay. */
   setSpeaking(speaking: readonly string[]): Promise<void>;
@@ -419,6 +467,19 @@ export interface LanAPI {
    * fichier est absent ou corrompu : l'affichage reste sur les initiales, jamais une image inventée.
    */
   getAvatarImage(avatarRef: string): Promise<string | null>;
+  /**
+   * Mises à jour (avenant SPEC-006b, 2026-11-01) : forcer une vérification depuis les publications
+   * GitHub. Charge utile vide — le renderer ne choisit ni URL, ni version. Le résultat est rendu
+   * par l'événement `onUpdateState`, pas par la réponse de cet invoke.
+   */
+  checkForUpdatesNow(): Promise<void>;
+  /**
+   * Installer l'artefact déjà téléchargé et vérifié (bouton [Installer maintenant]). Refusé en
+   * salon actif, comme la chaîne automatique ; pour un `.deb`, rend la commande à exécuter.
+   */
+  installUpdateNow(): Promise<void>;
+  /** L'état de la machine de mise à jour, publié par le main à chaque transition. */
+  onUpdateState(listener: (state: UpdateStateDto) => void): () => void;
 }
 
 /** Ce que le choix d'une image rend au renderer — jamais un chemin, jamais un binaire. */
@@ -704,6 +765,10 @@ function guardInvoke(channel: string, raw: unknown): GuardResult<unknown> {
     case IPC.profileOpen:
     case IPC.lobbyStatusGet:
     case IPC.roomLeave:
+    // Mises à jour (2026-11-01) : le renderer ne choisit NI l'URL, NI la version, NI le chemin —
+    // le main seul décide. Une charge utile serait un essai de piloter le téléchargement depuis la page.
+    case IPC.updateCheckNow:
+    case IPC.updateInstallNow:
     case IPC.roomsDiscover: {
       if (raw !== undefined && raw !== null) {
         const payload = guard.object(raw, 'payload', EMPTY_PAYLOAD_KEYS);
@@ -874,6 +939,63 @@ function guardSpeakingSet(guard: Guard, raw: unknown): string[] | null {
 }
 
 const ROOM_PHASES: readonly RoomPhase[] = ['idle', 'discovering', 'joining', 'connected', 'retrying', 'failed'];
+
+/** Phases admises sur `eventUpdateState` (miroir exact de `UpdatePhaseDto`). */
+const UPDATE_PHASES: readonly UpdatePhaseDto[] = [
+  'idle',
+  'checking',
+  'available',
+  'downloading',
+  'downloaded',
+  'installing',
+  'up-to-date',
+  'disabled',
+  'failed',
+];
+
+/**
+ * Un `number | null` ENTIER dans [min, max] : la garde `nullablePort` porte le même contrôle pour
+ * un port ; celui-ci le porte pour un pourcentage. Un flottant est refusé, pas arrondi — un
+ * `percent: 42.5` viendrait d'un producteur qui n'a pas décidé ce qu'il affiche.
+ */
+function guardNullableInteger(
+  guard: Guard,
+  source: Dict | null,
+  key: string,
+  path: string,
+  min: number,
+  max: number,
+): number | null | undefined {
+  if (!source) return undefined;
+  const value = source[key];
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    guard.invalid(`${path}.${key}`, 'entier ou null attendu' );
+    return undefined;
+  }
+  if (value < min || value > max) {
+    guard.invalid(`${path}.${key}`, `valeur hors bornes [${min}, ${max}]`);
+    return undefined;
+  }
+  return value;
+}
+
+/** Une chaîne `null` ou `X.Y.Z` exactement — même règle que `update.lastSeenVersion` des réglages. */
+function guardNullableSemver(
+  guard: Guard,
+  source: Dict | null,
+  key: string,
+  path: string,
+): string | null | undefined {
+  if (!source) return undefined;
+  const value = source[key];
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string' || !/^\d+\.\d+\.\d+$/.test(value)) {
+    guard.invalid(`${path}.${key}`, 'version « X.Y.Z » ou null attendue');
+    return undefined;
+  }
+  return value;
+}
 
 /** Formes admises sur les deux canaux de signalisation (SPEC-007 §4.1). */
 const SIGNAL_KINDS = ['offer', 'answer', 'ice'] as const;
@@ -1082,6 +1204,20 @@ function guardEvent(channel: string, raw: unknown): GuardResult<unknown> {
       const health = guard.oneOf(payload, 'health', 'payload', ['ok', 'mdns-down', 'offline'] as const);
       if (health === null || guard.errors.length > 0) return guardError(channel, guard);
       return { ok: true, value: { health } };
+    }
+    case IPC.eventUpdateState: {
+      // Mises à jour (2026-11-01) : DTO validé champ par champ. Un `percent` flottant, une
+      // `version` qui n'est pas `X.Y.Z` ou un `state` inventé sont refusés — l'écran n'affiche
+      // jamais ce que le contrat n'a pas pu nommer.
+      const allowed = ['state', 'version', 'percent', 'reason'] as const;
+      const payload = guard.object(raw, 'payload', allowed);
+      if (payload === null) return guardError(channel, guard);
+      const state = guard.oneOf(payload, 'state', 'payload', UPDATE_PHASES);
+      const version = guardNullableSemver(guard, payload, 'version', 'payload');
+      const percent = guardNullableInteger(guard, payload, 'percent', 'payload', 0, 100);
+      const reason = guard.nullableString(payload, 'reason', 'payload', UPDATE_REASON_MAX);
+      if (guard.errors.length > 0) return guardError(channel, guard);
+      return { ok: true, value: { state, version, percent, reason } };
     }
     case IPC.eventProfileOpen: {
       // Notification vide : la décision d'afficher le panneau appartient au renderer seul.

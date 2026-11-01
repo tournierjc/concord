@@ -3,22 +3,28 @@
 ## État mesuré au 2026-10-31 (cette section remplace les constats ci-dessous)
 
 Compté sur `src/shell/ipc-contract.ts` (`IPC`, `INVOKE_CHANNELS`, `EVENT_CHANNELS`) et
-`src/preload/index.ts` (13 abonnements, `subscribe`) :
+`src/preload/index.ts` (12 abonnements, `subscribe`) :
 
-- **29 canaux** dans le contrat : **18 invoke** (`settingsGet`, `settingsSet`, `settingsOpen`,
+- **32 canaux** dans le contrat : **20 invoke** (`settingsGet`, `settingsSet`, `settingsOpen`,
   `profileOpen`, `lobbyStatusGet`, `roomJoin`, `roomLeave`, `roomsDiscover`, `controlSetMute`,
   `controlSetDeafen`, `controlSetPushToTalk`, `controlSetGain`, `overlaySet`, `speakingSet`,
-  `signalSend`, `avatarChoose`, `avatarGetImage`, `duckingApply`) et
-  **11 événements** (`eventParticipants`, `eventRoomState`, `eventRoomsDiscovered`,
+  `signalSend`, `avatarChoose`, `avatarGetImage`, `duckingApply`, `updateCheckNow`,
+  `updateInstallNow`) et
+  **12 événements** (`eventParticipants`, `eventRoomState`, `eventRoomsDiscovered`,
   `eventControlState`, `eventSettingsChanged`, `eventOverlayGeometry`, `eventShortcutConflict`,
-  `eventProfileOpen`, `eventDiscoveryStatus`, `eventSignal`, `eventSpeakingSet`).
+  `eventProfileOpen`, `eventDiscoveryStatus`, `eventSignal`, `eventSpeakingSet`,
+  `eventUpdateState`).
   (`profileOpen` / `eventProfileOpen` : porte du panneau profil pseudo + avatar.
   `avatarChoose` / `avatarGetImage` : image locale et service de l'avatar aux pairs.
   `lobbyStatusGet` / `eventDiscoveryStatus` : pied de lobby structuré et santé de la découverte.
   `duckingApply` : le renderer qui mesure publie les pairs parlants, le main baisse les autres
   applications — la décision (jamais soi) est gardée par `shouldDuckForPeers`, l'exécution par
-  le seam `DuckExec` de `src/main/ducking.ts`.)
-- Exposés au renderer : les 18 invoke + les 11 événements. Manquants : aucun. En trop : aucun.
+  le seam `DuckExec` de `src/main/ducking.ts`.
+  `updateCheckNow` / `updateInstallNow` / `eventUpdateState` (avenant SPEC-006b, 2026-11-01) :
+  le renderer DEMANDE et AFFICHE, le main vérifie, télécharge et installe — `node:https` seul,
+  hôtes allowlistés en dur, empreinte SHA-256 publiée vérifiée, jamais d'installation en salon
+  actif ; les invoke portent une charge utile VIDE (le renderer ne choisit ni URL, ni version).)
+- Exposés au renderer : les 20 invoke + les 12 événements. Manquants : aucun. En trop : aucun.
 - Les quatre écarts décrits plus bas sont **corrigés** :
   1. `room-bridge.ts` type son discriminant sur la **VALEUR** du canon
      (`{ channel: typeof IPC.eventRoomState; payload: RoomStateCore }`) et émet `IPC.eventRoomState` :

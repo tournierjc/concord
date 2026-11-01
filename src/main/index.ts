@@ -43,7 +43,17 @@ import { effectiveSignalingPort } from './signaling-port';
 import { applySignalToRoster } from './roster-link';
 import { createSettingsStore, type SettingsStore } from './settings-store';
 import { systemTimers } from './timers';
-import { createDuckingController, electronDuckExec, type DuckingController } from './ducking';
+import {
+  createDuckingController,
+  electronDuckExec,
+  type DuckingController,
+} from './ducking';
+import {
+  createUpdateService,
+  electronUpdateIo,
+  type UpdateService,
+} from './update';
+import { createRequire } from 'node:module';
 import {
   createSignalingLink,
   pickListenHost,
@@ -66,6 +76,7 @@ import {
   type SignalIn,
   type SignalOut,
   type SpeakingSetPayload,
+  type UpdateStateDto,
 } from '../shell/ipc-contract';
 import {
   applySettingsPatch,
@@ -158,6 +169,9 @@ app.on('will-quit', () => {
   releasePushToTalk();
   // Le ducking ne survit pas à la fermeture : si une baisse était en cours, elle est annulée.
   resetDucking();
+  // Les minuteries du service de mise à jour ne survivent pas à la fermeture (un téléchargement
+  // en vol est abandonné — un `.part` orphelin est repris ou nettoyé au prochain cycle).
+  updateService?.stop();
   // Le tuyau de signalisation ne survit pas à la fermeture (leave émis, sockets fermées).
   stopSignalingLink('fermeture de l’application');
   // Browse mDNS + timer de scan : rien ne doit survivre à la fermeture.
@@ -188,11 +202,37 @@ async function bootstrap(): Promise<void> {
   createOverlay();
 
   registerIpcHandlers();
-  // Enregistre le raccourci PTT auprès du système ET publie un éventuel conflit : l'UI doit le dire,
+  // Enregistre le raccourci push-to-talk auprès du système ET publie un éventuel conflit : l'UI doit le dire,
   // pas le masquer (le second envoi qui vivait en fin de `bootstrap` faisait doublon).
   registerPushToTalkShortcut();
   // Après les fenêtres : le premier `onRooms` doit trouver un renderer à qui parler.
   discovery.start();
+
+  // Mises à jour (avenant SPEC-006b, 2026-11-01) : créé APRÈS les fenêtres et les handlers IPC —
+  // le premier état publié doit trouver un renderer à qui parler, comme la découverte. La cadence
+  // (30 s puis 24 h) est armée par `start()` ; la CONDITION `auto` est relue à chaque réveil par
+  // le service lui-même via `isAutoEnabled`.
+  updateService = createUpdateService({
+    seam: electronUpdateIo({
+      downloadsDir: join(app.getPath('userData'), 'downloads'),
+      appVersion: readAppVersion(),
+      env: process.env,
+      timers: systemTimers,
+    }),
+    timers: systemTimers,
+    quitApp: () => {
+      app.quit();
+    },
+    roomActive: roomActiveForUpdate,
+    isAutoEnabled: () => settings.update.auto,
+    onStateChange: (state) => {
+      // Publication immédiate (l'UI suit la machine en direct), puis enregistrement des MESURES
+      // (checkedAt, lastSeenVersion) — des faits observés, jamais des réglages saisis.
+      publishUpdateState(state);
+      persistUpdateMeasures(state);
+    },
+  });
+  updateService.start();
 
   // Branchement/débranchement d'écran : l'overlay se replace au lieu de rester hors champ, et la
   // nouvelle géométrie est republiée (`overlay.refresh()` calculait mais ne la poussait pas).
@@ -349,6 +389,74 @@ function registerPushToTalkShortcut(): void {
     bridge.setPushToTalk(active);
   });
   if (ptt.conflict) sendEvent(IPC.eventShortcutConflict, ptt.conflict);
+}
+
+/* ------------------------------------------------------------------ */
+/* Mises à jour (avenant SPEC-006b, 2026-11-01)                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * La version de l'application, LUE dans le `package.json` du paquet (jamais une constante
+ * recopiée qui dériverait du build). Repli honnête `0.0.0` si la lecture échoue — avec cette
+ * valeur, toute publication est considérée plus récente et le cycle suit ses gardes (empreinte,
+ * salon) avant d'installer quoi que ce soit.
+ */
+function readAppVersion(): string {
+  try {
+    const loader = createRequire(__filename);
+    const manifest = loader(join(app.getAppPath(), 'package.json')) as { version?: unknown };
+    const version = manifest.version;
+    return typeof version === 'string' && /^\d+\.\d+\.\d+$/.test(version) ? version : '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+/**
+ * Le service de mise à jour, créé au démarrage dès que `userData` est connu. `null` avant le
+ * démarrage : hors bootstrap, aucun geste. Tout I/O passe par son seam (`electronUpdateIo`) ;
+ * `node:https` seul dans le process principal — `net-guard.ts` et `csp.ts` ne bougent pas (ils
+ * gardent le renderer, pas le main ; l'avenant SPEC-006b ne les modifie pas).
+ */
+let updateService: UpdateService | null = null;
+
+/**
+ * La garde « jamais pendant un salon » (condition 6 de l'avenant) : les phases `joining`,
+ * `connected`, `retrying` sont lues dans l'état du pont — le service ne connaît pas Electron,
+ * c'est ici qu'on les lui rend. Relue à CHAQUE tentative, automatique comme manuelle.
+ */
+function roomActiveForUpdate(): boolean {
+  const phase = bridge.getRoomState().phase;
+  return phase === 'joining' || phase === 'connected' || phase === 'retrying';
+}
+
+/** Publie l'état de la machine à états vers la fenêtre principale seule (l'overlay n'a rien à dire). */
+function publishUpdateState(state: UpdateStateDto): void {
+  sendEvent(IPC.eventUpdateState, state, 'main');
+}
+
+/**
+ * Enregistre les MESURES du service dans les réglages (`update.checkedAt`, `update.lastSeenVersion`)
+ * sans déclencher de cycle : la date de dernière vérification et la dernière version vue sont des
+ * faits observés, pas des réglages saisis. Écriture silencieuse en cas d'échec (un réglage de
+ * mesure ne doit jamais casser un cycle de mise à jour).
+ */
+function persistUpdateMeasures(state: UpdateStateDto): void {
+  if (state.state === 'checking') {
+    try {
+      persist({ ...settings, update: { ...settings.update, checkedAt: systemTimers.now() } });
+    } catch (error) {
+      console.error('[réglages] mesure checkedAt non enregistrée', error);
+    }
+    return;
+  }
+  if (state.version !== null && (state.state === 'up-to-date' || state.state === 'available' || state.state === 'downloading' || state.state === 'downloaded' || state.state === 'installing')) {
+    try {
+      persist({ ...settings, update: { ...settings.update, lastSeenVersion: state.version } });
+    } catch (error) {
+      console.error('[réglages] mesure lastSeenVersion non enregistrée', error);
+    }
+  }
 }
 
 // --- IPC -------------------------------------------------------------------------------------
@@ -885,6 +993,18 @@ function registerIpcHandlers(): void {
     [IPC.duckingApply]: (payload: unknown) => {
       const speaking = expectPayload(IPC.duckingApply, payload, isDuckingApplyPayload).speaking;
       applyDuckingSignal(speaking);
+    },
+    // Mises à jour (2026-11-01) : le renderer DEMANDE, le service décide. Charge utile déjà
+    // réduite à `{}` par le contrat — rien à lire ici, tout est dans le service.
+    [IPC.updateCheckNow]: () => {
+      const service = updateService;
+      if (service === null) return;
+      void service.checkNow();
+    },
+    [IPC.updateInstallNow]: () => {
+      const service = updateService;
+      if (service === null) return;
+      void service.installUpdateNow();
     },
   };
 
