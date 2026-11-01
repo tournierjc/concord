@@ -230,6 +230,7 @@ function fakeElectronModule(): FakedElectron {
     shell: { openExternal: (): Promise<void> => Promise.resolve() },
     dialog: { showMessageBox: (): Promise<{ response: number }> => Promise.resolve({ response: 0 }) },
     powerMonitor: { on: (): void => undefined },
+    nativeTheme: { shouldUseDarkColors: true, on: (): void => undefined },
     ipcRenderer: {
       sendSync: (): null => null,
       on: (): void => undefined,

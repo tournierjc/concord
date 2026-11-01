@@ -72,7 +72,7 @@ function wsSources(opts: CspOptions): string[] {
     // Le moteur embarque son serveur de signalisation dans le process principal (A5).
     wsOrigin('127.0.0.1:*'),
     wsOrigin('localhost:*'),
-    wsOrigin('[::1]:*'),
+    // No `ws://[::1]:*`: CSP host-sources cannot be IPv6 literals; Chromium drops it with a warning.
   ]);
   for (const host of localPrivateAddresses()) {
     sources.add(wsOrigin(`${host}:*`));

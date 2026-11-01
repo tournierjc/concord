@@ -245,11 +245,14 @@ export class OverlayController<W extends OverlayWindow = electron.BrowserWindow>
   }
 
   /** Charge le document overlay puis affiche sans prendre le focus. */
-  load(): void {
+  load(url: string = appUrl('overlay.html')): void {
     const window = this.getWindow();
     if (!window) return;
-    void window.loadURL(appUrl('overlay.html'));
-    window.once('ready-to-show', () => window.showInactive());
+    void window.loadURL(url);
+    // `apply()` may have hidden the overlay (disabled, or no room) before the document loaded.
+    window.once('ready-to-show', () => {
+      if (this.geometry !== null) window.showInactive();
+    });
   }
 
   /**

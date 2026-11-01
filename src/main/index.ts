@@ -15,7 +15,7 @@
  * `node_modules`). Sa vérification future est `npm run build:main` puis un lancement réel.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, screen, session } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, screen, session } from 'electron';
 import { readFileSync } from 'node:fs';
 import { networkInterfaces, userInfo } from 'node:os';
 import { join } from 'node:path';
@@ -146,10 +146,12 @@ if (!hasLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (!mainWindow) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
+    // A relaunch must always end with a visible window: returning early when the main window was
+    // gone swallowed every launch from the Start menu shortcut while the first process lived on.
+    const window = mainWindow ?? createMainWindow();
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.focus();
   });
   // Doit être appelé avant `app.whenReady()`.
   registerAppScheme();
@@ -199,7 +201,8 @@ async function bootstrap(): Promise<void> {
 
   applySecurityPolicies();
   createMainWindow();
-  createOverlay();
+  // No overlay at boot: `syncOverlayGeometry` creates it when a room is joined and destroys it on
+  // leave (one renderer process fewer, ~90 MB, while idle in the lobby).
 
   registerIpcHandlers();
   // Enregistre le raccourci push-to-talk auprès du système ET publie un éventuel conflit : l'UI doit le dire,
@@ -296,28 +299,62 @@ function devWindowIcon(): string | undefined {
   return join(app.getAppPath(), 'build', 'icon.png');
 }
 
+/**
+ * Upper bound on the wait for `ready-to-show`. That event never fires when the GPU process fails
+ * to start (seen with some Windows drivers and remote sessions): the app was running, but with
+ * `show: false` the user saw nothing at all.
+ */
+const SHOW_FALLBACK_MS = 3000;
+
+/** Matches `--color-bg-canvas` of each theme, so the first frame isn't a flash of the other one. */
+function windowBackground(): string {
+  const theme = settings.theme;
+  const dark = theme === 'dark' || (theme === 'system' && nativeTheme.shouldUseDarkColors);
+  return dark ? '#0E1116' : '#F4F6F9';
+}
+
 function createMainWindow(): BrowserWindow {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
 
+  const icon = devWindowIcon();
   const window = new BrowserWindow({
     width: 1040,
     height: 720,
     minWidth: 760,
     minHeight: 560,
     show: false,
-    icon: devWindowIcon(),
-    backgroundColor: '#0E1116',
+    ...(icon === undefined ? {} : { icon }),
+    backgroundColor: windowBackground(),
+    autoHideMenuBar: true,
     title: 'Concord',
     webPreferences: secureWebPreferences({ devTools: !app.isPackaged }),
   });
 
   harden(window.webContents);
-  window.once('ready-to-show', () => window.show());
+  const reveal = (): void => {
+    if (!window.isDestroyed() && !window.isVisible()) window.show();
+  };
+  window.once('ready-to-show', reveal);
+  systemTimers.once(SHOW_FALLBACK_MS, reveal);
   window.on('closed', () => {
     mainWindow = null;
+    // The overlay is a satellite of the main window. Left open, it kept `window-all-closed` from
+    // firing: the process lived on invisibly and held the single-instance lock.
+    overlay.destroy();
   });
+  window.webContents.on('preload-error', (_event, preloadFile, error) => {
+    console.error('[fenêtre principale] preload non chargé :', preloadFile, error);
+  });
+  window.webContents.on('did-fail-load', (_event, code, description, url) => {
+    console.error('[fenêtre principale] chargement échoué :', code, description, url);
+  });
+  let reloads = 0;
   window.webContents.on('render-process-gone', (_event, details) => {
     console.error('[fenêtre principale] renderer arrêté :', details.reason);
+    if (details.reason !== 'clean-exit' && reloads < 1 && !window.isDestroyed()) {
+      reloads += 1;
+      window.webContents.reload();
+    }
   });
 
   if (DEV_SERVER) void window.loadURL(DEV_SERVER);
@@ -334,11 +371,15 @@ function createOverlay(): void {
   // ouverture et toute navigation hors de `app://` (ou du serveur de dev).
   const overlayWindow = overlay.getWindow();
   if (overlayWindow) harden(overlayWindow.webContents);
-  overlay.load();
+  overlay.load(DEV_SERVER ? new URL('overlay.html', DEV_SERVER).toString() : undefined);
   // AD-20 D1 : une overlay qui (re)charge ne peut pas attendre la prochaine transition — une parole
   // déjà en cours resterait éteinte. On rejoue le dernier ensemble connu, tel quel.
   overlay.getWindow()?.webContents.once('did-finish-load', () => {
+    // Created mid-session: the room events it subscribes to have already been sent.
+    sendEvent(IPC.eventRoomState, { ...bridge.getRoomState(), signalingPort: currentSignalingPort() }, 'overlay');
+    sendEvent(IPC.eventParticipants, bridge.getParticipants(), 'overlay');
     publishSpeaking(speakingNow);
+    syncOverlayGeometry();
   });
   syncOverlayGeometry();
 }
@@ -580,7 +621,19 @@ function publishDiscoveryHealth(health: DiscoveryHealth): void {
  * renderer de l'overlay suive. Sans cet appel, la pastille reste figée sur sa taille initiale.
  */
 function syncOverlayGeometry(): void {
-  const geometry = overlay.apply(settings.overlay, bridge.getRoomState().participantCount);
+  const room = bridge.getRoomState();
+  // The overlay floats above every other app: outside a room it has nothing to show, so it stays
+  // hidden instead of printing "nobody here yet" over the user's desktop.
+  const enabled = settings.overlay.enabled && room.roomId !== null && mainWindow !== null;
+  if (!enabled) {
+    overlay.destroy();
+    return;
+  }
+  if (overlay.getWindow() === null) {
+    createOverlay();
+    return;
+  }
+  const geometry = overlay.apply({ ...settings.overlay, enabled }, room.participantCount);
   if (!geometry) return;
   sendEvent(IPC.eventOverlayGeometry, {
     x: geometry.window.x,

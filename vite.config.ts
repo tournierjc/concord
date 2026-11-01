@@ -25,7 +25,7 @@ const DEV_CSP = [
   "font-src 'self' data:",
   "media-src 'self' blob: mediastream:",
   // HMR Vite : uniquement la boucle locale. Aucun wss:/https: autorisé.
-  `connect-src 'self' ${wsOrigin('127.0.0.1:*')} ${wsOrigin('localhost:*')} ${wsOrigin('[::1]:*')}`,
+  `connect-src 'self' ${wsOrigin('127.0.0.1:*')} ${wsOrigin('localhost:*')}`,
   "worker-src 'self' blob:",
   "object-src 'none'",
   "base-uri 'none'",
@@ -74,6 +74,9 @@ export default defineConfig({
         entryFileNames: 'assets/[name].js',
         chunkFileNames: 'assets/[name].js',
         assetFileNames: 'assets/[name][extname]',
+        // React, shared by both documents. Without an explicit name Rollup called it after the
+        // first shared module, and the 175 kB library shipped as `styles.js`.
+        manualChunks: (id) => (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id) ? 'react' : undefined),
       },
     },
   },
