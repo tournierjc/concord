@@ -17,7 +17,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, join, posix, resolve } from 'node:path';
+import { dirname, join, posix, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -54,7 +54,8 @@ function createReader(asarPath) {
   return {
     label: asarPath,
     exists: (rel) => files.has(rel),
-    read: (rel) => asar.extractFile(asarPath, rel).toString('utf8'),
+    // @electron/asar splits entry paths on the platform separator (backslash on Windows).
+    read: (rel) => asar.extractFile(asarPath, rel.split('/').join(sep)).toString('utf8'),
   };
 }
 
