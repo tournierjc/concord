@@ -63,25 +63,40 @@ De façon reproductible depuis un clone nu :
 
 ```bash
 npm ci
-npm run build
-npx electron-builder --linux AppImage deb --x64
-npx electron-builder --win nsis --x64
+npm run dist:linux   # AppImage + deb
+npm run dist:win     # installeur NSIS (sous Linux : wine requis)
 ```
 
-Sorties dans `release/`. Notes d'environnement (conteneur de construction
-aarch64, 2026-11-01) :
+Sorties dans `release/`. `npm run build` vide `dist/`, compile le main, le
+preload et le renderer, puis lance `scripts/verify-build.mjs` ; electron-builder
+relance la même vérification sur l'`app.asar` empaqueté (`afterPack`). Un
+preload absent ou périmé fait donc échouer la construction au lieu de produire
+une application à fenêtre vide.
 
-- la cible `deb` d'electron-builder embarque `fpm` en binaire x86_64 et ne
-  fonctionne pas sans émulation ; le `.deb` est donc produit par
-  `scripts/build-deb.py` (dpkg-deb natif, même contenu : `/opt/Concord`,
-  icône, `.desktop`, postinst/prerm, mêmes dépendances que la cible officielle) ;
-- la cible NSIS appelle `rcedit` et l'installeur **sous wine** pour poser
-  l'icône et produire l'uninstallateur ; sans wine ni certificat, ces deux
-  étapes sont court-circuitées localement (le vrai uninstallateur est écrit
-  par NSIS au premier lancement de `setup.exe`, pas à la construction) ;
-- `makensis` est fourni par le paquet Debian `nsis` via
-  `ELECTRON_BUILDER_NSIS_DIR`, et `7za` par le paquet `7zip`.
+Exigences de la machine de construction :
 
-Ces contournements sont des adaptations **du conteneur de build**, pas de
-l'application : sur une machine x86_64 standard avec wine, les cibles
-officielles d'electron-builder produisent les mêmes artefacts.
+- **x86_64**. Ne pas construire sur aarch64 : la v0.4.0 l'a été, avec des
+  contournements qui ont produit un installeur Windows dont l'« uninstaller »
+  était un binaire Linux ARM et un `.deb` sans `chrome-sandbox` setuid ni lien
+  `/usr/bin/concord`.
+- **wine** (`wine64`) pour la cible Windows depuis Linux : electron-builder
+  l'utilise pour `rcedit` (icône et métadonnées de `concord.exe`) et pour
+  générer le vrai désinstalleur. Sans wine, la construction échoue — elle ne
+  doit pas être court-circuitée.
+
+Vérifier un paquet déjà construit :
+
+```bash
+node scripts/verify-build.mjs --asar release/linux-unpacked/resources/app.asar
+node scripts/verify-build.mjs --asar release/win-unpacked/resources/app.asar
+```
+
+## Dépannage
+
+- **Fenêtre vide ou noire** : relancer depuis un terminal avec
+  `--enable-logging` ; depuis cette version, une erreur de rendu affiche un
+  écran d'erreur lisible au lieu d'une fenêtre vide.
+- **Linux, l'AppImage s'arrête aussitôt** (Ubuntu 24.04+ : « SUID sandbox
+  helper binary… ») : les espaces de noms utilisateur non privilégiés sont
+  restreints par AppArmor. Installer le `.deb` (qui configure
+  `chrome-sandbox`) ou lancer l'AppImage avec `--no-sandbox`.

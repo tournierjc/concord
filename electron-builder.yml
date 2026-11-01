@@ -30,6 +30,10 @@ files:
 asar: true
 compression: normal
 
+# Refuses to produce an installer if the packaged app.asar is incomplete or its preload is stale
+# (the v0.4.0 defect: empty window on every platform).
+afterPack: scripts/after-pack.cjs
+
 # Aucune mise à jour automatique, aucun canal de publication.
 publish: null
 generateUpdatesFilesForAllChannels: false
@@ -47,8 +51,8 @@ linux:
   category: AudioVideo
   synopsis: Chat vocal sur réseau local, sans compte et sans cloud
   description: >-
-    Salon vocal pour un groupe sur le même réseau local. Aucune donnée ne quitte le LAN : pas de
-    compte, pas de télémétrie, pas de mise à jour automatique.
+    Salon vocal pour un groupe sur le même réseau local. Aucune donnée vocale ne quitte le LAN :
+    pas de compte, pas de télémétrie.
   desktop:
     entry:
       Name: Concord
@@ -59,6 +63,9 @@ linux:
   maintainer: Concord <maintainers@concord.local>
 
 deb:
+  # Build with electron-builder's own deb target (x86_64 host). Its postinst sets the setuid bit on
+  # chrome-sandbox and links /usr/bin/concord; the hand-made v0.4.0 .deb did neither, so Electron
+  # aborted on kernels without unprivileged user namespaces and `concord` was not on PATH.
   # Dépendances de runtime standard d'Electron sous Debian/Ubuntu. Aucune dépendance réseau.
   depends:
     - libgtk-3-0
