@@ -614,6 +614,7 @@ body {
   border: var(--component-hairline) solid var(--color-border-subtle);
   border-radius: var(--radius-lg);
   padding: var(--space-4);
+  min-width: 0;
 }
 
 .sheet__section-title {

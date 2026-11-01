@@ -115,6 +115,43 @@ describe('i18n-dead-keys — aucune clé morte dans design/i18n/fr.json', () => 
     assert.deepEqual([...unknown], [], `clés citées par le code et absentes du catalogue FR :\n  ${[...unknown].join('\n  ')}`);
   });
 
+  it('les clés construites par gabarit (t(`…${x}`)) existent en FR et EN pour chaque valeur possible', () => {
+    // Ces familles échappent au contrôle des littéraux ci-dessus : une valeur sans libellé
+    // affichait la clé brute (boutons de taille de l'overlay, erreurs d'import d'avatar).
+    const families: Array<{ union: RegExp; file: string; keys: Record<string, string> }> = [
+      {
+        file: 'src/shell/settings-schema.ts',
+        union: /export type OverlayScale = ([^;]+);/,
+        keys: {
+          sm: 'settings.overlay.scale.sm',
+          md: 'settings.overlay.scale.md',
+          lg: 'settings.overlay.scale.lg',
+        },
+      },
+      {
+        file: 'src/main/avatar-store.ts',
+        union: /\| \{ ok: false; reason: ([^}]+) \};\n/,
+        keys: {
+          'wrong-format': 'app.avatar.upload.error.wrong-format',
+          'too-large': 'app.avatar.upload.error.too-large',
+          unreadable: 'app.avatar.upload.error.unreadable',
+          'not-an-image': 'app.avatar.upload.error.not-an-image',
+        },
+      },
+    ];
+    const fr = JSON.parse(readFileSync(join(ROOT, 'design/i18n/fr.json'), 'utf8')) as Record<string, string>;
+    const en = JSON.parse(readFileSync(join(ROOT, 'design/i18n/en.json'), 'utf8')) as Record<string, string>;
+    for (const { file, union, keys } of families) {
+      const declared = union.exec(readFileSync(join(ROOT, file), 'utf8'))?.[1];
+      assert.ok(declared, `${file} : union introuvable`);
+      const values = [...declared.matchAll(/'([^']+)'/g)].map((m) => m[1]).sort();
+      assert.deepEqual(values, Object.keys(keys).sort(), `${file} : valeurs de l'union ≠ clés couvertes`);
+      for (const key of Object.values(keys)) {
+        assert.ok(key in fr && key in en, `${key} absente du catalogue FR ou EN`);
+      }
+    }
+  });
+
   it('la liste d’exceptions reste courte et ses consommateurs existent', () => {
     const entries = Object.entries(JUSTIFIED_EXCEPTIONS);
     assert.ok(entries.length <= MAX_EXCEPTIONS, `liste d’exceptions trop longue (${entries.length} > ${MAX_EXCEPTIONS}) : une clé morte de plus doit être supprimée, pas exceptionnalisée`);
