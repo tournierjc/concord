@@ -72,7 +72,9 @@ test('le main câble la santé, la vue du pied et la prise profil', () => {
 test('le bridge publie la santé aux deux moments qui comptent (échec et reprise)', () => {
   const bridge = code(readFileSync(new URL('../src/main/discovery-bridge.ts', import.meta.url), 'utf8'));
   assert.match(bridge, /setHealth\(hasNetwork\(\) \? 'mdns-down' : 'offline'\)/, 'échec du browse : l’état dépend du réseau');
-  assert.match(bridge, /if \(health === 'mdns-down'\) setHealth\(/, 'la reprise est annoncée sans intervention');
+  // Reprise : TOUT état de dégradation antérieur ('mdns-down' comme 'offline') est périmé quand
+  // le browse réussit — le bandeau « hors-ligne » doit s'effacer sans redémarrage.
+  assert.match(bridge, /if \(health !== 'ok'\) setHealth\(/, 'la reprise est annoncée sans intervention');
 });
 
 test('le preload expose les trois nouvelles prises', () => {

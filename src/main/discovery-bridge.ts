@@ -318,14 +318,25 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
     // afficher n'est pas « mDNS indisponible » mais « Aucun réseau actif » (SPEC-002 S1.10).
     if (!hasNetwork()) {
       setHealth('offline');
+      // Sans interface, le browse échouerait de toute façon : on ne réveille pas la pile mDNS
+      // pour rien et on laisse le prochain `start()` (celui qu'une remontée d'interface rend
+      // légitime) relire le réseau. C'est aussi ce qui rend « relisible » le contrat d'idempotence
+      // de `onHealth` : un `start()` hors-ligne suivi d'un `start()` en ligne publie bien « ok ».
+      return;
     }
     try {
-      mdns = createMdns();
-      browser = mdns.find(onUp);
+      // Fabriquée AVANT le browse : un échec de `createMdns()` ne doit pas laisser la pile à
+      // moitié en place (le `catch` la remettrait à `null` alors qu'elle n'avait jamais été créée).
+      const next = createMdns();
+      mdns = next;
+      browser = next.find(onUp);
       browser.on('up', onUp);
       browser.on('down', onDown);
-      // Le browse est reparti : un état 'mdns-down' antérieur (5353 libéré depuis) est périmé.
-      if (health === 'mdns-down') setHealth(hasNetwork() ? 'ok' : 'offline');
+      // Le browse est reparti : tout état de dégradation antérieur est périmé — 'mdns-down'
+      // (5353 libéré depuis) comme 'offline' (un `start()` précédent avait trouvé la machine sans
+      // interface ; le réseau est revenu depuis). Sans cette sortie, le bandeau « hors-ligne »
+      // restait affiché jusqu'au redémarrage alors que la découverte fonctionne de nouveau.
+      if (health !== 'ok') setHealth(hasNetwork() ? 'ok' : 'offline');
     } catch (error) {
       // mDNS indisponible (port 5353 occupé, interface absente) : on dégrade, on ne plante pas —
       // et on le DIT au lobby, qui affiche `discovery.error.mdns.*` ou `discovery.offline.*`.

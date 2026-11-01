@@ -740,3 +740,33 @@ function registerIpcHandlers(): void {
   // Aucun autre canal n'est écouté : `ipcMain.handle` sur une liste fermée, pas de wildcard.
   console.info('[ipc] canaux enregistrés :', Object.keys(handlers).length, '· écrans :', listDisplays().length);
 }
+
+/* ---------------------------------------------------------------------------
+ * Sonde de test (EXÉCUTION, pas regex).
+ *
+ * `tests/main-lobby-probe.ts` installe un hook `require` pour `electron` et
+ * `bonjour-service`, importe ce module, et joue les scénarios du lobby permanent :
+ * santé → événement + instantané du pied, TXT republié à chaque évolution de population,
+ * port du pied = mesure réelle du bind. Ces expositions sont le strict minimum pour
+ * EXÉCUTER la chaîne main → écran ; elles ne changent AUCUN comportement de production
+ * (aucun appelant en production, élaguées du bundle par aucune référence — le preload et
+ * le renderer ignorent ce bloc).
+ * ------------------------------------------------------------------------- */
+export const __mainForTests = {
+  bootstrap,
+  publishDiscoveryHealth,
+  forwardBridgeEvent,
+  currentLobbyStatus,
+  /** Injecte un lien (double ou réel) comme si `startSignalingLink` venait de le créer. */
+  setSignalingLink(link: SignalingLink | null): void {
+    signalingLink = link;
+  },
+  /** Publie l'annonce d'un salon hébergé (même chemin que le rappel `onListen`). */
+  announceHostedRoom(room: { roomName: string; port: number; participants: number }): void {
+    discovery.announce(room);
+  },
+  /** Retire l'annonce (même chemin que `stopSignalingLink`). */
+  retractHostedRoom(): void {
+    discovery.retract();
+  },
+} as const;

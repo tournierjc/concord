@@ -120,6 +120,67 @@ test('un salon déjà ouvert sur cette machine bloque la création — jamais re
   assert.deepEqual(blocked, { kind: 'blocked', messageKey: 'room.create.error.exists' });
 });
 
+test('la population locale est bornée comme la garde IPC : jamais de badge « 12/8 »', () => {
+  // Une source aberrante (bug amont, annonce folle) ne doit pas rendre un salon « 12/8 »
+  // NI le laisser « libre » : la borne [0, 8] du contrat s'applique aussi à la substitution.
+  const inflated = groupDiscoveredRooms([room({ participantCount: 1 })], {
+    roomId: '192.168.1.30:47821',
+    participantCount: 12,
+  });
+  assert.equal(inflated[0]?.participantCount, 8);
+  assert.equal(inflated[0]?.full, true, '12 participants annoncés = salon plein, pas libre');
+
+  const negative = groupDiscoveredRooms([room({ participantCount: 1 })], {
+    roomId: '192.168.1.30:47821',
+    participantCount: -3,
+  });
+  assert.equal(negative[0]?.participantCount, 0, 'jamais de compte négatif affiché');
+});
+
+test('deux salons différents (hôte:port distincts) restent deux lignes', () => {
+  const grouped = groupDiscoveredRooms([
+    room({ roomId: '10.0.0.1:47821', host: '10.0.0.1', port: 47821 }),
+    room({ roomId: '10.0.0.2:47822', host: '10.0.0.2', port: 47822 }),
+  ]);
+  assert.equal(grouped.length, 2);
+});
+
+test('égalité totale sur les champs affichés : l’ordre est déterministe, pas la chance du multicast', () => {
+  // Même roomName, même roomId, même population, hôtes différents (noms d'annonce distincts) :
+  // sans départage hôte/port, l'ordre suit l'ordre d'arrivée des paquets — visible entre deux
+  // rafraîchissements. Ici, l'ordre rendu ne dépend plus de l'ordre reçu.
+  const a = room({ roomId: 'x:47821', host: '10.0.0.9', port: 47821, participantCount: 3 });
+  const b = room({ roomId: 'x:47821', host: '10.0.0.8', port: 47821, participantCount: 3 });
+  const one = groupDiscoveredRooms([a, b]).map((r) => r.host);
+  const two = groupDiscoveredRooms([b, a]).map((r) => r.host);
+  assert.deepEqual(one, two, 'le même jeu rend le même ordre');
+  assert.deepEqual(one, ['10.0.0.8', '10.0.0.9']);
+});
+
+test('localRoom sans correspondance : aucune substitution, l’annonce garde la main', () => {
+  const grouped = groupDiscoveredRooms([room({ participantCount: 2 })], {
+    roomId: '10.9.9.9:47829',
+    participantCount: 5,
+  });
+  assert.equal(grouped[0]?.participantCount, 2, 'le compte d’un autre poste ne nous concerne pas');
+});
+
+
+test('même nom porté par DEUX hôtes distincts : rejoindre le premier de la liste triée, de façon déterministe', () => {
+  // Deux postes publient « Salon cuisine » (hôtes distincts = deux lignes, jamais fusionnées).
+  // La liste triée est ce que l’utilisateur VOIT en premier ; le bouton doit rejoindre CE salon-là,
+  // pas un choix caché. C’est le contrat : la décision suit l’ordre affiché.
+  const grouped = groupDiscoveredRooms([
+    room({ roomId: '10.0.0.2:47822', host: '10.0.0.2', port: 47822, roomName: 'Salon cuisine' }),
+    room({ roomId: '10.0.0.1:47821', host: '10.0.0.1', port: 47821, roomName: 'Salon cuisine' }),
+  ]);
+  const action = resolveCreateRoomAction({ draft: 'salon cuisine', alreadyHosting: false }, grouped);
+  assert.equal(action.kind, 'join');
+  if (action.kind !== 'join') return;
+  assert.equal(action.room.roomId, grouped[0]?.roomId, 'le joint est le premier affiché');
+  assert.equal(action.room.roomId, '10.0.0.1:47821', 'tri par hôte : 10.0.0.1 passe avant 10.0.0.2');
+});
+
 /* ------------------------------------------------------- 3. vue du LobbyFooter ---- */
 
 const OK: LobbyStatusDto = { port: 47823, method: 'mdns', health: 'ok' };

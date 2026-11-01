@@ -143,9 +143,10 @@ test('la santé est relue à chaque start : la sonde réseau n’est pas figée 
   assert.deepEqual(harness.health, ['offline']);
   online = true;
   bridge.start();
-  // Sortie de hors-ligne : browse OK, plus aucune raison de se plaindre — mais aucun événement
-  // non plus, puisque seul un état 'mdns-down' antérieur a quelque chose à corriger.
-  assert.deepEqual(harness.health, ['offline'], 'aucun faux « ok » superflu');
+  // Sortie de hors-ligne : browse OK, plus aucune raison de se plaindre — et le bandeau doit
+  // s'effacer SANS redémarrage. C'est le contrat documenté de `onHealth` (un changement, pas un
+  // mensonge) : `offline` était un état d'échec, le browse qui réussit le rend périmé.
+  assert.deepEqual(harness.health, ['offline', 'ok'], 'le retour du réseau est dit au lobby');
   bridge.close();
 });
 

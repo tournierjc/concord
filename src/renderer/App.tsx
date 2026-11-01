@@ -179,7 +179,10 @@ export function App(): JSX.Element {
   // Pied de lobby : les trois mesures du main (port lu, méthode, santé), jamais recomposées ici.
   const [lobbyStatus, setLobbyStatus] = useState<LobbyStatusDto>(EMPTY_LOBBY_STATUS);
   // Notification du main : `openProfile()` a été demandé (bouton d'identité, puis panneau complet
-  // sur `feature/profile-lobby`). Ici, seul le pseudo est éditable — le panneau complet viendra.
+  // sur `feature/profile-lobby`). Le champ `IdentityRow` ci-dessous est l'éditeur de pseudo HISTORIQUE
+  // de `main` (SPEC-002 S1.11, gardé par tests/identity-row.node.test.ts) : il reste la voie de saisie
+  // en attendant le panneau. La branche `feature/profile-lobby` le remplacera par son panneau (pseudo +
+  // avatar + upload) — la fusion se fait SUR CE BLOC, pas autour : ne pas dupliquer un second champ ici.
   const openProfile = useCallback(() => {
     void api.openProfile().catch(() => {
       // Le main est absent (document hors application) : rien à ouvrir, rien à crier.
@@ -210,8 +213,18 @@ export function App(): JSX.Element {
       }),
       api.onShortcutConflict(setShortcutConflict),
       api.onDiscoveryStatus(({ health }) => {
-        // La santé remontée par le main pilote le bandeau hors-ligne / mDNS et le pied de lobby.
+        // La santé pilote le bandeau ET la méthode du pied — les deux viennent du même instantané
+        // du main. On ne fusionne pas l'objet : `{ port, method, health }` arrive ensemble, et une
+        // fusion laisserait `method` en retard d'un tour sur `health`.
         setLobbyStatus((previous) => ({ ...previous, health }));
+        void api
+          .getLobbyStatus()
+          .then((status) => {
+            if (active) setLobbyStatus(status);
+          })
+          .catch(() => {
+            // Main injoignable : on garde la dernière vue connue plutôt que d'inventer une méthode.
+          });
       }),
       api.onProfileOpen(() => {
         // Sur `feature/profile-lobby`, cet appel ouvrira le panneau profil complet (pseudo +
@@ -254,6 +267,14 @@ export function App(): JSX.Element {
     const unsubscribe = api.onRoomsDiscovered((found) => {
       if (!active) return;
       setDiscovery({ phase: 'ready', rooms: found, error: null });
+      // Le pied de lobby suit la même cadence que la liste : le port effectif change quand un
+      // salon s'ouvre ou se ferme, et seule la mesure du main le sait. Un pied figé à l'instant
+      // du montage afficherait un port mort après un leave — la garantie « mesure » veut « à jour ».
+      void api.getLobbyStatus().then((status) => {
+        if (active) setLobbyStatus(status);
+      }).catch(() => {
+        // Main injoignable : on garde la dernière vue connue plutôt que d'inventer un port.
+      });
     });
     void refreshRooms();
     // Le pied de lobby se rafraîchit avec la liste : le port effectif change quand un salon

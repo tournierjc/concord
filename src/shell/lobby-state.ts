@@ -53,8 +53,11 @@ export function groupDiscoveredRooms(
     const key = roomDedupeKey(room);
     if (seen.has(key)) continue;
     seen.add(key);
-    const participantCount =
+    const announced =
       local.roomId !== null && room.roomId === local.roomId ? local.participantCount : room.participantCount;
+    // La population est bornée comme la garde IPC du sens distant ([0, IPC_MAX_PARTICIPANTS]) :
+    // une source qui laisserait passer 12 afficherait un badge « 12/8 » et un salon jamais « plein ».
+    const participantCount = Math.min(Math.max(announced, 0), IPC_MAX_PARTICIPANTS);
     grouped.push({ ...room, participantCount, full: participantCount >= IPC_MAX_PARTICIPANTS });
   }
   // Les complets passent en fin de liste (S1.3/S1.6), puis nom, puis roomId.
@@ -62,6 +65,11 @@ export function groupDiscoveredRooms(
     if (a.full !== b.full) return a.full ? 1 : -1;
     if (a.roomName !== b.roomName) return a.roomName < b.roomName ? -1 : 1;
     if (a.roomId !== b.roomId) return a.roomId < b.roomId ? -1 : 1;
+    // Égalité totale sur les champs affichés : on départage par hôte puis port, pour que l'ordre
+    // ne dépende jamais de l'ordre d'arrivée des paquets mDNS (deux postes peuvent publier des
+    // noms d'annonce différents produisant le même triple roomName/roomId/full affiché).
+    if (a.host !== b.host) return a.host < b.host ? -1 : 1;
+    if (a.port !== b.port) return a.port < b.port ? -1 : 1;
     return 0;
   });
   return grouped;
