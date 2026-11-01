@@ -88,11 +88,16 @@ export const CANDIDATE_PRFLX = 'candidate:8 1 udp 1685987071 198.51.100.7 54321 
 /** Piste audio doublure : `enabled` est LE levier du push-to-talk (A2). */
 export class FakeTrack {
   public readonly kind = 'audio'
-  public readonly label = 'micro-doublure'
+  /** Étiquette du porteur de la mesure : c'est la CLÉ du RMS fixé par le test. */
+  public readonly label: string
   public stopped = false
   /** Chaque écriture de `enabled`, dans l'ordre — preuve de la séquence PTT. */
   public readonly enabledWrites: boolean[] = []
   private open = true
+
+  public constructor(label: string = 'micro-doublure') {
+    this.label = label
+  }
 
   public get enabled(): boolean {
     return this.open
@@ -284,15 +289,47 @@ export class FakePeerConnection {
   }
 }
 
-/** Analyseur doublure : échantillons constants ⇒ RMS = 0,25 (vumètre non muet). */
+/** Analyseur doublure : échantillons constants ⇒ RMS = 0,25 par défaut (vumètre non muet). */
 export class FakeAnalyser {
   public fftSize = 2048
   public smoothingTimeConstant = 0.8
-  public readonly sample = 0.25
+  /** RMS lu par `getFloatTimeDomainData` — posable par la source (défaut (a)). */
+  public sample = 0.25
 
   public getFloatTimeDomainData(buffer: Float32Array): void {
     buffer.fill(this.sample)
   }
+}
+
+/**
+ * RMS figé par flux (défaut (a)) : la clé est `stream.label` — le label de la
+ * première piste, posée par les tests (`fakeTrack('b', 0.3)`). Un flux inconnu
+ * garde le RMS par défaut de `FakeAnalyser` (0,25) : les tests existants ne
+ * bougent pas. Une clé présente mais à `null` rend 0 (silence MESURÉ, distinct de
+ * l'absence de mesure qui est `null` côté `level()`).
+ */
+const ANALYSER_LEVELS = new Map<string, number | null>()
+
+/** Fixe (ou retire, via `null`) le RMS lu pour les analyseurs d'un flux donné. */
+export function setFakeAnalyserLevel(label: string, level: number | null): void {
+  if (level === null) ANALYSER_LEVELS.delete(label)
+  else ANALYSER_LEVELS.set(label, level)
+}
+
+/** Oublie tous les niveaux fixés (à appeler entre deux tests). */
+export function resetFakeAnalyserLevels(): void {
+  ANALYSER_LEVELS.clear()
+}
+
+/** Le RMS qu'un analyseur de CE flux rendra : défaut 0,25, clé posée ⇒ sa valeur. */
+function analyserSampleFor(stream: FakeMediaStream): number {
+  const first = stream.getAudioTracks()[0]
+  if (first === undefined) return 0.25
+  if (ANALYSER_LEVELS.has(first.label)) {
+    const level = ANALYSER_LEVELS.get(first.label)
+    return level === null || level === undefined ? 0 : level
+  }
+  return 0.25
 }
 
 /** `AudioContext` doublure : de quoi créer un vumètre, rien de plus. */
@@ -300,8 +337,20 @@ export class FakeAudioContext {
   public createAnalyser(): FakeAnalyser {
     return new FakeAnalyser()
   }
-  public createMediaStreamSource(): { connect: (node: unknown) => void } {
-    return { connect: (): void => undefined }
+  /**
+   * Défaut (a) : la source porte sa clé de RMS. `createMediaStreamSource` reçoit le
+   * flux mesuré — l'analyseur qu'on lui branche lit donc le RMS FIXÉ pour ce flux
+   * (défaut 0,25, posé par `setFakeAnalyserLevel`), ce qui rend la chaîne
+   * `ontrack → analyseur → level(peerId)` mesurable sans Chromium.
+   */
+  public createMediaStreamSource(stream: FakeMediaStream): { connect: (node: unknown) => void } {
+    const sample = analyserSampleFor(stream)
+    return {
+      connect: (node: unknown): void => {
+        const analyser = node as FakeAnalyser
+        if (analyser instanceof FakeAnalyser) analyser.sample = sample
+      },
+    }
   }
   public resume(): Promise<void> {
     return Promise.resolve()

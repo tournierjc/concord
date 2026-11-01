@@ -300,10 +300,11 @@ describe('mesh — §4.2 : offreur déterministe, idempotence, borne, fermeture'
 
     assert.equal(h.plane.accepts.length, 1, 'un seul accept() : pas de 2e pc, pas de 2e SDP')
     assert.equal(h.sent.length, 1, 'une seule réponse émise')
-    assert.deepEqual(h.states, [
-      { peerId: 'a', state: 'connecting', cause: 'ice' },
-      { peerId: 'a', state: 'connected', cause: 'ice' },
-    ])
+    // Réécrit (défaut (c), SPEC-008 §1) : l'ancien test assertait
+    // `['connecting','connected']` dès l'échange de SDP. C'est FAUX : `connected`
+    // exige une preuve de flux (piste reçue ou niveau mesuré), pas une négociation
+    // terminée. Sans preuve, le pair reste `connecting` sous la garde des 5 s.
+    assert.deepEqual(h.states, [{ peerId: 'a', state: 'connecting', cause: 'ice' }])
   })
 
   it('offre reçue avant tout peer-joined : le lien se crée paresseusement', async () => {
@@ -427,10 +428,12 @@ describe('mesh — §4.2 : offreur déterministe, idempotence, borne, fermeture'
     await h.mesh.onSignal(answer)
 
     assert.deepEqual(h.plane.acceptAnswers, [{ peerId: 'b', sdp: 'answer:a' }])
-    assert.deepEqual(h.states, [
-      { peerId: 'b', state: 'connecting', cause: 'ice' },
-      { peerId: 'b', state: 'connected', cause: 'ice' },
-    ])
+    // Réécrit (défaut (c), SPEC-008 §1) : la réponse SDP reçue n'est PLUS un
+    // `connected` — l'ancienne assertion `['connecting','connected']` validait le
+    // bug (un pair muet était dit connecté dès la fin du SDP, chien de garde
+    // désarmé). La preuve de flux (`onRemoteStream`/`reportFlow`) amènera le
+    // `connected`, et elle seule.
+    assert.deepEqual(h.states, [{ peerId: 'b', state: 'connecting', cause: 'ice' }])
   })
 
   it('answer sans offre en vol : ignorée, tracée, sans exception', async () => {
@@ -550,9 +553,15 @@ describe('mesh — §4.2 : offreur déterministe, idempotence, borne, fermeture'
     assert.deepEqual([...planeA.connections], ['b'])
     assert.deepEqual([...planeB.connections], ['a'])
 
-    // État établi des deux côtés : descriptions échangées dans les deux sens.
-    assert.deepEqual(statesA, ['b:connecting', 'b:connected'])
-    assert.deepEqual(statesB, ['a:connecting', 'a:connected'])
+    // Réécrit (défaut (c), SPEC-008 §1) : l'ancien test assertait
+    // `connected` de part et d'autre à la fin de la réplique SDP. C'était le bug :
+    // les FakePlane de ce test n'émettent AUCUN flux (`level(peerId)` = null,
+    // `emitStream` jamais appelé) — donc la réplique SDP seule ne prouve aucune
+    // voix et ne doit promettre aucun `connected`. Les deux nœuds restent
+    // `connecting`, leurs horloges de 5 s restent armées ; la preuve de flux
+    // (mesurée dans le lot AD-17 ci-dessous) amènera `connected`.
+    assert.deepEqual(statesA, ['b:connecting'])
+    assert.deepEqual(statesB, ['a:connecting'])
     assert.deepEqual(meshA.peers(), ['b'])
     assert.deepEqual(meshB.peers(), ['a'])
 
@@ -745,7 +754,12 @@ describe('AD-17 / T17 — flux étiqueté, unattributed compté, horloge inject�
     assert.equal(h.timers.live, 0, 'l’échéance a été désarmée en sonnant')
   })
 
-  it('DÉFAUT-E — une réponse reçue désarme l’horloge : plus de noFlow après coup', async () => {
+  it('DÉFAUT-E — la réponse SDP NE désarme PLUS l’horloge : sans preuve de flux, noFlow sonne', async () => {
+    // Réécrit (défaut (c), SPEC-008 §1) : l'ancien test affirmait « l’échéance est
+    // désarmée à la réponse ». C'ÉTAIT LE BUG : `onAnswer()` faisait `clearClock()`
+    // + `notify('connected')` à la fin du SDP, donc un pair qui ne jamais émet un
+    // paquet audio restait dit « connecté » éternellement. SPEC-008 §1 : `connected`
+    // exige lien établi ET flux reçu ; `noFlow` sonne exactement à 5 s sans flux.
     const h = harness('a')
     await h.mesh.onSignal({ kind: 'peer-joined', peerId: 'b', name: 'b' })
     await h.mesh.onSignal({
@@ -753,9 +767,26 @@ describe('AD-17 / T17 — flux étiqueté, unattributed compté, horloge inject�
       from: 'b',
       payload: { type: 'answer', sdp: 'answer:b' },
     })
-    assert.equal(h.timers.live, 0, 'l’échéance est désarmée à la réponse')
-    h.timers.fire()
-    assert.deepEqual(noFlowStates(h), [], 'aucun noFlow ne peut plus sonner')
+    assert.equal(h.timers.live, 1, 'la réponse SDP laisse le chien de garde ARMÉ')
+    assert.deepEqual(noFlowStates(h), [], 'à 0 ms, rien : la borne est les 5 000 ms')
+    // Un seul `fire()` : l'horloge manuelle est UNE Horloge virtuelle et ne se
+    // rejoue pas deux fois (un `fire(4999)` viderait la file avant la borne).
+    h.timers.fire(4999)
+    assert.deepEqual(noFlowStates(h), [], 'à 4 999 ms, rien : la borne est exacte')
+    h.timers.fire(5000)
+    assert.deepEqual(
+      noFlowStates(h),
+      [{ peerId: 'b', state: 'noFlow', cause: 'timeout' }],
+      'à 5 000 ms sans preuve de flux : noFlow + timeout',
+    )
+    // Le lien n'est PAS détruit : `peers()` le garde, et une preuve tardive le rétablit.
+    assert.deepEqual(h.mesh.peers(), ['b'], 'noFlow ne détruit pas le lien')
+    h.plane.emitStream('b', stream())
+    assert.deepEqual(
+      h.states.filter((s) => s.state === 'connected'),
+      [{ peerId: 'b', state: 'connected', cause: 'ice' }],
+      'preuve tardive (piste reçue) : le pair revient `connected`',
+    )
   })
 
   it('DÉFAUT-E — peer-left désarme aussi l’horloge (pas d’échéance orpheline)', async () => {
@@ -767,9 +798,14 @@ describe('AD-17 / T17 — flux étiqueté, unattributed compté, horloge inject�
     assert.deepEqual(noFlowStates(h), [])
   })
 
-  it('SURFACE — les six clés du maillage sont gelées, et leur arité avec elles', () => {
+  it('SURFACE — les sept clés du maillage sont gelées, et leur arité avec elles', () => {
     // Forme lue sur le CONTRAT (`MeshOptions`/`Mesh`, SPEC-007 §4.2 + AD-17 D3), pas sur
     // l'objet rendu : une clé ajoutée (m8 de VERIF-021 : `debug`) ou retirée doit rougir ici.
+    //
+    // `reportFlow` est le SEPTIÈME membre, ajouté par le défaut (c) de SPEC-008 §1 : la
+    // preuve de flux par le niveau mesuré (`plane.level(peerId)` non-null) doit pouvoir
+    // rejoindre le maillage sans transiter par `onRemoteStream`. Les six anciens restent
+    // intacts — la surface est additive, jamais substituée.
     const h = harness('a')
     assert.deepEqual(Object.keys(h.mesh).sort(), [
       'addCandidate',
@@ -778,7 +814,8 @@ describe('AD-17 / T17 — flux étiqueté, unattributed compté, horloge inject�
       'onRemoteStream',
       'onSignal',
       'peers',
-    ], 'surface du maillage : exactement six clés, nommées')
+      'reportFlow',
+    ], 'surface du maillage : exactement sept clés, nommées')
     assert.deepEqual(
       {
         onSignal: h.mesh.onSignal.length,
@@ -786,9 +823,10 @@ describe('AD-17 / T17 — flux étiqueté, unattributed compté, horloge inject�
         addCandidate: h.mesh.addCandidate.length,
         onRemoteStream: h.mesh.onRemoteStream.length,
         close: h.mesh.close.length,
+        reportFlow: h.mesh.reportFlow.length,
       },
-      { onSignal: 1, onLocalCandidate: 2, addCandidate: 2, onRemoteStream: 2, close: 0 },
-      'l’arité est celle du contrat : (pair, flux) pour un flux, (pair, candidat) pour ICE',
+      { onSignal: 1, onLocalCandidate: 2, addCandidate: 2, onRemoteStream: 2, close: 0, reportFlow: 1 },
+      'l’arité est celle du contrat : (pair, flux) pour un flux, (pair, candidat) pour ICE, (pair) pour la preuve de niveau',
     )
   })
 })
