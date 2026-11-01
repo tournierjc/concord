@@ -18,9 +18,11 @@ import {
   IPC,
   guardPayload,
   type ControlStateDto,
+  type DiscoveryStatusDto,
   type IpcEventChannel,
   type IpcInvokeChannel,
   type LanAPI,
+  type LobbyStatusDto,
   type OverlayGeometryDto,
   type OverlayPatchPayload,
   type ParticipantDto,
@@ -73,6 +75,10 @@ const lanAPI: LanAPI = {
   openSettings: async () => {
     await invoke<void>(IPC.settingsOpen);
   },
+  openProfile: async () => {
+    await invoke<void>(IPC.profileOpen);
+  },
+  getLobbyStatus: () => invoke<LobbyStatusDto>(IPC.lobbyStatusGet),
   getSettings: () => invoke<Settings>(IPC.settingsGet),
   setSettings: (patch: Partial<Settings>) => invoke<Settings>(IPC.settingsSet, patch),
   setOverlay: async (patch: OverlayPatchPayload) => {
@@ -97,6 +103,9 @@ const lanAPI: LanAPI = {
     subscribe<OverlayGeometryDto>(IPC.eventOverlayGeometry, listener),
   onShortcutConflict: (listener: (conflict: ShortcutConflictDto) => void) =>
     subscribe<ShortcutConflictDto>(IPC.eventShortcutConflict, listener),
+  onDiscoveryStatus: (listener: (status: DiscoveryStatusDto) => void) =>
+    subscribe<DiscoveryStatusDto>(IPC.eventDiscoveryStatus, listener),
+  onProfileOpen: (listener: () => void) => subscribe<Record<string, never>>(IPC.eventProfileOpen, () => listener()),
   // T16 / SPEC-007 §4.1 : le tuyau de signalisation et son état.
   sendSignal: async (message: SignalOut) => {
     await invoke<void>(IPC.signalSend, message);

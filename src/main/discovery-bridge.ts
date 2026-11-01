@@ -90,9 +90,29 @@ export interface AnnounceOptions {
   participants: number;
 }
 
+/**
+ * État de santé de la découverte, tel que le lobby doit le connaître (SPEC-002 S1.4 / S1.5 / S1.10).
+ *
+ * `mdns-down` : le browse n'a pas pu démarrer (port 5353 occupé, pile mDNS absente). `offline` :
+ * aucune interface réseau exploitable (Wi-Fi déconnecté, câble débranché). Les deux remontent par
+ * un ÉVÉNEMENT — auparavant, seul un `console.warn` silencieux traçait l'échec, et le lobby
+ * affichait une liste vide sans jamais dire pourquoi.
+ */
+export type DiscoveryHealth = 'ok' | 'mdns-down' | 'offline';
+
 export interface DiscoveryBridgeOptions {
   /** Appelé à chaque évolution de la liste (main → `IPC.eventRoomsDiscovered`). */
   onRooms(rooms: RoomSummaryDto[]): void;
+  /**
+   * Appelé à chaque CHANGEMENT d'état de santé (main → `IPC.eventDiscoveryStatus`). Idempotent :
+   * deux `start()` qui échouent de la même façon ne publient qu'une fois. Facultatif en test.
+   */
+  onHealth?(health: DiscoveryHealth): void;
+  /**
+   * Y a-t-il une interface réseau exploitable ? Injecté par le main (`os.networkInterfaces()` derrière
+   * `hasRoutableNetwork`) ; surchargeable en test. Défaut : toujours vrai (pas de faux hors-ligne).
+   */
+  hasNetwork?(): boolean;
   /** Horloge du registre. Injectée par le main ; surchargeable en test. */
   now?(): number;
   /** Durée du scan initial, en millisecondes. */
@@ -216,6 +236,7 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
   // Le registre et le contrat bornent tous deux la liste : on prend le plus contraignant.
   const maxRooms = Math.min(ROOM_DISCOVERY_MAX_ROOMS, IPC_MAX_ROOMS);
   const createMdns = options.createMdns ?? defaultMdnsPort;
+  const hasNetwork = options.hasNetwork ?? (() => true);
   // Identité d'annonce : aléatoire par session (SPEC-001 A4 « instanceId aléatoire par session »).
   // Aucun identifiant persistant ne part donc sur le réseau.
   const instanceId = options.instanceId ?? randomUUID();
@@ -235,6 +256,19 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
       timers.cancel(scanTimer);
       scanTimer = null;
     }
+  }
+
+  /**
+   * Dernier état de santé publié, et publication unique par changement. `console.warn` seul ne
+   * suffisait pas : une personne non technicienne ne lit pas la console, elle doit VOIR pourquoi la
+   * liste est vide (SPEC-002 S1.4 / S1.10).
+   */
+  let health: DiscoveryHealth = 'ok';
+
+  function setHealth(next: DiscoveryHealth): void {
+    if (next === health) return;
+    health = next;
+    options.onHealth?.(next);
   }
 
   function list(): RoomSummaryDto[] {
@@ -280,16 +314,25 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
 
   function start(): void {
     if (closed || browser !== null) return;
+    // Hors ligne d'abord : sans interface, le browse échouerait de toute façon, et le motif à
+    // afficher n'est pas « mDNS indisponible » mais « Aucun réseau actif » (SPEC-002 S1.10).
+    if (!hasNetwork()) {
+      setHealth('offline');
+    }
     try {
       mdns = createMdns();
       browser = mdns.find(onUp);
       browser.on('up', onUp);
       browser.on('down', onDown);
+      // Le browse est reparti : un état 'mdns-down' antérieur (5353 libéré depuis) est périmé.
+      if (health === 'mdns-down') setHealth(hasNetwork() ? 'ok' : 'offline');
     } catch (error) {
-      // mDNS indisponible (port 5353 occupé, interface absente) : on dégrade, on ne plante pas.
+      // mDNS indisponible (port 5353 occupé, interface absente) : on dégrade, on ne plante pas —
+      // et on le DIT au lobby, qui affiche `discovery.error.mdns.*` ou `discovery.offline.*`.
       console.warn('[discovery] browse mDNS indisponible', error);
       browser = null;
       mdns = null;
+      setHealth(hasNetwork() ? 'mdns-down' : 'offline');
     }
     clearScanTimer();
     scanTimer = timers.once(scanWindowMs, () => {

@@ -22,6 +22,11 @@ export const IPC = {
   settingsGet: 'lan:settings:get',
   settingsSet: 'lan:settings:set',
   settingsOpen: 'lan:settings:open',
+  // Vue structurée du pied de lobby : { port, method, health } — mesurés, jamais saisis.
+  lobbyStatusGet: 'lan:lobby:status',
+  // Porte d'entrée du panneau profil (pseudo + avatar). Ouverte par le lobby via le bouton
+  // d'identité ; l'implémentation complète du panneau vit sur `feature/profile-lobby`.
+  profileOpen: 'lan:profile:open',
   roomJoin: 'lan:room:join',
   roomLeave: 'lan:room:leave',
   roomsDiscover: 'lan:rooms:discover',
@@ -46,6 +51,12 @@ export const IPC = {
   eventSettingsChanged: 'lan:event:settings-changed',
   eventOverlayGeometry: 'lan:event:overlay-geometry',
   eventShortcutConflict: 'lan:event:shortcut-conflict',
+  // Porte d'entrée du panneau profil : `lan:profile:open` (invoke) demande l'ouverture, cet
+  // événement le confirme au renderer principal, qui est seul juge de l'affichage du panneau.
+  eventProfileOpen: 'lan:event:profile-open',
+  // Découverte : état de santé ('ok' | 'mdns-down' | 'offline') — remonte l'échec mDNS / l'absence
+  // réseau que `discovery-bridge.ts` ne faisait que `console.warn`.
+  eventDiscoveryStatus: 'lan:event:discovery-status',
   // T16 / SPEC-007 §4.1 — messages entrants + état du lien de signalisation.
   eventSignal: 'lan:event:signal',
   // AD-19 D1 / AD-20 D1 — l'ensemble « qui parle », relayé tel quel vers la fenêtre d'overlay.
@@ -56,6 +67,8 @@ export type IpcInvokeChannel = (typeof IPC)[
   | 'settingsGet'
   | 'settingsSet'
   | 'settingsOpen'
+  | 'profileOpen'
+  | 'lobbyStatusGet'
   | 'roomJoin'
   | 'roomLeave'
   | 'roomsDiscover'
@@ -75,6 +88,8 @@ export type IpcEventChannel = (typeof IPC)[
   | 'eventSettingsChanged'
   | 'eventOverlayGeometry'
   | 'eventShortcutConflict'
+  | 'eventProfileOpen'
+  | 'eventDiscoveryStatus'
   | 'eventSignal'
   | 'eventSpeakingSet'];
 
@@ -82,6 +97,8 @@ export const INVOKE_CHANNELS: readonly IpcInvokeChannel[] = [
   IPC.settingsGet,
   IPC.settingsSet,
   IPC.settingsOpen,
+  IPC.profileOpen,
+  IPC.lobbyStatusGet,
   IPC.roomJoin,
   IPC.roomLeave,
   IPC.roomsDiscover,
@@ -102,6 +119,8 @@ export const EVENT_CHANNELS: readonly IpcEventChannel[] = [
   IPC.eventSettingsChanged,
   IPC.eventOverlayGeometry,
   IPC.eventShortcutConflict,
+  IPC.eventProfileOpen,
+  IPC.eventDiscoveryStatus,
   IPC.eventSignal,
   IPC.eventSpeakingSet,
 ];
@@ -170,6 +189,31 @@ export interface RoomStateDto {
  * écrire `signalingPort: null` — c'est-à-dire affirmer « aucun port » sur un salon qui en a un.
  */
 export type RoomStateCore = Omit<RoomStateDto, 'signalingPort'>;
+
+/** Ce que la découverte sait de sa propre santé (SPEC-002 S1.4 / S1.5 / S1.10). */
+export type DiscoveryHealthDto = 'ok' | 'mdns-down' | 'offline';
+
+export interface DiscoveryStatusDto {
+  health: DiscoveryHealthDto;
+}
+
+/**
+ * Vue de bas de page du lobby (SPEC-002 `LobbyFooter { port, discoveryMethod, offline }`), en
+ * champs STRUCTURÉS — jamais en texte libre. Le port est une mesure (A5/D1) : `null` hors salon,
+ * jamais le port demandé dans les réglages.
+ *
+ * `method` porte la méthode RÉELLEMENT en service. `'broadcast'` et `'both'` sont réservés : ils
+ * n'ont aucun émetteur honnête tant que le balayage broadcast n'existe pas dans le code — un
+ * bouton « mDNS + balayage » afficherait une capacité que la machine n'a pas.
+ */
+export interface LobbyStatusDto {
+  /** Port de signalisation RÉELLEMENT lu (socket écoutée ou beacon de l'hôte) ; `null` sinon. */
+  port: number | null;
+  /** Méthode de découverte réellement en service. */
+  method: 'mdns' | 'broadcast' | 'both' | 'none';
+  /** Santé de la découverte (la méthode « aucune » et l'état hors-ligne en découlent). */
+  health: DiscoveryHealthDto;
+}
 
 export interface ControlStateDto {
   muted: boolean;
@@ -282,6 +326,8 @@ export interface LanAPI {
   setPushToTalk(active: boolean): Promise<ControlStateDto>;
   setGain(payload: GainPayload): Promise<void>;
   openSettings(): Promise<void>;
+  /** Ouvre le panneau profil (pseudo + avatar) — l'implémentation vient de `feature/profile-lobby`. */
+  openProfile(): Promise<void>;
   getSettings(): Promise<Settings>;
   setSettings(patch: Partial<Settings>): Promise<Settings>;
   setOverlay(patch: OverlayPatchPayload): Promise<void>;
@@ -298,6 +344,12 @@ export interface LanAPI {
   onSettingsChanged(listener: (payload: SettingsChangedDto) => void): () => void;
   onOverlayGeometry(listener: (geometry: OverlayGeometryDto) => void): () => void;
   onShortcutConflict(listener: (conflict: ShortcutConflictDto) => void): () => void;
+  /** Le main confirme la demande d'ouverture du panneau profil (voir `openProfile`). */
+  onProfileOpen(listener: () => void): () => void;
+  /** État de santé de la découverte — pilote l'indicateur hors-ligne du lobby (S1.4/S1.5/S1.10). */
+  onDiscoveryStatus(listener: (status: DiscoveryStatusDto) => void): () => void;
+  /** Vue structurée du pied de lobby : port mesuré + méthode + santé (SPEC-002 LobbyFooter). */
+  getLobbyStatus(): Promise<LobbyStatusDto>;
   /** Overlay : reçoit l'ensemble « qui parle » à chaque transition (et au plus 1×/s). */
   onSpeakingSet(listener: (payload: SpeakingSetPayload) => void): () => void;
 }
@@ -572,6 +624,8 @@ function guardInvoke(channel: string, raw: unknown): GuardResult<unknown> {
   switch (channel) {
     case IPC.settingsGet:
     case IPC.settingsOpen:
+    case IPC.profileOpen:
+    case IPC.lobbyStatusGet:
     case IPC.roomLeave:
     case IPC.roomsDiscover: {
       if (raw !== undefined && raw !== null) {
@@ -873,6 +927,25 @@ function guardEvent(channel: string, raw: unknown): GuardResult<unknown> {
           return { ok: true, value: { kind, from, payload: payload?.['payload'] } };
         }
       }
+    }
+    case IPC.eventDiscoveryStatus: {
+      const allowed = ['health'] as const;
+      const payload = guard.object(raw, 'payload', allowed);
+      if (payload === null) return guardError(channel, guard);
+      const health = guard.oneOf(payload, 'health', 'payload', ['ok', 'mdns-down', 'offline'] as const);
+      if (health === null || guard.errors.length > 0) return guardError(channel, guard);
+      return { ok: true, value: { health } };
+    }
+    case IPC.eventProfileOpen: {
+      // Notification vide : la décision d'afficher le panneau appartient au renderer seul.
+      if (raw !== undefined && raw !== null) {
+        const payload = guard.object(raw, 'payload', []);
+        if (payload === null) return guardError(channel, guard);
+        if (Object.keys(payload).length !== 0) {
+          guard.invalid('payload', 'notification vide attendue');
+        }
+      }
+      return guard.errors.length === 0 ? { ok: true, value: {} } : guardError(channel, guard);
     }
     case IPC.eventOverlayGeometry: {
       const allowed = ['x', 'y', 'width', 'height', 'scaleFactor'] as const;

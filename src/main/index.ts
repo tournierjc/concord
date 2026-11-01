@@ -20,8 +20,9 @@ import { networkInterfaces, userInfo } from 'node:os';
 import { join } from 'node:path';
 
 import { securityHeaders } from './csp';
-import { createDiscoveryBridge, type DiscoveryBridge } from './discovery-bridge';
+import { createDiscoveryBridge, type DiscoveryBridge, type DiscoveryHealth } from './discovery-bridge';
 import { installNetworkGuard } from './net-guard';
+import { hasRoutableNetwork } from './network-state';
 import { APP_SCHEME, SCHEME_SEP } from './net-schemes';
 import { OverlayController, listDisplays } from './overlay-controller';
 import { registerPushToTalk, releasePushToTalk, type PttRegistration } from './ptt';
@@ -42,9 +43,11 @@ import {
   IPC,
   IpcContractError,
   guardPayload,
+  type DiscoveryHealthDto,
   type GainPayload,
   type IpcEventChannel,
   type IpcInvokeChannel,
+  type LobbyStatusDto,
   type OverlayPatchPayload,
   type RoomJoinPayload,
   type RoomSummaryDto,
@@ -75,9 +78,17 @@ let ptt: PttRegistration | null = null;
 let signalingLink: SignalingLink | null = null;
 const overlay = new OverlayController();
 const bridge = new RoomBridge(forwardBridgeEvent);
+// Santé courante de la découverte (mDNS) — mesurée par le bridge, lue par le pied de lobby.
+let discoveryHealth: DiscoveryHealth = 'ok';
 // Découverte mDNS des salons : `now` est injecté ici, dans le main (interdit dans `src/engine/`).
 const discovery: DiscoveryBridge = createDiscoveryBridge({
   onRooms: publishRooms,
+  // L'échec du browse n'était qu'un `console.warn` : il devient un événement que le lobby affiche
+  // (« mDNS indisponible » / « Aucun réseau actif » — SPEC-002 S1.4 / S1.10).
+  onHealth: publishDiscoveryHealth,
+  // Lecture à CHAQUE appel : une interface qui remonte (Wi-Fi rebranché) doit pouvoir être vue
+  // par le prochain `start()`, pas figée au boot.
+  hasNetwork: () => hasRoutableNetwork(networkInterfaces()),
   now: () => systemTimers.now(),
 });
 
@@ -362,6 +373,16 @@ function publishRooms(rooms: RoomSummaryDto[]): void {
 }
 
 /**
+ * État de santé de la découverte (mDNS) — uniquement pour la fenêtre principale : l'overlay n'a
+ * rien à dire sur le réseau. Le renderer en tire le bandeau « mDNS indisponible » /
+ * « Aucun réseau actif » et le pied de lobby.
+ */
+function publishDiscoveryHealth(health: DiscoveryHealth): void {
+  discoveryHealth = health;
+  sendEvent(IPC.eventDiscoveryStatus, { health }, 'main');
+}
+
+/**
  * Republie la géométrie de l'overlay. `overlay.apply` est le seul endroit qui connaît la règle de
  * taille (dépend du nombre de participants) ; ici on ne fait que republier son résultat pour que le
  * renderer de l'overlay suive. Sans cet appel, la pastille reste figée sur sa taille initiale.
@@ -394,6 +415,22 @@ function currentSignalingPort(): number | null {
   });
 }
 
+/**
+ * Vue structurée du pied de lobby (SPEC-002 `LobbyFooter { port, discoveryMethod, offline }`).
+ *
+ * Trois MESURES, jamais des réglages ni du texte libre : le port lu par `currentSignalingPort`,
+ * la méthode réellement en service (mDNS seulement — le balayage broadcast n'existe pas dans ce
+ * code et `'broadcast'`/`'both'` restent éteints tant qu'aucun émetteur honnête ne les porte),
+ * et la santé remontée par le bridge.
+ */
+function currentLobbyStatus(): LobbyStatusDto {
+  return {
+    port: currentSignalingPort(),
+    method: discoveryHealth === 'ok' ? 'mdns' : 'none',
+    health: discoveryHealth,
+  };
+}
+
 function forwardBridgeEvent(event: BridgeEvent): void {
   // `BridgeEvent.channel` porte les VALEURS du canon (`lan:event:participants`, …), pas les noms
   // de clés : on ne transmet donc aucune conversion, et le discriminant reste vérifié par le type.
@@ -410,6 +447,9 @@ function forwardBridgeEvent(event: BridgeEvent): void {
   // restait figée sur la taille du premier rendu.
   if (event.channel === IPC.eventParticipants || event.channel === IPC.eventRoomState) {
     syncOverlayGeometry();
+    // La population vient de bouger (ou le salon de phase) : le TXT `participants` publié doit
+    // suivre, sinon un salon plein reste affiché « libre » chez les voisins.
+    reannounceHostedRoom();
   }
 }
 
@@ -552,6 +592,30 @@ function startSignalingLink(roomId: string, name: string, selfId: string): void 
   });
 }
 
+/**
+ * Republie l'annonce mDNS du salon hébergé avec la population ACTUELLE.
+ *
+ * Sans ce geste, le TXT `participants` publié au bind restait figé : un salon plein se lisait
+ * « libre » chez tous les voisins, qui cliquaient sur un « Rejoindre » voué au refus. Appelé à
+ * chaque évolution du salon (`forwardBridgeEvent`), et seulement quand CE poste héberge — un
+ * client n'a rien à annoncer.
+ */
+function reannounceHostedRoom(): void {
+  const link = signalingLink;
+  if (link === null || link.role !== 'host') return;
+  const listen = link.listen;
+  if (listen === null) return;
+  const state = bridge.getRoomState();
+  // Le salon est parti (`leave` a vidé l'état) : le lien part avec lui par un autre chemin,
+  // et `stopSignalingLink` retire l'annonce. Rien à publier entre-temps.
+  if (state.roomId === null) return;
+  discovery.announce({
+    roomName: state.roomName ?? state.roomId,
+    port: listen.port,
+    participants: state.participantCount,
+  });
+}
+
 /** Ferme le tuyau (« leave » émis, sockets fermées) — idempotent. */
 /**
  * Reporte un message de signalisation sur l'annuaire du salon (`roster-link`).
@@ -596,6 +660,17 @@ function registerIpcHandlers(): void {
       window.show();
       window.focus();
     },
+    // Porte d'entrée du panneau profil (pseudo + avatar). Le MAIN ne fait que sortir la fenêtre :
+    // c'est le renderer qui ouvre le panneau, sur cet événement. L'implémentation complète du
+    // panneau (galerie, avatar) vit sur `feature/profile-lobby` — ce canal est sa prise, pas son corps.
+    [IPC.profileOpen]: () => {
+      const window = mainWindow ?? createMainWindow();
+      window.show();
+      window.focus();
+      sendEvent(IPC.eventProfileOpen, {}, 'main');
+    },
+    // Le pied de lobby demande la vue structurée : trois mesures du main, rien d'inventé ici.
+    [IPC.lobbyStatusGet]: () => currentLobbyStatus(),
     // Charge utile VIDE (contrat) : le scan est déjà lancé au démarrage, on rend l'état du registre.
     [IPC.roomsDiscover]: () => discovery.list(),
     [IPC.roomJoin]: (payload: unknown) => {
