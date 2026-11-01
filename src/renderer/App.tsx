@@ -470,10 +470,14 @@ export function App(): JSX.Element {
   );
 
   const leaveRoom = useCallback(async () => {
+    // Le nom est lu AVANT l'appel : après le `leaveRoom()` du main, l'état rendu porte `null` et
+    // le toast dirait « Vous avez quitté « » » — un libellé cassé vaut mieux l'éviter que le réparer.
+    const leftName = room.roomName;
     const state = await api.leaveRoom();
     setRoom(state);
     setScreen('rooms');
-  }, [api]);
+    if (leftName !== null) setToast(t('room.leave.toast', { name: leftName }));
+  }, [api, room.roomName, t]);
 
   if (!settings) {
     return (
@@ -586,6 +590,7 @@ export function App(): JSX.Element {
           settings={settings}
           locale={locale}
           session={room}
+          lobbyStatus={lobbyStatus}
           onChange={patchSettings}
           onClose={() => setSettingsOpen(false)}
         />
@@ -722,6 +727,13 @@ export function RoomList({
                 type="button"
                 className="button"
                 aria-disabled={room.full}
+                // Le bouton ne dit que « Rejoindre » / « Complet » (20 car. max, SPEC-002 §2.6) :
+                // le détail — nom du salon, population réelle, plafond de 8 — passe par l'ARIA.
+                aria-label={
+                  room.full
+                    ? t('room.row.fullAria', { name: room.roomName })
+                    : t('room.row.joinAria', { name: room.roomName, count: room.participantCount })
+                }
                 onClick={() => {
                   if (!room.full) onJoin(room.roomId, room.roomName);
                 }}
@@ -740,6 +752,7 @@ export function RoomList({
             className="input"
             value={draftName}
             maxLength={32}
+            aria-describedby="room-create-help"
             // « Salon de {{name}} » : la moustache est REMPLIE avec le pseudo, ou pas d'indication
             // du tout quand le pseudo est vide (rendre « Salon de » serait un libellé cassé).
             placeholder={
@@ -747,6 +760,12 @@ export function RoomList({
             }
             onChange={(event) => setDraftName(event.target.value)}
           />
+          {/* Aide permanente du champ (SPEC-002 E1) : visible sur le réseau, 32 caractères — le
+              compteur du pseudo existe déjà (`common.counter`), le plafond ici est statué par le
+              `maxLength` ci-dessus, même borne, même message. */}
+          <span className="field__help" id="room-create-help">
+            {t('room.create.nameHelp')}
+          </span>
           {action.kind === 'join' ? (
             // Le nom tapé existe déjà sur le réseau : c'est la promesse anti-hôte-doublon,
             // visible AVANT le clic, pas une erreur après.
@@ -755,6 +774,9 @@ export function RoomList({
             </span>
           ) : null}
         </label>
+        {/* Places : le plafond du maillage (8) est une CONSTANTE du schéma, pas une mesure — c'est
+            ce que la création garantira, pas ce qu'un salon donné contient. */}
+        <span className="field__help">{t('room.create.capacity')}</span>
         <button type="button" className="button" onClick={onRefresh} disabled={busy}>
           {t('common.refresh')}
         </button>

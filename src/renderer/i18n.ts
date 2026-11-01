@@ -1,5 +1,6 @@
 /**
- * i18n.ts — traduction FR/EN depuis `design/i18n.json` (297 clés, mesuré le 2026-10-31).
+ * i18n.ts — traduction FR/EN depuis `design/i18n.json` (172 clés par locale, mesuré le 2026-11-01 ;
+ * le compte est gardé vivant par `tests/i18n-dead-keys.node.test.ts` — aucune clé non référencée).
  *
  * Aucun libellé en dur dans les composants : ils appellent `t('room.list.title')`. Une clé absente
  * renvoie la clé elle-même (visible à l'écran, donc repérable) plutôt qu'une chaîne vide.
