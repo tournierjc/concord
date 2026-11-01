@@ -203,7 +203,12 @@ function createClock(): ManualClock {
 async function settle(system: FakeSystem, clock: ManualClock): Promise<void> {
   for (let pass = 0; pass < 50; pass += 1) {
     const before = system.calls.length;
-    await clock.advance(1);
+    // Deux microtâches, JAMAIS l'horloge : `advance` ferait franchir la tenue de restauration
+    // pendant un settle (le minuteur sonnerait et le test perdrait sa prémisse « rien avant la
+    // tenue »). Les `exec` du faux système ne pendent que si `delayMs` est posé — les tests qui
+    // l'utilisent attendent via `clock.advance` explicitement.
+    await Promise.resolve();
+    await Promise.resolve();
     if (system.calls.length === before) return;
   }
 }
@@ -399,9 +404,14 @@ describe('ducking — contrôleur Linux/Pulse sur double execFile', () => {
     await settle(system, clock);
 
     // Extinction du relay (fin de la tenue de 600 ms côté renderer) : rien dans l'immédiat.
+    // La baisse peut s'écrire ENCORE quand le relay s'éteint (les deux gestes tombent dans la
+    // même seconde simulée, le cas réel d'une phrase courte) : la demande de restauration est
+    // déposée et la tenue jugée par le minuteur — c'est `fireWithin` qui la fait sonner.
     controller.apply({ active: false, at: clock.time });
-    await settle(system, clock);
-    assert.equal(controller.state().ducked, true, 'rien n\'est restauré avant la tenue');
+    // PAS de `settle` ici : laisser la salve de baisse en vol et vérifier que RIEN n'est sorti
+    // avant l'échéance de la tenue. C'est `fireWithin` qui finira la salve (puis sa restauration).
+    assert.deepEqual(system.calls.filter((c) => setPercent(c.command) === RESTORE_VOLUME_PERCENT).length, 0,
+      'rien n\'est restauré avant la tenue');
     assert.equal(clock.armed(), 1, 'une restauration différée est armée');
 
     await clock.fireWithin(RESTORE_HOLD_MS);

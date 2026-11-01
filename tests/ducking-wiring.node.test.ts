@@ -87,10 +87,9 @@ describe('ducking — contrat lan:ducking:apply', () => {
       errorOf(guardPayload('invoke', IPC.duckingApply, { speaking: ['a', 'a'] })).message.includes('doublon'),
       true,
     );
-    // La liste VIDE est refusée par `idList` (longueur d'id minimale 1, et `guard.object` exige
-    // la présence de `speaking`) : le relay publie la fin de tenue avec un id absent, que le
-    // handler du main traite comme l'absence de pair parlant — la restauration reste atteignable.
-    assert.equal(errorOf(guardPayload('invoke', IPC.duckingApply, { speaking: [] })).code, 'invalid-payload');
+    // La liste VIDE est ACCEPTÉE : c'est exactement « aucun pair ne parle » — le signal de
+    // restauration du relay. `idList` borne la longueur et les ids, pas la présence du signal.
+    assert.equal(guardPayload('invoke', IPC.duckingApply, { speaking: [] }).ok, true);
     assert.equal(errorOf(guardPayload('invoke', IPC.duckingApply, { speaking: [''] })).code, 'invalid-payload');
     // (Le `{}` sans `speaking` est déjà refusé plus haut — « tableau attendu ».)
     assert.equal(
