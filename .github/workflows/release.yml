@@ -39,7 +39,13 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
+      # VERIF/ contient des noms de fichiers avec « : », impossibles à créer sous Windows ; le build n'en a pas besoin.
       - uses: actions/checkout@v4
+        with:
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/VERIF/
       - uses: actions/setup-node@v4
         with:
           node-version: 22
