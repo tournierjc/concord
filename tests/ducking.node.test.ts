@@ -89,29 +89,48 @@ function setIndex(command: DuckCommand): number | null {
  */
 function createFakeSystem(): FakeSystem & { clock: ManualClock } {
   const clock = createClock();
-  const system: FakeSystem = {
-    exec: { run: () => Promise.reject(new Error('double non initialise')) },
-    calls: [],
-    available: new Set(['pactl']),
-    sinkInputs: '',
-    delayMs: 0,
-  };
-  system.exec = {
+  // `calls` est un tableau partagé : les tests déstructurent `{ clock, ...system }` (copie des
+  // champs scalaires) et doivent TOUJOURS voir les exécutions poussées par la fermeture `run`.
+  const calls: ExecutedCall[] = [];
+  const state = { available: new Set(['pactl']), sinkInputs: '', delayMs: 0 };
+  const exec: DuckExec = {
     async run(command: DuckCommand) {
       const startedAt = clock.time;
-      system.calls.push({ command, startedAt, endedAt: startedAt });
-      if (system.delayMs > 0) await clock.advance(system.delayMs);
-      const last = system.calls[system.calls.length - 1];
+      calls.push({ command, startedAt, endedAt: startedAt });
+      if (state.delayMs > 0) await clock.advance(state.delayMs);
+      const last = calls[calls.length - 1];
       if (last !== undefined) last.endedAt = clock.time;
-      if (!system.available.has(command.tool)) return { stdout: null };
+      if (!state.available.has(command.tool)) return { stdout: null };
       if (command.tool === 'wpctl') return { stdout: 'ok' };
       if (command.tool === 'pactl' && command.kind === 'list') {
-        return { stdout: system.sinkInputs };
+        return { stdout: state.sinkInputs };
       }
       return { stdout: 'ok' };
     },
   };
-  return Object.assign(system, { clock }) as FakeSystem & { clock: ManualClock };
+  return {
+    exec,
+    calls,
+    get available(): Set<string> {
+      return state.available;
+    },
+    set available(value: Set<string>) {
+      state.available = value;
+    },
+    get sinkInputs(): string {
+      return state.sinkInputs;
+    },
+    set sinkInputs(value: string) {
+      state.sinkInputs = value;
+    },
+    get delayMs(): number {
+      return state.delayMs;
+    },
+    set delayMs(value: number) {
+      state.delayMs = value;
+    },
+    clock,
+  };
 }
 
 /** Horloge manuelle : `advance` rend la main aux promesses (comme manual-timers du moteur). */
@@ -321,7 +340,8 @@ describe('ducking — construction des commandes (execFile, jamais de shell stri
 
 describe('ducking — contrôleur Linux/Pulse sur double execFile', () => {
   it('pair qui parle ⇒ baisse de 30 % chaque entrée, JAMAIS l\'entrée Concord', async () => {
-    const { clock, ...system } = createFakeSystem();
+    const system = createFakeSystem();
+    const clock = system.clock;
     system.sinkInputs = PACTL_WITH_CONCORD;
     const controller = createDuckingController({
       platform: 'linux',
@@ -350,7 +370,8 @@ describe('ducking — contrôleur Linux/Pulse sur double execFile', () => {
   });
 
   it('toutes les entrées sont Concord ⇒ AUCUN set exécuté, pas de faux « ducked »', async () => {
-    const { clock, ...system } = createFakeSystem();
+    const system = createFakeSystem();
+    const clock = system.clock;
     system.sinkInputs = PACTL_ONLY_CONCORD;
     const controller = createDuckingController({
       platform: 'linux',
@@ -365,7 +386,8 @@ describe('ducking — contrôleur Linux/Pulse sur double execFile', () => {
   });
 
   it('restauration à 100 % seulement APRÈS la fin de tenue (700 ms)', async () => {
-    const { clock, ...system } = createFakeSystem();
+    const system = createFakeSystem();
+    const clock = system.clock;
     system.sinkInputs = PACTL_TWO_APPS;
     const controller = createDuckingController({
       platform: 'linux',
@@ -392,7 +414,8 @@ describe('ducking — contrôleur Linux/Pulse sur double execFile', () => {
   });
 
   it('la parole qui REVIENT pendant la tenue annule la restauration (aucun pompage)', async () => {
-    const { clock, ...system } = createFakeSystem();
+    const system = createFakeSystem();
+    const clock = system.clock;
     system.sinkInputs = PACTL_TWO_APPS;
     const controller = createDuckingController({
       platform: 'linux',
@@ -418,7 +441,8 @@ describe('ducking — contrôleur Linux/Pulse sur double execFile', () => {
   });
 
   it('deux « pair parle » successifs ne produisent qu\'une seule salve de sets', async () => {
-    const { clock, ...system } = createFakeSystem();
+    const system = createFakeSystem();
+    const clock = system.clock;
     system.sinkInputs = PACTL_TWO_APPS;
     const controller = createDuckingController({
       platform: 'linux',
@@ -436,7 +460,8 @@ describe('ducking — contrôleur Linux/Pulse sur double execFile', () => {
   });
 
   it('les exec sont SÉRIALISÉS : jamais deux commandes en vol', async () => {
-    const { clock, ...system } = createFakeSystem();
+    const system = createFakeSystem();
+    const clock = system.clock;
     system.sinkInputs = PACTL_TWO_APPS;
     system.delayMs = 5;
     const controller = createDuckingController({
@@ -463,7 +488,8 @@ describe('ducking — contrôleur Linux/Pulse sur double execFile', () => {
   });
 
   it('l\'intention la plus RÉCENTE gagne : bouleversement pendant une exécution', async () => {
-    const { clock, ...system } = createFakeSystem();
+    const system = createFakeSystem();
+    const clock = system.clock;
     system.sinkInputs = PACTL_TWO_APPS;
     system.delayMs = 10;
     const controller = createDuckingController({
@@ -491,7 +517,8 @@ describe('ducking — contrôleur Linux/Pulse sur double execFile', () => {
   });
 
   it('sans pactl NI wpctl ⇒ AUCUN set, no-op tracé UNE fois (option ON mais muet)', async () => {
-    const { clock, ...system } = createFakeSystem();
+    const system = createFakeSystem();
+    const clock = system.clock;
     system.available = new Set();
     const traced: string[] = [];
     const controller = createDuckingController({
@@ -508,7 +535,8 @@ describe('ducking — contrôleur Linux/Pulse sur double execFile', () => {
   });
 
   it('macOS (noop) : aucune exécution, tracé une fois', async () => {
-    const { clock, ...system } = createFakeSystem();
+    const system = createFakeSystem();
+    const clock = system.clock;
     const traced: string[] = [];
     const controller = createDuckingController({
       platform: 'darwin',
@@ -525,7 +553,8 @@ describe('ducking — contrôleur Linux/Pulse sur double execFile', () => {
   });
 
   it('stop() restaure immédiatement, sans attendre la tenue', async () => {
-    const { clock, ...system } = createFakeSystem();
+    const system = createFakeSystem();
+    const clock = system.clock;
     system.sinkInputs = PACTL_TWO_APPS;
     const controller = createDuckingController({
       platform: 'linux',
@@ -542,7 +571,8 @@ describe('ducking — contrôleur Linux/Pulse sur double execFile', () => {
   });
 
   it('Windows : powershell d\'abord, nircmd en repli si powershell échoue', async () => {
-    const { clock, ...system } = createFakeSystem();
+    const system = createFakeSystem();
+    const clock = system.clock;
     system.available = new Set(['nircmd']);
     const controller = createDuckingController({
       platform: 'win32',
