@@ -119,7 +119,11 @@ function harness(
       // Aucun puits audio ici : DÉFAUT-C est hors de ce lot (cf. rapport T16d).
     },
     onStateChange: () => {
-      // L'échec ICE réel est publié par `voice.ts` ; hors périmètre de ces six tests.
+      // L'échec ICE nominatif est publié par `voice.ts` via `onPeerConnectionState` ;
+      // hors périmètre de ces six tests (mesuré dans tests/voice-peer-state.node.test.ts).
+    },
+    onPeerConnectionState: () => {
+      // Idem : la route par pair est mesurée ailleurs, pas dans T1..T7.
     },
     onLive: () => {
       steps.push('live');

@@ -247,6 +247,11 @@ function applyPeerState(
   next: MeshPeerState,
   cause: PeerStateCause,
 ): void {
+  // Le palier vient du maillage, donc d'une preuve (lien établi, échec mesuré, ou
+  // horloge des 5 s) : c'est LUI qui décide. `hasStream` est une preuve INDÉPENDANTE
+  // (le flux branché par `attachRemoteStream`) : `upsertPeer` la conserve, mais
+  // aucun palier du maillage n'est effacé par elle — `attachRemoteStream` ne
+  // promeut plus `connected` tout seul (défaut (c), SPEC-008 §1).
   state.sinks.ensure(peerId);
   upsertPeer(state, peerId, { state: next, cause });
   publishPeers(state);
@@ -268,31 +273,65 @@ function attachRemoteStream(state: LinkState, peerId: string, stream: unknown): 
     return;
   }
   if (stream === null || stream === undefined) return;
+  // Défaut (c), SPEC-008 §1 : la piste branchée est la preuve de flux — le maillage
+  // l'a déjà comptée telle (il publie `connected` depuis `onRemoteStream`). Ici,
+  // plus aucun `connected` auto-proclamé : on branche la sortie, on note la preuve
+  // (`hasStream`), et le palier reste celui du maillage. Un flux branché ne fait
+  // pas non plus tomber un `failed` que le maillage vient de mesurer.
   state.sinks.ensure(peerId);
-  upsertPeer(state, peerId, { state: 'connecting' });
   state.sinks.attach(peerId, stream);
-  upsertPeer(state, peerId, { state: 'connected', hasStream: true });
+  upsertPeer(state, peerId, { hasStream: true });
   publishPeers(state);
 }
 
-function applyConnectionState(state: LinkState, connectionState: string): void {
+/**
+ * Défaut (b) — l'état de connexion ICE arrive ENFIN AVEC SON PAIR.
+ *
+ * L'ancienne signature (`{ connectionState }` nu, contrat gelé de `MediaPlaneOptions`)
+ * n'a pas d'identité : l'appelant appliquait donc l'état à TOUS les pairs
+ * « connecting » — un pair qui échoue à l'ICE en faisait tomber d'autres en
+ * `failed`, et un pair `connected` masquait un pair mort. Cette fonction route
+ * l'événement nominatif ; la garde « preuve » est double, SPEC-008 §1 :
+ *   • `'failed'`/`'disconnected'`/`'closed'` ne touchent QUE leur pair ;
+ *   • `'connected'`/`'completed'` ne promeuvent QUE leur pair, et seulement si ce
+ *     pair a une preuve — un flux branché (`hasStream`) ou un lien mesh établi
+ *     (`state === 'connected'`, publié par le maillage sur preuve de flux).
+ *     Un `connected` de `RTCPeerConnection` sans preuve ne réinvente rien : il
+ *     laisse le pair où il est, l'horloge des 5 s du maillage répondra.
+ * Les paliers `failed`/`noFlow` publiés par le maillage sont la vérité du lien :
+ * un événement ICE tardif ne les dédit pas.
+ */
+function applyPeerConnectionState(
+  state: LinkState,
+  peerId: string,
+  connectionState: string,
+): void {
+  const previous = state.peers.get(peerId);
+  if (previous === undefined) return // pas de pair connu : rien à nommer, rien à écrire
+  if (previous.state === 'failed' || previous.state === 'noFlow') return
+
   const failed =
     connectionState === 'failed' ||
     connectionState === 'disconnected' ||
     connectionState === 'closed';
   const connected = connectionState === 'connected' || connectionState === 'completed';
-  // Un lien déjà « établi » par le mesh peut encore échouer sur l'ICE réel : il doit alors
-  // tomber en `failed` comme les autres, sinon un pair resterait annoncé vivant sans flux.
-  const targets = [...state.peers.values()].filter(
-    (peer) => peer.state === 'connecting' || (failed && peer.state === 'connected'),
-  );
-  if (targets.length === 0) return;
-  for (const peer of targets) {
-    upsertPeer(state, peer.peerId, {
-      state: connected ? 'connected' : failed ? 'failed' : 'connecting',
-    });
+
+  if (failed) {
+    upsertPeer(state, peerId, { state: 'failed' });
+    publishPeers(state);
+    return;
   }
-  publishPeers(state);
+  if (connected) {
+    // Promotion UNIQUEMENT sur preuve : flux branché, ou lien déjà établi par le
+    // maillage. Sans preuve, l'ICE dit « connectée » pour rien — on ne le croit pas.
+    if (previous.hasStream || previous.state === 'connected') {
+      upsertPeer(state, peerId, { state: 'connected' });
+      publishPeers(state);
+    }
+    return;
+  }
+  // `new` / `connecting` : l'état d'attente du maillage (`connecting`) est déjà le
+  // bon. Rien à écrire, rien à publier.
 }
 
 function handleSignal(state: LinkState, message: SignalIn): void {
@@ -433,11 +472,24 @@ function peerIds(current: VoiceSession): readonly string[] {
   }
 }
 
-/** `level(peerId)` ; `null` reste `null` — une mesure absente n'est pas un zéro mesuré. */
+/**
+ * `level(peerId)` ; `null` reste `null` — une mesure absente n'est pas un zéro mesuré.
+ *
+ * Défaut (c), SPEC-008 §1 : un NOMBRE rendu pour ce pair est un paquet reçu — c'est
+ * la preuve de flux que le maillage attend pour désarmer l'horloge des 5 s et dire
+ * `connected`. C'est ici, et nulle part ailleurs, que la mesure devient preuve :
+ * `null` (analyseur absent ou piste finie) ne prouve rien, le maillage garde son
+ * chien de garde armé. Le maillage est idempotent — ce battement tourne à ~20 Hz.
+ */
 function readPeerLevel(current: VoiceSession, peerId: string): number | null {
   if (!current.live) return null;
   try {
-    return current.wire.plane.level(peerId);
+    const value = current.wire.plane.level(peerId);
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      current.wire.reportFlow(peerId);
+      return value;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -582,8 +634,14 @@ export function openVoice(key: string, localId: string): void {
       onRemoteStream: (peerId, stream) => {
         attachRemoteStream(link, peerId, stream);
       },
-      onStateChange: (connectionState) => {
-        applyConnectionState(link, connectionState);
+      // Défaut (b) : la fréquence globale reste émise (contrat gelé), mais ne
+      // publie plus rien — c'est l'événement nominatif ci-dessous qui décide.
+      onStateChange: () => {
+        // Volontairement vide : `onStateChange` ne porte aucune identité de pair
+        // et ne doit plus jamais écrire un palier sur TOUS les pairs « connecting ».
+      },
+      onPeerConnectionState: (peerId, connectionState) => {
+        applyPeerConnectionState(link, peerId, connectionState);
       },
       onLive: () => {
         if (current === null || session !== current) return;

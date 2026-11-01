@@ -72,6 +72,14 @@ export interface VoiceWiringOptions {
   readonly onRemoteStream: (peerId: string, stream: MediaStream) => void;
   /** `connectionState` brut de la `RTCPeerConnection` — la seule source d'échec ICE réel. */
   readonly onStateChange: (connectionState: string) => void;
+  /**
+   * État de connexion AVEC son pair (défaut (b), SPEC-008 §1) : le plan média est
+   * seul à savoir de quelle `RTCPeerConnection` vient le changement. La coquille
+   * ROUTE celui-là (`failed` ne touche que son pair, `connected` ne promeut que
+   * son pair) ; `onStateChange` reste émis pour la fréquence globale, mais ne
+   * doit plus décider de l'état d'un pair tout seul.
+   */
+  readonly onPeerConnectionState: (peerId: string, connectionState: string) => void;
   /** Micro ouvert ET mesh en place : l'interface peut dire « live ». */
   readonly onLive: (plane: MediaPlane) => void;
   readonly onError: (error: unknown) => void;
@@ -103,6 +111,13 @@ export interface VoiceWiring {
    * maillage, qui sait qui est là, pas de l'annuaire, qui ne sait que ce qu'on lui a dit.
    */
   peers(): readonly string[];
+  /**
+   * Preuve de flux par le niveau mesuré (défaut (c), SPEC-008 §1) : la coquille
+   * appelle ici quand `plane.level(peerId)` a rendu un NOMBRE (jamais `null`).
+   * Le maillage désarme alors l'horloge des 5 s et dit `connected` — l'échange de
+   * SDP seul ne suffisait plus.
+   */
+  reportFlow(peerId: string): void;
   /** Messages tamponnés en attente d'un mesh (0 hors fenêtre d'ouverture du micro). */
   readonly buffered: number;
 }
@@ -144,6 +159,11 @@ export function createVoiceWiring(options: VoiceWiringOptions): VoiceWiring {
     },
     onStateChange: ({ connectionState }) => {
       options.onStateChange(String(connectionState));
+    },
+    // Défaut (b) : le même événement, porté par l'identité du pair. C'est par ici
+    // que la coquille route — plus jamais « l'état s'applique à tous les connecting ».
+    onPeerConnectionState: (peerId, state) => {
+      options.onPeerConnectionState(peerId, String(state));
     },
   });
 
@@ -284,6 +304,13 @@ export function createVoiceWiring(options: VoiceWiringOptions): VoiceWiring {
       // une liste d'ids supposés.
       if (mesh === null || closed) return [];
       return mesh.peers();
+    },
+    reportFlow(peerId: string): void {
+      // Hors mesh, aucune preuve n'a de destinataire : le maillage est seul à tenir
+      // l'horloge des 5 s, donc seul à pouvoir la désarmer.
+      const current = mesh;
+      if (current === null || closed) return;
+      current.reportFlow(peerId);
     },
     get buffered(): number {
       return queue.length;

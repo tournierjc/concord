@@ -49,6 +49,16 @@ import {
   withOpusSdpParams,
 } from './media-config.ts'
 
+/** Le connecteur d'un flux vers un analyseur, tel que la page le fait réellement. */
+export type MeterSource = (
+  context: AudioContext,
+  stream: MediaStream,
+) => { connect(node: unknown): void }
+
+/** Le connecteur réel : `AudioContext.createMediaStreamSource`. */
+const defaultMeterSource: MeterSource = (context, stream) =>
+  context.createMediaStreamSource(stream)
+
 /** Options de construction du plan média. */
 export interface MediaPlaneOptions {
   localId: string
@@ -72,6 +82,28 @@ export interface MediaPlaneOptions {
    */
   onRemoteStream?: (peerId: string, s: MediaStream) => void
   onStateChange?: (s: { connectionState: RTCPeerConnectionState }) => void
+  /**
+   * État de connexion AVEC l'identité du pair (défaut (b), SPEC-008 §1).
+   *
+   * `onStateChange` est un contrat GELÉ : son objet ne porte aucun `peerId`, et
+   * l'appelant qui ne voit qu'un `{ connectionState }` nu ne peut que l'appliquer à
+   * tous les pairs « connecting » — un pair qui échoue à l'ICE en faisait tomber
+   * d'autres en `failed`, et un pair `connected` masquait un pair mort. Ce champ
+   * ADDITIONNEL (l'existant n'est pas cassé : les deux sont émis sur le même
+   * événement) porte le `remoteId` de la `RTCPeerConnection` qui a changé d'état.
+   * C'est lui que la coquille doit router ; `onStateChange` reste émis pour les
+   * appelants qui n'attendent que la fréquence globale des changements.
+   */
+  onPeerConnectionState?: (peerId: string, state: RTCPeerConnectionState) => void
+  /**
+   * Connecteur de source du vumètre (défaut (a), injection de test).
+   *
+   * `undefined` = `AudioContext.createMediaStreamSource` — le chemin réel de la
+   * page. Un test fournit un connecteur à RMS contrôlable pour falsifier la chaîne
+   * complète `ontrack → analyseur → level(peerId)` sans Chromium. Ce n'est PAS un
+   * réglage de la coquille : la production ne le fournit jamais.
+   */
+  meterSource?: MeterSource
   /**
    * Horloge INJECTÉE qui arme le plafond d'1 s du ramassage ICE (T17 / AD-18).
    *
@@ -239,6 +271,30 @@ async function requestMicrophone(): Promise<MediaStream> {
 }
 
 /**
+ * Le nœud de mesure d'un flux : source → analyseur.
+ *
+ * Le connecteur de source est un PARAMÈTRE et non une lecture directe d'
+ * `AudioContext.createMediaStreamSource` : c'est la seule façon de mesurer un flux
+ * dans une page dont l'AudioContext est SUSPENDU sans le lire (Chromium). Un
+ * analyseur branché sur une source que rien n'horodate rend un RMS figé — un faux
+ * « pair qui parle » permanent, ou un faux silence permanent. `meterOptions.source`
+ * est fourni par les tests ; `sourceNodeFor` ci-dessous reste le chemin réel de la
+ * page, et bascule l'AudioContext en « lecture » (`resume()`) avant chaque source
+ * distante, puis le rend au micro local.
+ */
+function attachAnalyser(
+  context: AudioContext,
+  stream: MediaStream,
+  source: (context: AudioContext, stream: MediaStream) => { connect(node: unknown): void },
+): { analyser: AnalyserNode; buffer: Float32Array<ArrayBuffer> } {
+  const analyser = context.createAnalyser()
+  analyser.fftSize = METER_FFT_SIZE
+  analyser.smoothingTimeConstant = 0
+  source(context, stream).connect(analyser)
+  return { analyser, buffer: new Float32Array(METER_FFT_SIZE) }
+}
+
+/**
  * Construit le plan média d'un participant.
  *
  * Aucune connexion n'est créée ici : `attach` / `accept` créent la
@@ -282,12 +338,39 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
   }
 
   /**
+   * Le connecteur de source réel de la page. Les tests le remplacent (défaut (a))
+   * pour injecter un RMS contrôlable et prouver qu'un flux distant est MESURABLE
+   * dès qu'il arrive, que le micro local soit ouvert ou non, que l'AudioContext
+   * soit suspendu ou non.
+   */
+  const meterSource = o.meterSource ?? defaultMeterSource
+
+  /** Vrai si la piste distante peut encore produire des échantillons. */
+  function streamHasLiveTrack(stream: MediaStream): boolean {
+    return stream.getAudioTracks().some((track) => track.readyState !== 'ended')
+  }
+
+  /**
    * Ajoute un vumètre sur un flux (micro local ou flux distant), rattaché à une clé :
    * `LOCAL_METER_KEY` ou l'identifiant du pair. Un second flux pour la même clé
    * remplace le précédent — un pair n'a qu'une piste, et un analyseur orphelin
    * continuerait de mesurer un flux mort.
+   *
+   * DÉFAUT (a) : un flux distant dont la piste est déjà FINIE ne reçoit PAS
+   * d'analyseur. Avant cette garde, `addMeter` branchait l'analyseur d'abord et ne
+   * consultait `readyState` qu'à la lecture — une piste `'ended'` renvoyait alors le
+   * dernier tampon de l'AnalyserNode, c'est-à-dire un RMS FIGÉ non nul : un faux
+   * « pair qui parle » permanent, branché dès `ontrack` même si personne ne
+   * l'attendait (le micro local était-il ouvert ou non, l'analyseur vivait).
+   * Refuser l'analyseur ici, c'est rendre `level(peerId)` à `null` — l'absence
+   * d'affirmation, pas une affirmation de silence.
    */
   function addMeter(key: string, stream: MediaStream, label: string): void {
+    if (key !== LOCAL_METER_KEY && !streamHasLiveTrack(stream)) {
+      meters.delete(key)
+      warn(`vumètre refusé (${label}) : le flux ne porte aucune piste vivante — level() rendra null`)
+      return
+    }
     try {
       if (audioContext === null) {
         audioContext = new AudioContext()
@@ -295,11 +378,9 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
           warn(`AudioContext.resume a échoué (${label}) : ${describeError(error)}`)
         })
       }
-      const analyser = audioContext.createAnalyser()
-      analyser.fftSize = METER_FFT_SIZE
-      analyser.smoothingTimeConstant = 0
-      audioContext.createMediaStreamSource(stream).connect(analyser)
-      meters.set(key, [{ analyser, buffer: new Float32Array(METER_FFT_SIZE), stream }])
+      const context = audioContext
+      const meter = attachAnalyser(context, stream, meterSource)
+      meters.set(key, [{ ...meter, stream }])
     } catch (error) {
       warn(`vumètre indisponible (${label}) : ${describeError(error)}`)
     }
@@ -429,6 +510,10 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     pc.onconnectionstatechange = () => {
       const notify = o.onStateChange
       if (notify !== undefined) notify({ connectionState: pc.connectionState })
+      // Défaut (b) : le MÊME événement, portés par l'identité du pair. `pc` a été
+      // construit POUR `remoteId` — c'est le seul endroit qui le sait sans deviner.
+      const notifyPeer = o.onPeerConnectionState
+      if (notifyPeer !== undefined) notifyPeer(remoteId, pc.connectionState)
     }
     pc.ontrack = (event) => {
       // Ici, et nulle part ailleurs, on sait de quel pair vient la piste :

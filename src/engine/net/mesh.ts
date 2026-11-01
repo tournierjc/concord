@@ -148,8 +148,19 @@ export interface Mesh {
    * Entrée flux : une piste distante arrive du plan média AVEC son pair (AD-17 /
    * D3). Sixième et dernier membre de la surface : sans lui, l'appelant devait
    * rattacher le flux lui-même — c'est exactement ce qui a produit DÉFAUT-C.
+   *
+   * Un flux attribué est AUSSI la preuve de flux du lien (SPEC-008 §1, défaut (c)) :
+   * c'est lui qui désarme l'horloge des 5 s et autorise `connected`.
    */
   onRemoteStream(peerId: string, stream: MediaStream): void
+  /**
+   * Preuve de flux par le niveau mesuré (défaut (c), SPEC-008 §1) : la coquille
+   * appelle ici quand `plane.level(peerId)` a rendu un nombre pour ce pair.
+   * Septième membre de la surface (ajout assumé, commentaire et test de surface
+   * mis à jour avec lui) — sans lui, un lien dont la piste est arrivée AVANT
+   * l'ouverture du lien mesh ne pourrait jamais être dit connecté sur mesure.
+   */
+  reportFlow(peerId: string): void
   /** Pairs du maillage, triés, jamais de doublon. */
   peers(): string[]
   close(): void
@@ -160,6 +171,17 @@ const DEFAULT_MAX_PEERS = 8
 
 /** Rôle déterministe d'un lien : `localId < remoteId` ⇒ j'offre, sinon j'attends. */
 type LinkRole = 'offerer' | 'answerer'
+
+/**
+ * Preuve de flux d'un lien (SPEC-008 §1). Deux témoins, tous deux portés par le
+ * pair, jamais déduits d'un minuteur :
+ *   • `'track'` — `onRemoteStream(peerId, …)` est passé par ce lien : la piste
+ *     distante est arrivée (`ontrack` de la bonne `RTCPeerConnection`) ;
+ *   • `'level'` — `reportFlow(peerId)` a reçu un niveau mesuré pour ce pair.
+ * Un lien sans preuve ne peut être dit `connected` : le SDP échangé prouve la
+ * négociation, pas la voix.
+ */
+type FlowProof = 'track' | 'level'
 
 /**
  * Où en est la négociation du lien :
@@ -176,6 +198,18 @@ interface Link {
   phase: LinkPhase
   /** SDP de la dernière offre distante acceptée (répondeur) — clé d'idempotence. */
   remoteOfferSdp: string
+  /**
+   * Preuve de flux reçue pour ce lien (`null` tant qu'aucun échantillon, aucune
+   * piste n'est arrivée). C'est elle qui autorise `connected`, jamais l'échange
+   * de SDP seul (défaut (c), SPEC-008 §1).
+   */
+  flow: FlowProof | null
+  /**
+   * Le palier `connected` a-t-il déjà été annoncé pour la preuve en cours ?
+   * `noFlow` réarme cette autorisation : une preuve tardive doit pouvoir
+   * ramener le lien à `connected` une fois, puis se taire.
+   */
+  connectedAnnounced: boolean
 }
 
 /** Trace d'un refus : jamais une exception, toujours une ligne lisible. */
@@ -318,10 +352,33 @@ export function createMesh(o: MeshOptions): Mesh {
   }
 
   /**
-   * Horloge des 5 s (SPEC-008 §1) : un lien qui n'a pas fini de s'établir au
-   * bout de 5 s n'aura pas de flux — on le dit (`noFlow`, cause `'timeout'`)
-   * au lieu de laisser l'interface afficher « connexion » pour toujours.
-   * Le lien n'est PAS détruit : une réponse tardive le rétablit (`connected`).
+   * La preuve de flux est arrivée pour ce lien : désarme l'horloge des 5 s et
+   * publie `connected`, UNE SEULE FOIS par preuve.
+   *
+   * Défaut (c) : avant cette fonction, `answerTo()`/`onAnswer()` appelaient
+   * `clearClock()` + `notify('connected','ice')` dès l'échange de SDP. Un pair
+   * muet (ICE vivant, aucun paquet audio) restait affiché « connecté » FOREVER —
+   * le chien de garde `noFlow` était désarmé par la négociation, qui n'est pas
+   * une preuve de voix. Ici, le SDP ne désarme plus rien : seule une preuve
+   * l'autorise — piste distante (`'track'`) ou niveau mesuré (`'level'`).
+   */
+  function proveFlow(link: Link, proof: FlowProof): void {
+    if (closed) return
+    if (links.get(link.peerId) !== link) return
+    link.flow = proof
+    if (link.connectedAnnounced) return
+    link.connectedAnnounced = true
+    clearClock(link.peerId)
+    notify(link.peerId, 'connected', 'ice')
+  }
+
+  /**
+   * Horloge des 5 s (SPEC-008 §1) : un lien qui n'a PAS apporté de preuve de flux
+   * au bout de 5 s n'a pas de voix — on le dit (`noFlow`, cause `'timeout'`) au
+   * lieu de laisser l'interface afficher « connexion » pour toujours.
+   * Le lien n'est PAS détruit : une preuve tardive (`proveFlow`) le rétablit
+   * (`connected`) — y compris après un `answered` de SDP sans flux, que
+   * l'ancienne version excluait de l'horloge par `if (phase === 'answered')`.
    */
   function armClock(link: Link): void {
     clearClock(link.peerId)
@@ -329,8 +386,9 @@ export function createMesh(o: MeshOptions): Mesh {
       clocks.delete(link.peerId)
       if (closed) return
       if (links.get(link.peerId) !== link) return
-      if (link.phase === 'answered') return
-      warn(`${link.peerId} : pas de flux après ${flowTimeoutMs} ms (aucune réponse) — noFlow`)
+      if (link.flow !== null) return
+      link.connectedAnnounced = false // une preuve tardive ramènera `connected`
+      warn(`${link.peerId} : pas de flux après ${flowTimeoutMs} ms — noFlow`)
       notify(link.peerId, 'noFlow', 'timeout')
     })
     clocks.set(link.peerId, handle)
@@ -375,8 +433,10 @@ export function createMesh(o: MeshOptions): Mesh {
       link.remoteOfferSdp = sdp
       link.phase = 'answered'
       send({ kind: 'answer', to: link.peerId, payload: answer })
-      clearClock(link.peerId)
-      notify(link.peerId, 'connected', 'ice')
+      // Défaut (c) : plus de `clearClock()` + `notify('connected','ice')` ici.
+      // L'échange de SDP prouve la négociation, pas la voix — SPEC-008 §1 exige
+      // un flux reçu il y a moins de 5 s. L'horloge des 5 s reste ARMÉE jusqu'à
+      // preuve réelle (`onRemoteStream` ou `reportFlow`).
     } catch (error: unknown) {
       fail(link, 'accept/answer', error)
     }
@@ -399,6 +459,8 @@ export function createMesh(o: MeshOptions): Mesh {
       role: localId < peerId ? 'offerer' : 'answerer',
       phase: 'waiting',
       remoteOfferSdp: '',
+      flow: null,
+      connectedAnnounced: false,
     }
     links.set(peerId, link)
     notify(peerId, 'connecting', 'ice')
@@ -466,8 +528,10 @@ export function createMesh(o: MeshOptions): Mesh {
     link.phase = 'answered'
     try {
       await plane.acceptAnswer(link.peerId, answer)
-      clearClock(link.peerId)
-      notify(link.peerId, 'connected', 'ice')
+      // Défaut (c) : plus de `clearClock()` + `notify('connected','ice')` ici —
+      // la réponse SDP reçue n'est pas une preuve de flux. L'horloge des 5 s
+      // reste armée ; `onRemoteStream`/`reportFlow` la désarmeront, sinon
+      // `noFlow` sonnera à 5 s sans détruire le lien.
     } catch (error: unknown) {
       fail(link, 'acceptAnswer', error)
     }
@@ -536,6 +600,10 @@ export function createMesh(o: MeshOptions): Mesh {
    * symptôme d'un `ontrack` arrivé avant nous, d'un flux après `close()`, ou d'un
    * pair hors maillage. Le compteur (`unattributed: N`) est ce qui distingue
    * « aucun flux » de « flux que je n'ai pas su nommer ».
+   *
+   * Le flux attribué EST aussi la preuve de flux du lien (défaut (c), SPEC-008 §1) :
+   * une piste qui arrive par la `RTCPeerConnection` de ce pair est un flux reçu —
+   * `connected` n'attend plus que cet événement, plus la fin du SDP.
    */
   function onRemoteStream(peerId: string, stream: MediaStream): void {
     if (closed) {
@@ -543,14 +611,32 @@ export function createMesh(o: MeshOptions): Mesh {
       warn(`flux reçu après fermeture, ignoré — unattributed: ${unattributedStreams}`)
       return
     }
-    if (!links.has(peerId)) {
+    const link = links.get(peerId)
+    if (link === undefined) {
       unattributedStreams += 1
       warn(`flux reçu sans pair connu (${peerId}), ignoré — unattributed: ${unattributedStreams}`)
       return
     }
+    proveFlow(link, 'track')
     const notify = o.onRemoteStream
     if (notify === undefined) return
     notify(peerId, stream)
+  }
+
+  /**
+   * Preuve de flux par le niveau (défaut (c), SPEC-008 §1) : `voice.ts` appelle
+   * ici quand `plane.level(peerId)` a RENDU UN NOMBRE pour ce pair — un RMS même
+   * faible est un paquet reçu, contrairement à `null` qui dit « je ne mesure pas ».
+   *
+   * Idempotente par conception (`proveFlow`) : le battement de mesure tourne à
+   * ~20 Hz, cette entrée est appelée à chaque trame mesurée et ne publie
+   * `connected` qu'une seule fois par preuve.
+   */
+  function reportFlow(peerId: string): void {
+    if (closed) return
+    const link = links.get(peerId)
+    if (link === undefined) return // pair hors maillage : rien à prouver, rien à dire
+    proveFlow(link, 'level')
   }
 
   async function onSignal(msg: SignalIn): Promise<void> {
@@ -601,11 +687,13 @@ export function createMesh(o: MeshOptions): Mesh {
     }
   }
 
-  // Surface runtime GELÉE (AD-16 / T17, étendue par AD-17 / D3), mesurée par VERIF :
-  // ["addCandidate","close","onLocalCandidate","onRemoteStream","onSignal","peers"]
-  // — six membres, pas un de plus (`onRemoteStream` entre AVEC `onLocalCandidate`
+  // Surface runtime GELÉE (AD-16 / T17, étendue par AD-17 / D3 ; septième membre
+  // `reportFlow` ajouté par le défaut (c) de SPEC-008 §1 — preuve de flux par le
+  // niveau, cf. l'interface `Mesh` ci-dessus), mesurée par VERIF :
+  // ["addCandidate","close","onLocalCandidate","onRemoteStream","onSignal","peers","reportFlow"]
+  // — sept membres, pas un de plus (`onRemoteStream` entre AVEC `onLocalCandidate`
   // porteur du pair : l'un sans l'autre est une application partielle, refusée en
   // revue). L'ordre du littéral suit l'ordre trié pour que `Object.keys(mesh)` et
   // `Object.keys(mesh).sort()` soient identiques.
-  return { addCandidate, close, onLocalCandidate, onRemoteStream, onSignal, peers }
+  return { addCandidate, close, onLocalCandidate, onRemoteStream, onSignal, peers, reportFlow }
 }
