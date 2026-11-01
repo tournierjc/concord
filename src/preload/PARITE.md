@@ -5,13 +5,14 @@
 Compté sur `src/shell/ipc-contract.ts` (`IPC`, `INVOKE_CHANNELS`, `EVENT_CHANNELS`) et
 `src/preload/index.ts` (9 abonnements, `subscribe` l.46) :
 
-- **22 canaux** dans le contrat : **13 invoke** (`settingsGet`, `settingsSet`, `settingsOpen`,
+- **24 canaux** dans le contrat : **15 invoke** (`settingsGet`, `settingsSet`, `settingsOpen`,
   `roomJoin`, `roomLeave`, `roomsDiscover`, `controlSetMute`, `controlSetDeafen`,
-  `controlSetPushToTalk`, `controlSetGain`, `overlaySet`, `speakingSet`, `signalSend`) et
+  `controlSetPushToTalk`, `controlSetGain`, `overlaySet`, `speakingSet`, `signalSend`,
+  `avatarChoose`, `avatarGetImage`) et
   **9 événements** (`eventParticipants`, `eventRoomState`, `eventRoomsDiscovered`,
   `eventControlState`, `eventSettingsChanged`, `eventOverlayGeometry`, `eventShortcutConflict`,
   `eventSignal`, `eventSpeakingSet`).
-- Exposés au renderer : les 13 invoke + les 9 événements. Manquants : aucun. En trop : aucun.
+- Exposés au renderer : les 15 invoke + les 9 événements. Manquants : aucun. En trop : aucun.
 - Les quatre écarts décrits plus bas sont **corrigés** :
   1. `room-bridge.ts` type son discriminant sur la **VALEUR** du canon
      (`{ channel: typeof IPC.eventRoomState; payload: RoomStateCore }`) et émet `IPC.eventRoomState` :

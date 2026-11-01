@@ -25,6 +25,11 @@ import {
   nicknameError,
   nicknameErrorKey,
 } from '../shell/nickname';
+import {
+  AVATAR_GALLERY,
+  avatarInitials,
+  customAvatarRef,
+} from '../shell/avatar';
 import { MAX_ROOM_PARTICIPANTS, type Settings } from '../shell/settings-schema';
 import { lanApi } from './api';
 import { browserTimers } from './browser-timers';
@@ -88,9 +93,12 @@ interface IdentityRowProps {
   locale: Locale;
   onChange: (nickname: string) => void;
   onSaved: () => void;
+  /** Le réglage `avatar` courant (SPEC-002, amendement 2026-10-31). */
+  avatar: Settings['avatar'];
+  onAvatarChange: (avatar: Settings['avatar']) => void;
 }
 
-function IdentityRow({ value, locale, onChange, onSaved }: IdentityRowProps): JSX.Element {
+function IdentityRow({ value, locale, onChange, onSaved, avatar, onAvatarChange }: IdentityRowProps): JSX.Element {
   const t = createTranslator(locale);
   const [draft, setDraft] = useState<string>(value);
   const [error, setError] = useState<NicknameError | null>(null);
@@ -153,6 +161,135 @@ function IdentityRow({ value, locale, onChange, onSaved }: IdentityRowProps): JS
           </span>
         )}
       </label>
+      <AvatarPicker locale={locale} avatar={avatar} onChange={onAvatarChange} fallbackSeed={draft} />
+    </div>
+  );
+}
+
+/**
+ * AvatarPicker — la grille de la galerie embarquée + le bouton « Choisir une image »
+ * (SPEC-002, amendement 2026-10-31). Aucun compte, aucune adresse : la galerie est embarquée
+ * dans l'application et une image personnalisée est redimensionnée et stockée LOCALEMENT par le
+ * main — l'avatar ne quitte pas le réseau local.
+ */
+function AvatarPicker({
+  locale,
+  avatar,
+  onChange,
+  fallbackSeed,
+}: {
+  locale: Locale;
+  avatar: Settings['avatar'];
+  onChange: (avatar: Settings['avatar']) => void;
+  fallbackSeed: string;
+}): JSX.Element {
+  const t = createTranslator(locale);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [customPreview, setCustomPreview] = useState<string | null>(null);
+  const customRef = customAvatarRef(avatar);
+
+  // L'aperçu de l'image personnalisée vient du main (PNG validé, encodé en base64). Une empreinte
+  // que le main ne connaît pas rend `null` : on retombe sur les initiales, on n'invente rien.
+  useEffect(() => {
+    if (customRef === null) {
+      setCustomPreview(null);
+      return;
+    }
+    let live = true;
+    void lanApi()
+      .getAvatarImage(customRef)
+      .then((png) => {
+        if (live) setCustomPreview(png);
+      })
+      .catch(() => {
+        if (live) setCustomPreview(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [customRef]);
+
+  const pickImage = (): void => {
+    setUploading(true);
+    setUploadError(null);
+    void lanApi()
+      .chooseAvatar()
+      .then((result) => {
+        setUploading(false);
+        if (result.ok) {
+          onChange(result.avatar);
+          return;
+        }
+        if (result.reason !== 'cancelled') {
+          setUploadError(t(`app.avatar.upload.error.${result.reason}`));
+        }
+      })
+      .catch(() => {
+        setUploading(false);
+        setUploadError(t('app.avatar.upload.error.unreadable'));
+      });
+  };
+
+  return (
+    <div className="identity__avatars">
+      <span className="field__label">{t('app.avatar.label')}</span>
+      <div className="avatar-grid" role="group" aria-label={t('app.avatar.label')}>
+        {AVATAR_GALLERY.map((choice) => (
+          <button
+            key={choice.id}
+            type="button"
+            className="avatar-grid__cell"
+            aria-pressed={avatar === choice.id}
+            title={choice.id}
+            onClick={() => {
+              setUploadError(null);
+              onChange(choice.id);
+            }}
+          >
+            <span aria-hidden="true">{choice.emoji}</span>
+            <span className="visually-hidden">{choice.id}</span>
+          </button>
+        ))}
+        <button
+          type="button"
+          className="avatar-grid__cell avatar-grid__cell--custom"
+          aria-pressed={customRef !== null}
+          title={t('app.avatar.upload.button')}
+          onClick={pickImage}
+          disabled={uploading}
+        >
+          {customRef !== null && customPreview !== null ? (
+            <img className="avatar-grid__image" src={`data:image/png;base64,${customPreview}`} alt="" aria-hidden="true" />
+          ) : (
+            <span aria-hidden="true">{avatarInitials(fallbackSeed)}</span>
+          )}
+          <span className="visually-hidden">{t('app.avatar.upload.button')}</span>
+        </button>
+      </div>
+      <div className="identity__avatar-actions">
+        <button type="button" className="button button--compact" onClick={pickImage} disabled={uploading}>
+          {uploading ? t('app.avatar.upload.busy') : t('app.avatar.upload.button')}
+        </button>
+        {avatar !== null ? (
+          <button
+            type="button"
+            className="button button--compact button--ghost"
+            onClick={() => {
+              setUploadError(null);
+              onChange(null);
+            }}
+          >
+            {t('app.avatar.clear')}
+          </button>
+        ) : null}
+      </div>
+      <span className="field__help">{t('app.avatar.help')}</span>
+      {uploadError ? (
+        <span className="field__error" role="alert">
+          {uploadError}
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -309,6 +446,8 @@ export function App(): JSX.Element {
           value={settings.nickname}
           onChange={(nickname) => void patchSettings({ nickname })}
           onSaved={() => setToast(t('app.nickname.saved'))}
+          avatar={settings.avatar}
+          onAvatarChange={(avatar) => void patchSettings({ avatar })}
         />
       ) : null}
 

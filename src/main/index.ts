@@ -15,9 +15,19 @@
  * `node_modules`). Sa vérification future est `npm run build:main` puis un lancement réel.
  */
 
-import { app, BrowserWindow, ipcMain, screen, session } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, screen, session } from 'electron';
+import { readFileSync } from 'node:fs';
 import { networkInterfaces, userInfo } from 'node:os';
 import { join } from 'node:path';
+
+import {
+  createAvatarStore,
+  decodeAvatarPngFromWire,
+  electronAvatarIo,
+  encodeAvatarPngForWire,
+  type AvatarStore,
+} from './avatar-store';
+import { customAvatarRef, isAvatarRef, isGalleryAvatarId } from '../shell/avatar';
 
 import { securityHeaders } from './csp';
 import { createDiscoveryBridge, type DiscoveryBridge } from './discovery-bridge';
@@ -73,6 +83,28 @@ let networkGuard: ReturnType<typeof installNetworkGuard> | null = null;
 let ptt: PttRegistration | null = null;
 /** Le tuyau de signalisation du salon courant (T16b). `null` hors salon. */
 let signalingLink: SignalingLink | null = null;
+/**
+ * L'empreinte que le `join` emporte (SPEC-002, amendement 2026-10-31) : un avatar de galerie
+ * voyage sous son propre id, un avatar personnalisé sous l'empreinte de son PNG. `undefined` si
+ * le réglage n'est pas un avatar recevable — le pair affiche alors les initiales.
+ */
+function avatarRefForJoin(avatar: Settings['avatar']): string | undefined {
+  if (typeof avatar === 'string') return isGalleryAvatarId(avatar) ? avatar : undefined;
+  return customAvatarRef(avatar) ?? undefined;
+}
+
+/**
+ * Le magasin d'images d'avatar locales (SPEC-002, amendement 2026-10-31). Créé au démarrage,
+ * dès que `userData` est connu : l'image ne quitte JAMAIS la machine — seul son empreinte voyage
+ * sur le LAN, et le binaire n'est demandé que par un pair du même réseau.
+ */
+let avatarStore: AvatarStore | null = null;
+/**
+ * Les images reçues des pairs, en mémoire seulement (SPEC-002, amendement 2026-10-31) : un pair
+ * nous envoie son PNG par `avatar_data`, on l'affiche le temps de la session et on n'en garde
+ * aucune trace sur le disque — seule MA propre image est stockée sous `userData/avatars/`.
+ */
+const sessionAvatars = new Map<string, string>();
 const overlay = new OverlayController();
 const bridge = new RoomBridge(forwardBridgeEvent);
 // Découverte mDNS des salons : `now` est injecté ici, dans le main (interdit dans `src/engine/`).
@@ -123,6 +155,9 @@ app.on('will-quit', () => {
 
 async function bootstrap(): Promise<void> {
   store = createSettingsStore(join(app.getPath('userData'), 'settings.json'));
+  // Le magasin d'avatars vit à côté des réglages, sous `userData` : un dossier que l'application
+  // possède, que le renderer ne voit pas (sandbox), et que le réseau ne voit pas (LAN only).
+  avatarStore = createAvatarStore(join(app.getPath('userData'), 'avatars'), electronAvatarIo());
   const loaded = store.load();
   settings = loaded.settings;
   if (loaded.recovered) {
@@ -461,6 +496,10 @@ function expectPayload<T>(channel: IpcInvokeChannel, value: unknown, is: (raw: u
   });
 }
 
+function isAvatarImagePayload(raw: unknown): raw is { avatarRef: string } {
+  return isRecord(raw) && typeof raw['avatarRef'] === 'string';
+}
+
 function isRecord(raw: unknown): raw is Record<string, unknown> {
   return typeof raw === 'object' && raw !== null && !Array.isArray(raw);
 }
@@ -517,7 +556,7 @@ function isOverlayPatchPayload(raw: unknown): raw is OverlayPatchPayload {
  * adresse privée ou le loopback, et `createSignalingLink` refuse toute autre valeur).
  * Client : un salon découvert par mDNS porte son hôte et son port, on s'y connecte.
  */
-function startSignalingLink(roomId: string, name: string, selfId: string): void {
+function startSignalingLink(roomId: string, name: string, selfId: string, avatarRef: string | undefined): void {
   stopSignalingLink('changement de salon');
   const remote = discovery.list().find((room) => room.roomId === roomId);
   const listenHost = pickListenHost(networkInterfaces());
@@ -526,12 +565,52 @@ function startSignalingLink(roomId: string, name: string, selfId: string): void 
     role,
     localId: selfId,
     name,
+    // Le join transporte l'EMPREINTE de l'avatar, jamais l'image : le nom d'une galerie voyage
+    // tel quel, un avatar personnalisé voyage sous son empreinte (le binaire ne suit que si un
+    // pair du LAN le demande explicitement, par `avatar_get`).
+    ...(avatarRef !== undefined ? { avatarRef } : {}),
+    // Le lien répond aux `avatar_get` en lisant le magasin (revalidation à la lecture). Le callback
+    // est fourni en plus : sans magasin injecté, la demande remonte au main plutôt que expirer.
+    ...(avatarStore === null ? {} : { avatarStore }),
+    onAvatarGet: (request) => {
+      if (!avatarStore) {
+        signalingLink?.answerAvatarGet(request, null);
+        return;
+      }
+      try {
+        const loaded = avatarStore.load(request.avatarRef);
+        signalingLink?.answerAvatarGet(request, loaded.ok ? encodeAvatarPngForWire(loaded.data) : null);
+      } catch {
+        signalingLink?.answerAvatarGet(request, null);
+      }
+    },
     host: role === 'client' && remote ? remote.host : listenHost,
     ...(role === 'client' && remote ? { port: remote.port } : {}),
     now: () => systemTimers.now(),
     onMessage: (message) => {
       // L'annuaire suit la présence de signalisation AVANT d'envoyer le message au renderer :
       // `peer-joined`/`peer-left` étaient jusqu'ici transmis sans que personne ne tienne la liste.
+      if (message.kind === 'avatar-data') {
+        // Le PNG d'un pair arrive par la signalisation (le beacon/join ne portent que
+        // l'empreinte). On le décode et le valide ICI — le renderer ne touche jamais un binaire
+        // suspect : si le contenu ne passe pas les bornes, il ne le verra pas et restera aux
+        // initiales. En mémoire seule : l'image d'autrui n'est jamais écrite sur notre disque.
+        const png = message.data === null ? null : decodeAvatarPngFromWire(message.data);
+        if (png !== null) {
+          const encoded = encodeAvatarPngForWire(png);
+          if (encoded !== null) sessionAvatars.set(message.avatarRef, encoded);
+        }
+      } else if (message.kind === 'peer-joined' && message.avatarRef !== undefined) {
+        // Un pair annonce une empreinte que nous ne connaissons pas : la demande d'image part
+        // immédiatement (le lien la borne et la ferme lui-même ; une galerie n'est jamais
+        // demandée, ses emoji sont embarqués des deux côtés).
+        const ref = message.avatarRef;
+        if (!isAvatarRef(ref) && !isGalleryAvatarId(ref)) {
+          // `guardParticipant` a déjà filtré, mais le main ne fait pas confiance en aval : rien.
+        } else if (isAvatarRef(ref) && !sessionAvatars.has(ref)) {
+          signalingLink?.requestAvatar(message.peerId, ref);
+        }
+      }
       applyRoster(message);
       sendEvent(IPC.eventSignal, message);
     },
@@ -580,7 +659,8 @@ function stopSignalingLink(detail: string): void {
 function registerIpcHandlers(): void {
   // Charges utiles reçues en `unknown` (forme rendue par le contrat) et rétrécies dans chaque
   // handler par `expectPayload` : la table n'a donc plus besoin d'être contrainte en `never`.
-  const handlers: Record<IpcInvokeChannel, (payload: unknown) => unknown> = {
+  // `avatarChoose` est géré à part : sa boîte de dialogue est asynchrone (`await dialog`).
+  const handlers: Record<Exclude<IpcInvokeChannel, (typeof IPC)['avatarChoose']>, (payload: unknown) => unknown> = {
     [IPC.settingsGet]: () => settings,
     [IPC.settingsSet]: (payload: unknown) => {
       const result = applySettingsPatch(settings, payload);
@@ -589,6 +669,11 @@ function registerIpcHandlers(): void {
         throw new Error(`réglages refusés (${detail})`);
       }
       persist(result.value);
+      // `persist` a déjà publié l'événement `settings-changed` — l'annuaire local est aligné APRÈS,
+      // et la publication de l'annuaire suit : le renderer reçoit l'événement réglages, puis un
+      // annuaire cohérent avec lui. Les pairs déjà connectés apprendront le nouvel avatar au
+      // prochain `join` — un `join` est l'annonce de l'identité, pas un flux continu.
+      bridge.setSelfAvatar(avatarRefForJoin(settings.avatar) ?? null);
       return settings;
     },
     [IPC.settingsOpen]: () => {
@@ -605,7 +690,8 @@ function registerIpcHandlers(): void {
       const state = bridge.join(join, resolveDisplayName(settings.nickname, osUserName()));
       // Salon refusé (plafond atteint) : aucun tuyau à ouvrir.
       if (state.roomId !== null && state.selfId !== null) {
-        startSignalingLink(state.roomId, join.name, state.selfId);
+        bridge.setSelfAvatar(avatarRefForJoin(settings.avatar) ?? null);
+        startSignalingLink(state.roomId, join.name, state.selfId, avatarRefForJoin(settings.avatar));
       }
       return state;
     },
@@ -635,6 +721,21 @@ function registerIpcHandlers(): void {
     // fenêtre d'overlay qui (re)charge sans attendre la transition suivante.
     [IPC.speakingSet]: (payload: unknown) =>
       publishSpeaking(expectPayload(IPC.speakingSet, payload, isSpeakingSetPayload).speaking),
+    [IPC.avatarGetImage]: (payload: unknown) => {
+      // Le renderer ne demande que des empreintes déjà reçues d'un pair ; le contrat a validé la
+      // forme, `load()` revalide l'empreinte ET les octets (signature PNG + taille). Fichier
+      // absent ou corrompu → `null` : l'affichage reste sur les initiales.
+      const ref = expectPayload(IPC.avatarGetImage, payload, isAvatarImagePayload).avatarRef;
+      // Deux sources, dans l'ordre : l'image reçue d'un pair pendant la session (mémoire seule),
+      // puis MES propres images stockées (un pair peut arborer mon propre avatar, renvoyé par
+      // `avatar_data` — il doit s'afficher aussi). Empreinte invalidée ou fichier corrompu →
+      // `null` : l'affichage reste sur les initiales, jamais une image inventée.
+      const cached = sessionAvatars.get(ref);
+      if (cached !== undefined) return cached;
+      if (!avatarStore) return null;
+      const loaded = avatarStore.load(ref);
+      return loaded.ok ? encodeAvatarPngForWire(loaded.data) : null;
+    },
     [IPC.overlaySet]: (payload: unknown) => {
       const patch = expectPayload(IPC.overlaySet, payload, isOverlayPatchPayload);
       const result = applySettingsPatch(settings, overlayPatchToSettings(patch));
@@ -655,13 +756,35 @@ function registerIpcHandlers(): void {
       // Rejet typé : le renderer (et `assertPayload` côté preload) distingue une faute de contrat
       // d'une erreur métier grâce à `IpcContractError` (code / channel / path).
       if (!guarded.ok) throw new IpcContractError(guarded.error);
-      const handler = handlers[channel];
+      const handler = handlers[channel as Exclude<IpcInvokeChannel, (typeof IPC)['avatarChoose']>];
       // Plus aucun forçage : `guarded.value` est `unknown` et `handler` accepte `unknown`, le
       // rétrécissement se fait dans le handler via `expectPayload`.
       return handler(guarded.value);
     });
   }
 
+  // Le choix d'image est asynchrone (boîte de dialogue), donc hors de la table `handlers` —
+  // même émetteur autorisé, même garde de contrat sur la réponse, mais un `await` légitime.
+  ipcMain.handle(IPC.avatarChoose, async (event, rawPayload: unknown) => {
+    if (!isTrustedSender(event.senderFrame?.url)) {
+      throw new Error(`émetteur IPC non autorisé pour ${IPC.avatarChoose}`);
+    }
+    const guarded = guardPayload('invoke', IPC.avatarChoose, rawPayload);
+    if (!guarded.ok) throw new IpcContractError(guarded.error);
+    if (!avatarStore) return { ok: false, reason: 'unreadable' } as const;
+    const picked = await dialog.showOpenDialog({
+      title: 'Concord',
+      properties: ['openFile'],
+      filters: [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp'] }],
+    });
+    if (picked.canceled || picked.filePaths.length !== 1) {
+      return { ok: false, reason: 'cancelled' } as const;
+    }
+    const path = picked.filePaths[0];
+    if (path === undefined) return { ok: false, reason: 'unreadable' } as const;
+    return avatarStore.importFromPath(path);
+  });
+
   // Aucun autre canal n'est écouté : `ipcMain.handle` sur une liste fermée, pas de wildcard.
-  console.info('[ipc] canaux enregistrés :', Object.keys(handlers).length, '· écrans :', listDisplays().length);
+  console.info('[ipc] canaux enregistrés :', Object.keys(handlers).length + 1, '· écrans :', listDisplays().length);
 }

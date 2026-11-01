@@ -80,11 +80,29 @@ export type SignalOut =
   | { kind: 'leave' };
 
 export type SignalIn =
-  | { kind: 'peer-joined'; peerId: string; name: string }
+  | { kind: 'peer-joined'; peerId: string; name: string; avatarRef?: string }
   | { kind: 'peer-left'; peerId: string }
   | { kind: SignalKind; from: string; payload: unknown }
+  | {
+      /**
+       * Image d'avatar reçue d'un pair — la réponse à un `avatar_get` émis pour une empreinte
+       * inconnue (SPEC-002, amendement 2026-10-31). `data` est le PNG en base64 déjà validé par le
+       * main (empreinte revérifiée + taille bornée) ; `null` = empreinte inconnue du répondant ou
+       * contenu corrompu → l'affichage reste sur les initiales.
+       */
+      kind: 'avatar-data';
+      from: string;
+      avatarRef: string;
+      data: string | null;
+    }
   | { kind: 'link'; state: 'connecting' | 'connected' | 'refused' | 'closed'; detail: string | null };
 ```
+
+> **Amendement 2026-10-31 (profil pseudo + avatar)** : `peer-joined` porte un `avatarRef`
+> facultatif (id de galerie embarquée ou empreinte SHA-256/16 hex d'une image locale) et un
+> quatrième sens `avatar-data` transporte la réponse binaire à une demande `avatar_get`. Le
+> binaire ne voyage JAMAIS dans le beacon mDNS ni dans le `join` — uniquement dans
+> `avatar_data`, sous la même borne de ligne 64 Ko que le reste du fil.
 
 ### 4.2 Moteur — le pilote de maillage, sans transport, sans horloge
 

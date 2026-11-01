@@ -46,10 +46,14 @@ export function applySignalToRoster(
   if (message.kind === 'peer-joined') {
     if (selfSignalingId !== null && message.peerId === selfSignalingId) return false;
     const name = typeof message.name === 'string' ? message.name.trim() : '';
+    const avatarRef = typeof message.avatarRef === 'string' && message.avatarRef.length > 0 ? message.avatarRef : undefined;
     return roster.addParticipant({
       id: message.peerId,
       // Un pair sans nom occupe une ligne : mieux vaut son identifiant qu'une ligne vide.
       name: name.length > 0 ? name : message.peerId,
+      // Empreinte d'avatar relayée telle quelle (déjà validée par le contrat) ; son absence est
+      // normale (ancienne version du pair) et l'affichage retombe sur les initiales.
+      ...(avatarRef !== undefined ? { avatarRef } : {}),
       muted: false,
       deafened: false,
       gain: 1,

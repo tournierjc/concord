@@ -10,9 +10,10 @@
  * NON VÉRIFIÉ ici : React non installable dans cet environnement (voir la livraison T3).
  */
 
-import { useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 
 import type { ParticipantDto } from '../shell/ipc-contract';
+import { avatarEmojiFor, isAvatarRef } from '../shell/avatar';
 import {
   MAX_OVERLAY_PARTICIPANTS,
   MAX_OVERLAY_WIDTH_PX,
@@ -39,6 +40,55 @@ export interface OverlayProps {
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).slice(0, 2);
   return parts.map((part) => part.charAt(0).toUpperCase()).join('') || '?';
+}
+
+/**
+ * La pastille d'un avatar d'overlay (SPEC-002, amendement 2026-10-31) : emoji de la galerie,
+ * image locale reçue, ou initiales — les mêmes règles qu'en salle, mêmes replis. L'aperçu d'une
+ * image personnalisée passe par le même canal `getAvatarImage` que la salle : si le main ne la
+ * connaît pas, ce sont les initiales, jamais un carré vide.
+ */
+function OverlayAvatar({ avatarRef, name }: { avatarRef: string | undefined; name: string }): JSX.Element {
+  const emoji = avatarEmojiFor(avatarRef);
+  const ref = avatarRef !== undefined && isAvatarRef(avatarRef) ? avatarRef : null;
+  const [png, setPng] = useState<string | null>(null);
+  useEffect(() => {
+    if (ref === null) {
+      setPng(null);
+      return;
+    }
+    let live = true;
+    void lanApi()
+      .getAvatarImage(ref)
+      .then((image) => {
+        if (live) setPng(image);
+      })
+      .catch(() => {
+        if (live) setPng(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [ref]);
+  if (emoji !== null) {
+    return (
+      <span className="overlay__initials" aria-hidden="true">
+        {emoji}
+      </span>
+    );
+  }
+  if (ref !== null && png !== null) {
+    return (
+      <span className="overlay__initials overlay__initials--image" aria-hidden="true">
+        <img className="overlay__avatar-image" src={`data:image/png;base64,${png}`} alt="" />
+      </span>
+    );
+  }
+  return (
+    <span className="overlay__initials" aria-hidden="true">
+      {initials(name)}
+    </span>
+  );
 }
 
 export function Overlay({
@@ -94,9 +144,7 @@ export function Overlay({
             title={participant.name}
           >
             <span className="overlay__halo" aria-hidden="true" />
-            <span className="overlay__initials" aria-hidden="true">
-              {initials(participant.name)}
-            </span>
+            <OverlayAvatar avatarRef={participant.avatarRef} name={participant.name} />
             {flagsKnown ? <span className="overlay__mute" aria-hidden="true" /> : null}
             <span className="visually-hidden">
               {participant.name}

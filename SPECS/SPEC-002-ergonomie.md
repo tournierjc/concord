@@ -84,7 +84,18 @@ Le tableau suivant complète ces quatre décisions (contraintes de rendu hérit�
 
 | Contrainte | Ce que ça interdit à l'écran | Comment le design l'applique |
 |---|---|---|
-| **Aucun compte, aucun login, aucun profil serveur, aucun « se connecter »** | champ e-mail, champ mot de passe, avatar de profil persistant, photo, bouton « Se connecter / S'inscrire », menu de compte en haut à droite | la seule identité est un **pseudo local** (`app.nickname.label`), un texte, sans image ni e-mail ; il vit dans l'en-tête de E1 et dans E3 ▸ Réseau, et n'est jamais envoyé ailleurs que sur le LAN |
+| **Aucun compte, aucun login, aucun profil serveur, aucun « se connecter »** | champ e-mail, champ mot de passe, avatar de profil **serveur**, bouton « Se connecter / S'inscrire », menu de compte en haut à droite | l'identité reste **100 % locale** (`app.nickname.label` + avatar choisi dans la galerie embarquée ou image prise sur le disque) : aucun compte, aucune e-mail, aucune photo téléversée ; rien de tout cela n'est envoyé ailleurs que sur le LAN — voir l'amendement ci-dessous |
+
+> **Amendement 2026-10-31 (directive produit) — profil = pseudo + avatar, galerie ET image locale.**
+> La ligne ci-dessus interdisait l'« avatar de profil persistant » ; elle est remplacée : le profil
+> est un **pseudo + un avatar**, tous deux purement locaux. L'avatar se choisit (1) dans une
+> **galerie embarquée** d'une quinzaine de dessins prédéfinis ou (2) par **« Choisir une image »**
+> (png/jpg/webp ≤ 2 Mo, redimensionnée en carré 256 px et stockée sous `userData/avatars/`).
+> Ce qui reste INTERDIT et tient la contrainte d'origine : tout compte, toute e-mail, tout
+> téléversement, tout avatar hébergé. Le fil de signalisation ne transporte que l'**empreinte**
+> (16 hex) de l'image, jamais le binaire ; un pair qui ne connaît pas l'empreinte la réclame par
+> `avatar_get` sur la signalisation LAN existante, et retombe sur les **initiales** en cas d'absence
+> ou de contenu corrompu. L'avatar ne quitte donc jamais le réseau local.
 | **Aucun cloud, aucune synchronisation** | « synchronisé », « en ligne », icône nuage, « vos données partout », « sauvegarde » | E3 ▸ Réseau affiche `settings.network.externalHelp` (« Aucun STUN, aucun TURN, aucun serveur hors du réseau local ») et `settings.about.nocloud` ; le mot « cloud » n'apparaît nulle part |
 | **Aucune mise à jour automatique** | bandeau « nouvelle version disponible », bouton « Redémarrer pour mettre à jour », spinner de vérification de version | E3 ▸ À propos n'affiche que `settings.about.version`, `license`, `local`, `nocloud` — aucun bouton de mise à jour, aucun appel réseau de version |
 | **Utilisable quand la liste des salons est vide (mode hors ligne complet)** | écran bloquant, modale obligatoire, bouton « Créer » grisé faute de réseau | E1.S3 (liste vide), E1.S5 (découverte en échec) et E1.S10 (aucune interface réseau) conservent **toujours** `[Créer un salon]` actif et la saisie du pseudo ; un salon créé hors ligne est jouable dès qu'un 2ᵉ participant arrive |
