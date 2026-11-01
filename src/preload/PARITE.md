@@ -3,16 +3,19 @@
 ## État mesuré au 2026-10-31 (cette section remplace les constats ci-dessous)
 
 Compté sur `src/shell/ipc-contract.ts` (`IPC`, `INVOKE_CHANNELS`, `EVENT_CHANNELS`) et
-`src/preload/index.ts` (9 abonnements, `subscribe` l.46) :
+`src/preload/index.ts` (13 abonnements, `subscribe`) :
 
-- **24 canaux** dans le contrat : **15 invoke** (`settingsGet`, `settingsSet`, `settingsOpen`,
-  `roomJoin`, `roomLeave`, `roomsDiscover`, `controlSetMute`, `controlSetDeafen`,
-  `controlSetPushToTalk`, `controlSetGain`, `overlaySet`, `speakingSet`, `signalSend`,
-  `avatarChoose`, `avatarGetImage`) et
-  **9 événements** (`eventParticipants`, `eventRoomState`, `eventRoomsDiscovered`,
+- **28 canaux** dans le contrat : **17 invoke** (`settingsGet`, `settingsSet`, `settingsOpen`,
+  `profileOpen`, `lobbyStatusGet`, `roomJoin`, `roomLeave`, `roomsDiscover`, `controlSetMute`,
+  `controlSetDeafen`, `controlSetPushToTalk`, `controlSetGain`, `overlaySet`, `speakingSet`,
+  `signalSend`, `avatarChoose`, `avatarGetImage`) et
+  **11 événements** (`eventParticipants`, `eventRoomState`, `eventRoomsDiscovered`,
   `eventControlState`, `eventSettingsChanged`, `eventOverlayGeometry`, `eventShortcutConflict`,
-  `eventSignal`, `eventSpeakingSet`).
-- Exposés au renderer : les 15 invoke + les 9 événements. Manquants : aucun. En trop : aucun.
+  `eventProfileOpen`, `eventDiscoveryStatus`, `eventSignal`, `eventSpeakingSet`).
+  (`profileOpen` / `eventProfileOpen` : porte du panneau profil pseudo + avatar.
+  `avatarChoose` / `avatarGetImage` : image locale et service de l'avatar aux pairs.
+  `lobbyStatusGet` / `eventDiscoveryStatus` : pied de lobby structuré et santé de la découverte.)
+- Exposés au renderer : les 17 invoke + les 11 événements. Manquants : aucun. En trop : aucun.
 - Les quatre écarts décrits plus bas sont **corrigés** :
   1. `room-bridge.ts` type son discriminant sur la **VALEUR** du canon
      (`{ channel: typeof IPC.eventRoomState; payload: RoomStateCore }`) et émet `IPC.eventRoomState` :

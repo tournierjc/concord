@@ -39,6 +39,26 @@ l'identifiant éphémère (`RoomStateDto.selfId`) au lieu d'un pseudo suivi de d
 (`RoomStateDto.signalingPort`, entier ou `null`) et le câblage. Empreinte `package.json` à cette
 re-mesure : `sha256 55b5af97…` (les empreintes du bandeau restent celles, datées, de T20).
 
+Note feature/discovery-lobby (2026-10-31, branche `feature/discovery-lobby` @ HEAD de la branche) —
+découverte PERMANENTE des salons dans le lobby. Mesuré dans le worktree, node v26.5.1, tsx embarqué :
+`npm run test:node` = **41 fichiers, exit=0, 823 tests · 823 pass · 0 fail** ; `tsc -p tsconfig.json
+--noEmit` exit=0 ; `tsc -p tsconfig.main.json --noEmit` exit=0 ; `tsc -p tsconfig.main.json` (émission,
+moitié de `npm run build`) exit=0 ; `vite build` (autre moitié) exit=0 ; `node design/check-i18n.mjs`
+`RESULT=PASS` (302 clés FR/EN, bundle synchronisé). Quatre fichiers **nouveaux** (+ une sonde d'exécution) :
+`tests/discovery-health.node.test.ts` (10 — l'échec mDNS et l'absence réseau remontent par
+`lan:event:discovery-status` au lieu d'un `console.warn`, `hasRoutableNetwork` pur : loopback seul et
+169.254/16 ne comptent pas), `tests/lobby-state.node.test.ts` (12 — regroupement `hôte:port`, tri
+libres/complets, **nom dupliqué ⇒ Rejoindre, jamais un hôte doublon**, vue `LobbyFooter` S1.10) et
+`tests/lobby-ipc.node.test.ts` (7 — canaux `eventDiscoveryStatus` / `lobbyStatusGet` / `profileOpen`
+validés dans les deux sens + câblage main/preload/écran) et `tests/lobby-hosting.node.test.ts`
+(9 — **exécution du main réel** sous doubles `electron`/`bonjour-service` posés par la sonde
+`tests/main-lobby-probe.ts` : la santé du bridge atteint le renderer avec la charge `{ health }`
+du canon et l'instantané du pied suit `method` sans redémarrage ; la boucle `reannounceHostedRoom`
+republie le TXT `participants` et retire l'annonce précédente ; le port du pied est la MESURE
+d'une vraie socket d'écoute, jamais 47821 recopié). Ces promesses n'étaient tenues que par des
+regex sur le texte source — un câblage silencieusement cassé laissait la suite verte ; elles sont
+désormais jouées. Le TXT `participants` est republié à chaque évolution du salon hébergé.
+
 **Le compte de `test:vitest` dépend de l'arbre de travail, pas du code** (mesuré T20) : `vitest run`
 n'a aucune configuration `test.exclude` dans `vite.config.ts`, il ramasse donc tout
 `*.{test,spec}.*` sous la racine, y compris les copies de captures **non versionnées** :

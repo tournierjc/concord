@@ -108,6 +108,41 @@ body {
   padding-top: var(--space-4);
 }
 
+/* En-tête E1 : titre de la liste à gauche, bouton d'identité à droite. L'emplacement identité
+   appartient à `feature/profile-lobby` (panneau profil complet) — seule la prise est posée ici. */
+.panel__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+/* LobbyFooter (SPEC-002 §3) : 32 px, padding horizontal `space.4`, fond `bg.surface`,
+   bordure haute `border.subtle`. */
+.lobby-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-height: 32px;
+  margin-top: var(--space-4);
+  padding-inline: var(--space-4);
+  border-top: var(--component-hairline) solid var(--color-border-subtle);
+  background: var(--color-bg-surface);
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.lobby-footer__offline {
+  margin: 0;
+  color: var(--color-text-secondary);
+}
+
+.lobby-footer__method,
+.lobby-footer__port {
+  margin: 0;
+}
+
 .room__header {
   display: flex;
   align-items: center;

@@ -14,11 +14,17 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import type {
   ControlStateDto,
+  LobbyStatusDto,
   ParticipantDto,
   RoomStateDto,
   RoomSummaryDto,
   ShortcutConflictDto,
 } from '../shell/ipc-contract';
+import {
+  groupDiscoveredRooms,
+  lobbyFooterView,
+  resolveCreateRoomAction,
+} from '../shell/lobby-state';
 import {
   NICKNAME_MAX_LENGTH,
   type NicknameError,
@@ -74,6 +80,8 @@ interface DiscoveryState {
 }
 
 const EMPTY_DISCOVERY: DiscoveryState = { phase: 'loading', rooms: [], error: null };
+
+const EMPTY_LOBBY_STATUS: LobbyStatusDto = { port: null, method: 'mdns', health: 'ok' };
 
 function messageOf(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
@@ -305,6 +313,18 @@ export function App(): JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [discovery, setDiscovery] = useState<DiscoveryState>(EMPTY_DISCOVERY);
+  // Pied de lobby : les trois mesures du main (port lu, méthode, santé), jamais recomposées ici.
+  const [lobbyStatus, setLobbyStatus] = useState<LobbyStatusDto>(EMPTY_LOBBY_STATUS);
+  // Notification du main : `openProfile()` a été demandé (bouton d'identité, puis panneau complet
+  // sur `feature/profile-lobby`). Le champ `IdentityRow` ci-dessous est l'éditeur de pseudo HISTORIQUE
+  // de `main` (SPEC-002 S1.11, gardé par tests/identity-row.node.test.ts) : il reste la voie de saisie
+  // en attendant le panneau. La branche `feature/profile-lobby` le remplacera par son panneau (pseudo +
+  // avatar + upload) — la fusion se fait SUR CE BLOC, pas autour : ne pas dupliquer un second champ ici.
+  const openProfile = useCallback(() => {
+    void api.openProfile().catch(() => {
+      // Le main est absent (document hors application) : rien à ouvrir, rien à crier.
+    });
+  }, [api]);
 
   const locale: Locale = settings?.locale ?? 'fr';
   const t = useMemo(() => createTranslator(locale), [locale]);
@@ -329,6 +349,25 @@ export function App(): JSX.Element {
         applyTheme(document.documentElement, next.theme);
       }),
       api.onShortcutConflict(setShortcutConflict),
+      api.onDiscoveryStatus(({ health }) => {
+        // La santé pilote le bandeau ET la méthode du pied — les deux viennent du même instantané
+        // du main. On ne fusionne pas l'objet : `{ port, method, health }` arrive ensemble, et une
+        // fusion laisserait `method` en retard d'un tour sur `health`.
+        setLobbyStatus((previous) => ({ ...previous, health }));
+        void api
+          .getLobbyStatus()
+          .then((status) => {
+            if (active) setLobbyStatus(status);
+          })
+          .catch(() => {
+            // Main injoignable : on garde la dernière vue connue plutôt que d'inventer une méthode.
+          });
+      }),
+      api.onProfileOpen(() => {
+        // Sur `feature/profile-lobby`, cet appel ouvrira le panneau profil complet (pseudo +
+        // avatar). En attendant, rien d'autre à faire ici : c'est cette branche qui possédera
+        // le panneau — poser un ersatz ici garantirait un conflit de fusion et deux panneaux.
+      }),
     ];
     return () => {
       active = false;
@@ -365,8 +404,23 @@ export function App(): JSX.Element {
     const unsubscribe = api.onRoomsDiscovered((found) => {
       if (!active) return;
       setDiscovery({ phase: 'ready', rooms: found, error: null });
+      // Le pied de lobby suit la même cadence que la liste : le port effectif change quand un
+      // salon s'ouvre ou se ferme, et seule la mesure du main le sait. Un pied figé à l'instant
+      // du montage afficherait un port mort après un leave — la garantie « mesure » veut « à jour ».
+      void api.getLobbyStatus().then((status) => {
+        if (active) setLobbyStatus(status);
+      }).catch(() => {
+        // Main injoignable : on garde la dernière vue connue plutôt que d'inventer un port.
+      });
     });
     void refreshRooms();
+    // Le pied de lobby se rafraîchit avec la liste : le port effectif change quand un salon
+    // s'ouvre ou se ferme, et le main est le seul à le connaître (mesure, jamais réglage).
+    void api.getLobbyStatus().then((status) => {
+      if (active) setLobbyStatus(status);
+    }).catch(() => {
+      // Main injoignable : on garde la dernière vue connue plutôt que d'inventer un port.
+    });
     return () => {
       active = false;
       unsubscribe();
@@ -440,6 +494,16 @@ export function App(): JSX.Element {
         </div>
       </header>
 
+      {screen === 'rooms' && lobbyStatus.health !== 'ok' ? (
+        <div className="banner banner--warning" role="status">
+          <p>
+            {lobbyStatus.health === 'offline'
+              ? `${t('discovery.offline.title')} ${t('discovery.offline.body')}`
+              : `${t('discovery.error.mdns.title')} ${t('discovery.error.mdns.body')}`}
+          </p>
+        </div>
+      ) : null}
+
       {screen === 'rooms' ? (
         <IdentityRow
           locale={locale}
@@ -494,8 +558,12 @@ export function App(): JSX.Element {
           locale={locale}
           discovery={discovery}
           nickname={(settings?.nickname ?? '').trim()}
+          lobbyStatus={lobbyStatus}
+          hosting={room.roomId !== null}
+          localRoom={{ roomId: room.roomId, participantCount: room.participantCount }}
           onJoin={(roomId, roomName) => void joinRoom(roomId, roomName)}
           onRefresh={() => void refreshRooms()}
+          onOpenProfile={openProfile}
         />
       ) : (
         <Room
@@ -532,45 +600,85 @@ interface RoomListProps {
   discovery: DiscoveryState;
   /** Pseudo local (rogné, vide si non saisi) : sert la suggestion « Salon de … ». */
   nickname: string;
+  /** Les trois mesures du pied de lobby, lues du main (jamais recomposées ici). */
+  lobbyStatus: LobbyStatusDto;
+  /** Un salon est déjà ouvert sur CETTE machine : `[Créer]` est hors-jeu (S1.8). */
+  hosting: boolean;
+  /** Population réelle du salon local, substituée à l'annonce pour la ligne de CE poste. */
+  localRoom: { roomId: string | null; participantCount: number };
   onJoin: (roomId: string, roomName: string) => void;
   onRefresh: () => void;
+  /** Bouton d'identité : ouvre le panneau profil (implémentation complète : `feature/profile-lobby`). */
+  onOpenProfile: () => void;
 }
 
 /**
  * Liste des salons (E1). La découverte appartient au main : cet écran n'affiche que ce que l'IPC
- * lui envoie (`RoomSummaryDto`), et ne fabrique aucun salon fictif. Quatre états distincts :
- * chargement, liste vide, N salons, erreur.
+ * lui envoie (`RoomSummaryDto`), et ne fabrique aucun salon fictif. La liste est PERMANENTE —
+ * elle reste affichée pendant la recherche et le rafraîchissement (S1.7 : aucune liste qui
+ * disparaît sous les yeux), et le champ « créer » est un raccourci de REJOINDRE quand un salon
+ * du réseau porte déjà le nom tapé (règle anti-doublon, `resolveCreateRoomAction`).
  */
 export function RoomList({
   locale,
   discovery,
   nickname,
+  lobbyStatus,
+  hosting,
+  localRoom,
   onJoin,
   onRefresh,
+  onOpenProfile,
 }: RoomListProps): JSX.Element {
   const t = createTranslator(locale);
   const [draftName, setDraftName] = useState('');
   const { phase, rooms, error: discoveryError } = discovery;
   const busy = phase !== 'ready';
+  const offline = lobbyStatus.health === 'offline';
+  const grouped = groupDiscoveredRooms(rooms, localRoom);
+  // Un salon local déjà ouvert bloque la création (S1.8) — mais JAMAIS un clic « Rejoindre »
+  // sur une ligne découverte : rejoindre un autre salon depuis le sien est un geste voulu.
+  const action = resolveCreateRoomAction(
+    { draft: draftName, alreadyHosting: hosting },
+    grouped,
+  );
+  const footer = lobbyFooterView(lobbyStatus);
+
+  const runCreateAction = (): void => {
+    if (action.kind === 'join') {
+      // Le nom part tel que le réseau l'affiche, pas tel qu'il a été tapé : deux postes qui
+      // écrivent « salon cuisine » et « Salon Cuisine » rejoignent BIEN le même salon.
+      onJoin(action.room.roomId, action.room.roomName);
+      return;
+    }
+    if (action.kind === 'create') onJoin(action.name, action.name);
+  };
 
   const status =
     phase === 'loading'
       ? t('discovery.state.searching')
       : phase === 'refreshing'
         ? t('discovery.state.refreshing')
-        : rooms.length === 0
+        : grouped.length === 0
           ? t('discovery.empty.title')
-          : t(rooms.length === 1 ? 'discovery.state.count.one' : 'discovery.state.count.other', {
-              count: rooms.length,
+          : t(grouped.length === 1 ? 'discovery.state.count.one' : 'discovery.state.count.other', {
+              count: grouped.length,
             });
 
   return (
     <section className="panel" aria-labelledby="rooms-title">
-      <h2 id="rooms-title" className="panel__title">
-        {t('room.list.title')}
-      </h2>
+      <div className="panel__heading">
+        <h2 id="rooms-title" className="panel__title">
+          {t('room.list.title')}
+        </h2>
+        {/* Emplacement identité, en haut à droite : le panneau profil complet (avatar, galerie,
+            upload) est la propriété de `feature/profile-lobby` — ici, le bouton ouvre, point. */}
+        <button type="button" className="button button--compact" onClick={onOpenProfile}>
+          {nickname.length > 0 ? nickname : t('app.nickname.placeholder')}
+        </button>
+      </div>
 
-      <p className="panel__status" role="status">
+      <p className="panel__status" role="status" aria-live="polite">
         {status}
       </p>
 
@@ -582,18 +690,27 @@ export function RoomList({
             {t('common.retry')}
           </button>
         </div>
-      ) : rooms.length === 0 ? (
-        <div className="empty">
+      ) : grouped.length === 0 ? (
+        <div className="empty" role="status">
           <p className="empty__title">
-            {phase === 'loading' ? t('discovery.state.searching') : t('discovery.empty.title')}
+            {phase === 'loading'
+              ? t('discovery.state.searching')
+              : offline
+                ? t('discovery.state.empty.offline')
+                : t('discovery.empty.title')}
           </p>
           <p className="empty__body">
-            {phase === 'loading' ? t('discovery.state.searchingHint') : t('discovery.empty.body')}
+            {phase === 'loading'
+              ? t('discovery.state.searchingHint')
+              : offline
+                ? t('discovery.offline.body')
+                : t('discovery.empty.body')}
           </p>
         </div>
       ) : (
+        // La liste reste rendue telle quelle même pendant un rafraîchissement (S1.7).
         <ul className="room-list">
-          {rooms.map((room) => (
+          {grouped.map((room) => (
             <li key={room.roomId} className="room-list__row">
               <span className="room-list__name" title={t('room.row.host', { name: room.host })}>
                 {room.roomName}
@@ -604,11 +721,12 @@ export function RoomList({
               <button
                 type="button"
                 className="button"
-                onClick={() => onJoin(room.roomId, room.roomName)}
+                aria-disabled={room.full}
+                onClick={() => {
+                  if (!room.full) onJoin(room.roomId, room.roomName);
+                }}
               >
-                {room.participantCount >= MAX_ROOM_PARTICIPANTS
-                  ? t('room.row.full')
-                  : t('room.row.join')}
+                {room.full ? t('room.row.full') : t('room.row.join')}
               </button>
             </li>
           ))}
@@ -629,6 +747,13 @@ export function RoomList({
             }
             onChange={(event) => setDraftName(event.target.value)}
           />
+          {action.kind === 'join' ? (
+            // Le nom tapé existe déjà sur le réseau : c'est la promesse anti-hôte-doublon,
+            // visible AVANT le clic, pas une erreur après.
+            <span className="field__help" role="status">
+              {t(action.messageKey)}
+            </span>
+          ) : null}
         </label>
         <button type="button" className="button" onClick={onRefresh} disabled={busy}>
           {t('common.refresh')}
@@ -636,12 +761,31 @@ export function RoomList({
         <button
           type="button"
           className="button button--primary"
-          disabled={draftName.trim().length === 0}
-          onClick={() => onJoin(draftName.trim(), draftName.trim())}
+          disabled={action.kind === 'blocked'}
+          onClick={runCreateAction}
         >
-          {t('room.create.confirm')}
+          {action.kind === 'join' ? t('room.row.join') : t('room.create.confirm')}
         </button>
       </div>
+
+      {/* LobbyFooter (SPEC-002 §3) : 32 px, bordure haute, `bg.surface`. Trois champs structurés
+          issus du main — hors-ligne, le port et la méthode disparaissent (S1.10). */}
+      <footer className="lobby-footer" aria-label={t('room.list.title')}>
+        {footer.offline ? (
+          <p className="lobby-footer__offline">{t(footer.offlineKey)}</p>
+        ) : (
+          <>
+            <p className="lobby-footer__method">
+              {t('discovery.footer.method', { method: t(footer.methodKey) })}
+            </p>
+            <p className="lobby-footer__port">
+              {footer.portKey === 'discovery.footer.port' && footer.port !== null
+                ? t('discovery.footer.port', { port: footer.port })
+                : t('discovery.footer.port.none')}
+            </p>
+          </>
+        )}
+      </footer>
     </section>
   );
 }
