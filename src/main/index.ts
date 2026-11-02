@@ -171,6 +171,16 @@ if (!hasLock) {
   });
   // Doit être appelé avant `app.whenReady()`.
   registerAppScheme();
+  // ICE sous Chromium (2026-11-02, retour JC : « Pas de flux audio » Linux ↔ Windows) : sans
+  // STUN, Chromium ne collecte que des candidats `host`, et depuis Chrome 109 il les publie en
+  // noms mDNS (`xxxx.local`) par confidentialité — un pair qui ne résout pas le mDNS de l'autre
+  // (pare-feu, réseau, pile mDNS absente) n'a AUCUN candidat à tester et le lien meurt en
+  // `noFlow`. Le correctif est la LEVÉE de ce masquage (`WebRtcHideLocalIpsWithMdns` désactivé) :
+  // les candidats `host` partent en adresses littérales, que tout pair LAN peut tester. Aucune
+  // exposition ajoutée : `iceServers: []` interdit srflx/relay et la porte `isLanCandidate`
+  // refuse hors LAN avant émission — seuls des candidats déjà LAN-partageables circulent.
+  // (Un appel ultérieur de même clé gagne : le réglage reste unique, jamais fusionné.)
+  app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');
   void app.whenReady().then(bootstrap);
 }
 
