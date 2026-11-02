@@ -126,6 +126,14 @@ interface LinkState {
   link: VoiceLink | null;
   /** Flux reçus sans identité de pair : comptés et tracés, jamais affichés (AD-17 / D3). */
   unattributed: number;
+  /**
+   * Identités de SOI (2026-11-02, retour JC : deux lignes média au même pseudo). Deux id
+   * représentent la même personne : `localId` (celui du pont, la ligne « (Vous) ») et l'id que le
+   * serveur de signalisation a attribué à NOTRE connexion (`p1`/`p2` — celui que l'hôte reçoit en
+   * se connectant à son propre serveur). Un `peer-joined` porteur de l'un des deux est un écho de
+   * nous-même : il ne crée JAMAIS une ligne de pair média.
+   */
+  selfIds: Set<string>;
 }
 
 interface VoiceSession {
@@ -372,6 +380,10 @@ function handleSignal(state: LinkState, message: SignalIn): void {
       return;
     }
     case 'peer-joined': {
+      // Pair-boucle (2026-11-02, retour JC : deux lignes média au même pseudo) : le serveur de
+      // signalisation attribue un id à NOTRE connexion et le réannonce dans les `hello`/`join`.
+      // Un pair portant l'une de nos identités est un écho de nous-même — jamais une ligne de plus.
+      if (state.selfIds.has(message.peerId)) return;
       // L'élément audio existe AVANT le flux : aucune arrivée de flux ne peut le précéder.
       // Aucun candidat n'est rejoué ici : l'ICE appartient au maillage (SPEC-009 §1(b)).
       state.sinks.ensure(message.peerId);
@@ -710,6 +722,13 @@ export interface VoiceSettings {
  */
 export interface OpenVoiceOptions {
   readonly makeBeat?: () => MeterBeatDriver;
+  /**
+   * Identités de soi à filtrer des `peer-joined` (2026-11-02). En plus de `localId` (toujours
+   * filtré), l'appelant passe l'id que le serveur de signalisation a attribué à NOTRE connexion
+   * (`link.selfId` du main, transmis par `useVoicePlane`) — sans lui, l'auto-annonce de l'hôte
+   * crée une seconde ligne média au même pseudo.
+   */
+  readonly selfIds?: readonly string[];
 }
 
 /**
@@ -732,6 +751,9 @@ export function openVoice(
     sinks: createSinks(),
     link: null,
     unattributed: 0,
+    // `localId` est toujours une identité de soi ; l'appelant peut en ajouter (l'id serveur de
+    // notre connexion). Un id vide ne filtre rien (le contrat interdit une ligne à '').
+    selfIds: new Set<string>([localId, ...(options?.selfIds ?? [])].filter((id) => id.length > 0)),
   };
 
   let current: VoiceSession | null = null;
@@ -880,6 +902,13 @@ export interface UseVoicePlaneOptions {
    * prend effet à la session suivante (la clé change, ou on quitte/rentre).
    */
   readonly settings?: VoiceSettings;
+  /**
+   * Identités de soi supplémentaires à filtrer des `peer-joined` (2026-11-02, retour JC : deux
+   * lignes média au même pseudo). L'id que le serveur de signalisation a attribué à NOTRE
+   * connexion (`signalingLink.selfId`, seul le main le connaît) : le passer au hook évite que
+   * l'auto-annonce de l'hôte devienne une seconde ligne de pair. Absent = seul `localId` filtre.
+   */
+  readonly selfIds?: readonly string[];
 }
 
 /**
@@ -887,14 +916,18 @@ export interface UseVoicePlaneOptions {
  * applique l'intention de transmission. Le rendu ne dépend que de `VoiceSnapshot`.
  */
 export function useVoicePlane(options: UseVoicePlaneOptions): VoiceSnapshot {
-  const { enabled, localId, roomId, wantTransmit, phase, settings } = options;
+  const { enabled, localId, roomId, wantTransmit, phase, settings, selfIds } = options;
   const current = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
   // (1) La SESSION suit la clé, pas la phase : une reconnexion ne doit pas fermer/rouvrir en
   // boucle, et `openVoice` est idempotent par clé (au plus un maillage par salon).
   useEffect(() => {
     if (!enabled || roomId === null) return;
-    openVoice(`${roomId}|${localId}`, localId, settings);
+    openVoice(`${roomId}|${localId}`, localId, settings, {
+      // Le filtre pair-boucle suit la session : un selfIds vide = seul localId filtre (jamais un
+      // ancien set qui survivrait à une session précédente).
+      selfIds: selfIds ?? [],
+    });
     return () => {
       closeVoice();
     };

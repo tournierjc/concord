@@ -235,6 +235,13 @@ export interface RoomStateDto {
   /** Identifiant du participant local dans la liste. */
   selfId: string | null;
   /**
+   * Identité que le serveur de signalisation a attribuée à NOTRE connexion (`signalingLink.selfId`,
+   * lu après le `hello`) — `null` hors salon ou avant le `hello`. Le renderer s'en sert pour
+   * ignorer les `peer-joined` qui sont un écho de nous-même (2026-11-02, retour JC : deux lignes
+   * média au même pseudo). Ce n'est PAS `selfId` : celui-là est l'id de la ligne locale du pont.
+   */
+  selfSignalingId: string | null;
+  /**
    * Port de signalisation RÉELLEMENT utilisé pour ce salon : celui que ce poste écoute quand il
    * héberge, ou celui **lu** dans l'annonce du salon quand il est client ; `null` hors salon.
    *
@@ -254,7 +261,7 @@ export interface RoomStateDto {
  * coquille l'enrichit en `RoomStateDto` avant publication. Sans cette séparation, le pont devrait
  * écrire `signalingPort: null` — c'est-à-dire affirmer « aucun port » sur un salon qui en a un.
  */
-export type RoomStateCore = Omit<RoomStateDto, 'signalingPort'>;
+export type RoomStateCore = Omit<RoomStateDto, 'signalingPort' | 'selfSignalingId'>;
 
 /** Ce que la découverte sait de sa propre santé (SPEC-002 S1.4 / S1.5 / S1.10). */
 export type DiscoveryHealthDto = 'ok' | 'mdns-down' | 'offline';
@@ -1191,6 +1198,7 @@ function guardEvent(channel: string, raw: unknown): GuardResult<unknown> {
         'phase',
         'participantCount',
         'selfId',
+        'selfSignalingId',
         'signalingPort',
         'notice',
       ] as const;
@@ -1201,12 +1209,13 @@ function guardEvent(channel: string, raw: unknown): GuardResult<unknown> {
       const phase = guard.oneOf(payload, 'phase', 'payload', ROOM_PHASES);
       const participantCount = guard.number(payload, 'participantCount', 'payload', 0, IPC_MAX_PARTICIPANTS);
       const selfId = guard.nullableString(payload, 'selfId', 'payload', 64);
+      const selfSignalingId = guard.nullableString(payload, 'selfSignalingId', 'payload', 64);
       const signalingPort = guard.nullablePort(payload, 'signalingPort', 'payload', 1, 65535);
       const notice = guard.nullableString(payload, 'notice', 'payload', 240);
       if (guard.errors.length > 0) return guardError(channel, guard);
       return {
         ok: true,
-        value: { roomId, roomName, phase, participantCount, selfId, signalingPort, notice },
+        value: { roomId, roomName, phase, participantCount, selfId, selfSignalingId, signalingPort, notice },
       };
     }
     case IPC.eventControlState: {

@@ -68,6 +68,8 @@ const EMPTY_ROOM: RoomStateDto = {
   phase: 'idle',
   participantCount: 0,
   selfId: null,
+  // id serveur de notre connexion (filtre pair-boucle du plan média, 2026-11-02) — hors salon : aucun.
+  selfSignalingId: null,
   // Hors salon, aucun port n'a été lu : l'UI dit « aucun » au lieu d'afficher un chiffre supposé.
   signalingPort: null,
   notice: null,

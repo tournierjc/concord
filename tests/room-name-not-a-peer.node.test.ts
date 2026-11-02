@@ -36,8 +36,9 @@ describe('garde structurelle — le nom du salon ne peut pas devenir un nom de p
   });
 
   it('voice : l’unique source du nom d’un pair est `peer-joined.message.name`', () => {
-    // `upsertPeer` reçoit `name` du message ; `handleSignal` ne l'invente pas.
-    assert.match(VOICE, /case 'peer-joined':[\s\S]{0,300}name: message\.name/);
+    // `upsertPeer` re\u00e7oit `name` du message ; `handleSignal` ne l'invente pas. La fen\u00eatre est
+    // \u00e9largie (1200) depuis la garde pair-boucle ajout\u00e9e dans le m\u00eame cas en 2026-11-02.
+    assert.match(VOICE, /case 'peer-joined':[\s\S]{0,1200}name: message\.name/);
     // La table des pairs média n'a pas d'autre affectation de `name` que celui du message
     // (l'appelant du défaut — un pair inconnu — reste sans nom et s'affiche sous son id).
     const nameAssignments = VOICE.match(/upsertPeer\([^)]*name:/g) ?? [];

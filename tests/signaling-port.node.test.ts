@@ -104,6 +104,8 @@ function roomState(overrides: Record<string, unknown> = {}): Record<string, unkn
     phase: 'connected',
     participantCount: 1,
     selfId: 'self',
+    // id serveur de notre connexion (filtre pair-boucle, 2026-11-02) : présent ou null.
+    selfSignalingId: 'p1',
     signalingPort: 47821,
     notice: null,
     ...overrides,

@@ -205,6 +205,8 @@ test('eventRoomState : bornes respectées', () => {
     phase: 'connected',
     participantCount: 3,
     selfId: 'p1',
+    // id serveur de notre connexion (filtre pair-boucle, 2026-11-02) : null ou chaîne courte.
+    selfSignalingId: 'p2',
     // Port de signalisation effectif : une MESURE (socket écoutée, ou port lu dans l'annonce), jamais
     // la valeur des réglages. `null` hors salon, entier sinon (SPEC-001 A5, SPEC-002 D1).
     signalingPort: 47821,

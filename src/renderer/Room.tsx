@@ -134,6 +134,10 @@ export function Room({
   const voice: VoiceSnapshot = useVoicePlane({
     enabled: room.roomId !== null,
     localId: room.selfId ?? '',
+    // Pair-boucle (2026-11-02, retour JC é : deux lignes média au même pseudo) : l'id que le
+    // serveur de signalisation a attribué à NOTRE connexion. Le passer au hook évite que
+    // l'auto-annonce de l'hôte (réçue dans les `hello`/`join`) devienne une seconde ligne.
+    selfIds: room.selfSignalingId === null ? [] : [room.selfSignalingId],
     roomId: room.roomId,
     // Mode VAD : le micro reste OUVERT (c'est la mesure qui décide), le PTT ne pilote plus
     // l'intention — sinon un clic sur « parler » en VAD fermerait la piste au relâchement.

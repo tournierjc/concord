@@ -514,7 +514,11 @@ function createOverlay(): void {
   // déjà en cours resterait éteinte. On rejoue le dernier ensemble connu, tel quel.
   overlay.getWindow()?.webContents.once('did-finish-load', () => {
     // Created mid-session: the room events it subscribes to have already been sent.
-    sendEvent(IPC.eventRoomState, { ...bridge.getRoomState(), signalingPort: currentSignalingPort() }, 'overlay');
+    sendEvent(IPC.eventRoomState, {
+      ...bridge.getRoomState(),
+      signalingPort: currentSignalingPort(),
+      selfSignalingId: signalingLink?.selfId ?? null,
+    }, 'overlay');
     sendEvent(IPC.eventParticipants, bridge.getParticipants(), 'overlay');
     publishSpeaking(speakingNow);
     syncOverlayGeometry();
@@ -678,7 +682,10 @@ async function hostRoomFromSettings(name: string): Promise<boolean> {
     return false;
   }
   bridge.setSelfAvatar(avatarRefForJoin(settings.avatar) ?? null);
-  startSignalingLink(state.roomId, name, state.selfId, avatarRefForJoin(settings.avatar));
+  // Le tuyau porte le NOM DU PARTICIPANT (réglages), jamais le nom du salon : le `join` du pont
+  // décrit le SALON (`name` ici), et le passer tel quel faisait apparaître le nom du salon comme
+  // ligne de pair média (capture JC « gf », 02/11/2026 — le flux média n'était pas nommé).
+  startSignalingLink(state.roomId, resolveDisplayName(settings.nickname, osUserName()), state.selfId, avatarRefForJoin(settings.avatar));
   return true;
 }
 
@@ -903,7 +910,11 @@ function forwardBridgeEvent(event: BridgeEvent): void {
   // L'état de salon part enrichi du port effectif : il n'existe que dans le main (socket d'écoute,
   // annonces lues), et l'UI n'a pas le droit de l'inventer.
   if (event.channel === IPC.eventRoomState) {
-    sendEvent(event.channel, { ...event.payload, signalingPort: currentSignalingPort() });
+    sendEvent(event.channel, {
+      ...event.payload,
+      signalingPort: currentSignalingPort(),
+      selfSignalingId: signalingLink?.selfId ?? null,
+    });
   } else {
     sendEvent(event.channel, event.payload);
   }
@@ -1242,7 +1253,8 @@ function registerIpcHandlers(): void {
           persistLastHostedRoom({ name: join.name.trim(), capacity: MAX_ROOM_PARTICIPANTS });
         }
       }
-      return state;
+      // La coquille enrichit le DTO de ce que le pont ignore (port lu, id serveur du tuyau).
+      return { ...state, signalingPort: currentSignalingPort(), selfSignalingId: signalingLink?.selfId ?? null };
     },
     [IPC.roomLeave]: () => {
       stopSignalingLink('départ du salon');
@@ -1254,7 +1266,7 @@ function registerIpcHandlers(): void {
       // seul (reconnexion, fermeture de l'app) et ne touche RIEN ici : la mesure survit, et le
       // prochain démarrage retrouvera le salon.
       persistLastHostedRoom(null);
-      return bridge.leave();
+      return { ...bridge.leave(), signalingPort: null, selfSignalingId: null };
     },
     // La charge utile a déjà été validée par `guardPayload(IPC.signalSend, …)` : ici on ne
     // fait que la passer au tuyau, qui applique en plus le filtre ICE LAN.
