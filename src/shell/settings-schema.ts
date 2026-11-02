@@ -120,10 +120,50 @@ export interface UpdateSettings {
 export type UpdateSettingsPatch = { auto: boolean };
 
 /**
- * Un patch partiel des réglages : même forme que `Partial<Settings>`, sauf le groupe `update`
- * — l'UI n'a le droit d'écrire que l'interrupteur `auto`, jamais les mesures du service.
+ * Salon automatique à la reprise (2026-11-02, « recréer mon salon au démarrage »).
+ *
+ * `auto` : à l'ÉTEINT, aucun recréage n'est armé au démarrage et AUCUNE mesure n'est écrite — la
+ * lecture des réglages ne compte pas comme action (même profil que `update.auto`). `true` par
+ * défaut : JC veut l'automatique, et un fichier écrit avant ce changement ne doit rien éteindre en
+ * silence (même rétro-compat que `duckOthers`).
+ *
+ * `lastHosted` est une MESURE du main : la dernière session où CETTE machine a réellement hébergé
+ * un salon (nom, capacité), ou `null` quand l'utilisateur a quitté son salon VOLONTAIREMENT
+ * (quitter = intention de ne pas reprendre ; éjection ou coupure = la mesure reste en place).
+ * Une reprise de session ne recrée donc jamais un salon que la personne a fermé elle-même. Les
+ * capacités sont une CONSTANTe du maillage (`MAX_ROOM_PARTICIPANTS`), pas un réglage : seul le nom
+ * est mesuré. Jamais un port (il est mesuré au bind), jamais un avatar (réglage du profil), jamais
+ * un identifiant secret.
  */
-export type SettingsPatch = Partial<Omit<Settings, 'update'>> & { update?: UpdateSettingsPatch };
+export interface RoomSettings {
+  auto: boolean;
+  lastHosted: RoomLastHosted | null;
+}
+
+/** La forme persistée du dernier salon hébergé : le nom affiché + la capacité promise au `join`. */
+export interface RoomLastHosted {
+  /** Nom du salon tel qu'il s'affiche (rogné, non vide, ≤ 32 caractères). */
+  name: string;
+  /** Capacité promise (le plafond du maillage, 8) — recopiée telle quelle au `join` automatique. */
+  capacity: number;
+}
+
+/**
+ * Un patch du groupe `room` : l'interrupteur seul. `lastHosted` est une MESURE du main (écrite à
+ * l'hébergement, effacée au départ volontaire), jamais saisie par l'UI — même patron que
+ * `update.checkedAt` (2026-11-01).
+ */
+export type RoomSettingsPatch = { auto: boolean };
+
+/**
+ * Un patch partiel des réglages : même forme que `Partial<Settings>`, sauf le groupe `update`
+ * (l'UI n'écrit que l'interrupteur `auto`, jamais les mesures du service) et le groupe `room`
+ * (l'UI n'écrit que l'interrupteur `auto`, jamais `lastHosted`).
+ */
+export type SettingsPatch = Partial<Omit<Settings, 'update' | 'room'>> & {
+  update?: UpdateSettingsPatch;
+  room?: RoomSettingsPatch;
+};
 
 export interface Settings {
   version: number;
@@ -143,6 +183,8 @@ export interface Settings {
   network: NetworkSettings;
   /** Mises à jour (avenant SPEC-006b, 2026-11-01) — la dérogation et ses mesures, voir `UpdateSettings`. */
   update: UpdateSettings;
+  /** Salon automatique à la reprise (2026-11-02) — l'interrupteur et la mesure, voir `RoomSettings`. */
+  room: RoomSettings;
 }
 
 export function defaultSettings(): Settings {
@@ -185,6 +227,12 @@ export function defaultSettings(): Settings {
       auto: true,
       checkedAt: null,
       lastSeenVersion: null,
+    },
+    room: {
+      // Même profil que `update.auto` : l'automatique est voulu par défaut, et aucune reprise
+      // n'est promise tant qu'aucun salon n'a été réellement hébergé (`lastHosted: null`).
+      auto: true,
+      lastHosted: null,
     },
   };
 }
@@ -489,7 +537,7 @@ export function signalingPortCandidates(): number[] {
 
 // --- Validation v1 ---------------------------------------------------------------------------
 
-const TOP_KEYS = ['version', 'locale', 'theme', 'nickname', 'avatar', 'audio', 'talk', 'overlay', 'network', 'update'] as const;
+const TOP_KEYS = ['version', 'locale', 'theme', 'nickname', 'avatar', 'audio', 'talk', 'overlay', 'network', 'update', 'room'] as const;
 const AUDIO_KEYS = [
   'inputDeviceId',
   'outputDeviceId',
@@ -504,6 +552,10 @@ const NETWORK_KEYS = ['signalingPort', 'discovery'] as const;
 const UPDATE_KEYS = ['auto', 'checkedAt', 'lastSeenVersion'] as const;
 /** Les cles de mesure du service : le renderer n'a aucun droit d'ecriture dessus (2026-11-01). */
 const UPDATE_MEASURE_KEYS: readonly string[] = ['checkedAt', 'lastSeenVersion'];
+const ROOM_KEYS = ['auto', 'lastHosted'] as const;
+/** La mesure du main (dernier salon hébergé) : le renderer n'a aucun droit d'écriture dessus (2026-11-02). */
+const ROOM_MEASURE_KEYS: readonly string[] = ['lastHosted'];
+const LAST_HOSTED_KEYS = ['name', 'capacity'] as const;
 const POSITION_KEYS = ['x', 'y'] as const;
 const LOCALES: readonly Locale[] = ['fr', 'en'];
 const THEMES: readonly Theme[] = ['dark', 'light', 'system'];
@@ -637,6 +689,44 @@ function readUpdateSection(ctx: Ctx, source: Dict): UpdateSettings {
   return { auto, checkedAt, lastSeenVersion };
 }
 
+/**
+ * Lit le groupe `room` (2026-11-02, recréation automatique du salon) avec sa RÉTRO-COMPAT : le
+ * groupe ENTIER peut être absent d'un fichier écrit avant ce changement ⇒ défauts (`auto: true`,
+ * `lastHosted: null`) ; un groupe PRÉSENT doit être un objet, `auto` PRÉSENT doit être un booléen,
+ * et `lastHosted` PRÉSENT doit être `{ name, capacity }` sous les bornes du maillage — une valeur
+ * hors forme est une erreur, jamais une réparation silencieuse (même politique que
+ * `readUpdateSection`). `name` est rogné et borné à 32 caractères (même borne que le nom de salon
+ * du contrat) ; `capacity` est l'entier du plafond du maillage, rien d'autre.
+ */
+function readRoomSection(ctx: Ctx, source: Dict): RoomSettings {
+  const value = source['room'];
+  if (value === undefined) return defaultSettings().room;
+  if (!isPlainObject(value)) {
+    fail(ctx, 'room', 'type', 'section room doit être un objet');
+    return defaultSettings().room;
+  }
+  checkUnknownKeys(ctx, value, ROOM_KEYS, 'room');
+  const auto = readBooleanWithDefault(ctx, value, 'auto', 'room', true);
+  const rawLastHosted = value['lastHosted'];
+  let lastHosted: RoomLastHosted | null = null;
+  if (rawLastHosted !== undefined && rawLastHosted !== null) {
+    if (!isPlainObject(rawLastHosted)) {
+      fail(ctx, 'room.lastHosted', 'type', 'room.lastHosted doit être un objet {name, capacity} ou null');
+    } else {
+      checkUnknownKeys(ctx, rawLastHosted, LAST_HOSTED_KEYS, 'room.lastHosted');
+      const name = readString(ctx, rawLastHosted, 'name', 'room.lastHosted', { maxLength: 32 });
+      // La capacité n'est pas un réglage libre : c'est la constante du maillage, recopiée au `join`.
+      const capacity = readNumber(ctx, rawLastHosted, 'capacity', 'room.lastHosted', {
+        min: MAX_ROOM_PARTICIPANTS,
+        max: MAX_ROOM_PARTICIPANTS,
+        integer: true,
+      });
+      if (name.length > 0) lastHosted = { name, capacity };
+    }
+  }
+  return { auto, lastHosted };
+}
+
 function readPosition(ctx: Ctx, source: Dict, key: string, path: string): Point | null {
   const value = source[key];
   if (value === undefined) {
@@ -727,11 +817,14 @@ function validateV1(source: Dict): SettingsResult {
   // (`auto: true`). `section()` n'est pas utilisé ici — l'absence EST une valeur, pas une erreur.
   const update = readUpdateSection(ctx, source);
 
+  // Même rétro-compat pour `room` (2026-11-02) : absent ⇒ (`auto: true`, `lastHosted: null`).
+  const room = readRoomSection(ctx, source);
+
   if (ctx.errors.length > 0) return { ok: false, errors: ctx.errors };
   return {
     ok: true,
     migratedFrom: null,
-    value: { version, locale, theme, nickname, avatar, audio, talk, overlay, network, update },
+    value: { version, locale, theme, nickname, avatar, audio, talk, overlay, network, update, room },
   };
 }
 
@@ -839,7 +932,7 @@ export function parseSettings(input: unknown): SettingsResult {
   return validateV1(input);
 }
 
-const PATCHABLE_TOP_KEYS = ['locale', 'theme', 'nickname', 'avatar', 'audio', 'talk', 'overlay', 'network', 'update'] as const;
+const PATCHABLE_TOP_KEYS = ['locale', 'theme', 'nickname', 'avatar', 'audio', 'talk', 'overlay', 'network', 'update', 'room'] as const;
 
 /**
  * Applique une modification partielle (`setSettings` côté IPC), puis revalide l'objet complet.
@@ -864,7 +957,7 @@ export function applySettingsPatch(current: Settings, patch: unknown): SettingsR
   for (const key of PATCHABLE_TOP_KEYS) {
     if (!(key in patch)) continue;
     const incoming = patch[key];
-    if (key === 'audio' || key === 'talk' || key === 'overlay' || key === 'network' || key === 'update') {
+    if (key === 'audio' || key === 'talk' || key === 'overlay' || key === 'network' || key === 'update' || key === 'room') {
       if (!isPlainObject(incoming)) {
         fail(ctx, key, 'type', `section ${key} doit être un objet`);
         continue;
@@ -879,6 +972,17 @@ export function applySettingsPatch(current: Settings, patch: unknown): SettingsR
         for (const measure of UPDATE_MEASURE_KEYS) {
           if (measure in incoming && incoming[measure] !== undefined) {
             fail(ctx, `${key}.${measure}`, 'forbidden-field', `${key}.${measure} est une mesure du service, non modifiable par patch`);
+          }
+        }
+      }
+      // Salon automatique (2026-11-02) : `room.lastHosted` est une MESURE du main (écrite quand ce
+      // poste héberge un salon, effacée quand l'utilisateur le quitte volontairement). Le renderer
+      // n'a pas le droit de décréter qu'un salon l'attend, ni d'effacer la reprise — même patron
+      // exact que les mesures de `update` ci-dessus.
+      if (key === 'room') {
+        for (const measure of ROOM_MEASURE_KEYS) {
+          if (measure in incoming && incoming[measure] !== undefined) {
+            fail(ctx, `${key}.${measure}`, 'forbidden-field', `${key}.${measure} est une mesure du main, non modifiable par patch`);
           }
         }
       }

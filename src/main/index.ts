@@ -39,6 +39,11 @@ import { registerPushToTalk, releasePushToTalk, type PttRegistration } from './p
 import { appUrl, registerAppProtocol, registerAppScheme } from './renderer-protocol';
 import { isPermissionAllowed, isPermissionCheckAllowed } from './permissions';
 import { RoomBridge, type BridgeEvent } from './room-bridge';
+import {
+  createRoomRecreator,
+  type RecreateState,
+  type RoomRecreator,
+} from './room-recreate';
 import { effectiveSignalingPort } from './signaling-port';
 import { applySignalToRoster } from './roster-link';
 import { createSettingsStore, type SettingsStore } from './settings-store';
@@ -84,6 +89,7 @@ import {
   defaultSettings,
   pushToTalkAcceleratorChanged,
   resolveDisplayName,
+  MAX_ROOM_PARTICIPANTS,
   type Settings,
 } from '../shell/settings-schema';
 import { trayLabels } from '../shell/tray-labels';
@@ -195,6 +201,9 @@ app.on('will-quit', () => {
   // Les minuteries du service de mise à jour ne survivent pas à la fermeture (un téléchargement
   // en vol est abandonné — un `.part` orphelin est repris ou nettoyé au prochain cycle).
   updateService?.stop();
+  // Salon automatique (2026-11-02) : la minuterie des 2 s ne survit pas à la fermeture — un
+  // recréage qui partirait pendant que l'app se ferme créerait un salon que personne ne verra.
+  roomRecreator?.stop();
   // Le tuyau de signalisation ne survit pas à la fermeture (leave émis, sockets fermées).
   stopSignalingLink('fermeture de l’application');
   // Browse mDNS + timer de scan : rien ne doit survivre à la fermeture.
@@ -258,6 +267,22 @@ async function bootstrap(): Promise<void> {
     },
   });
   updateService.start();
+
+  // Salon automatique à la reprise (2026-11-02) : créé APRÈS les fenêtres, les handlers et la
+  // découverte — le premier état publié doit trouver un renderer à qui parler, et la minuterie de
+  // 2 s (`RECREATE_STARTUP_DELAY_MS`, portée par `systemTimers`, SPEC-012 §4) laisse le browse
+  // mDNS et les liaisons réseau s'établir avant tout geste. `arm()` est une décision pure : option
+  // éteinte ou pas de mesure ⇒ RIEN n'est écrit, RIEN n'est publié (la lecture des réglages ne
+  // compte pas comme action). Le geste passe par `hostRoomFromSettings` — le même chemin que le
+  // « Créer et rejoindre » manuel du lobby, jamais une voie bis.
+  roomRecreator = createRoomRecreator({
+    host: hostRoomFromSettings,
+    settings: () => ({ auto: settings.room.auto, lastHosted: settings.room.lastHosted }),
+    discoveredNames: () => discovery.list().map((room) => room.roomName),
+    timers: systemTimers,
+    onStateChange: publishRecreateState,
+  });
+  roomRecreator.arm();
 
   // Branchement/débranchement d'écran : l'overlay se replace au lieu de rester hors champ, et la
   // nouvelle géométrie est republiée (`overlay.refresh()` calculait mais ne la poussait pas).
@@ -548,6 +573,71 @@ function readAppVersion(): string {
  * gardent le renderer, pas le main ; l'avenant SPEC-006b ne les modifie pas).
  */
 let updateService: UpdateService | null = null;
+
+/**
+ * Salon automatique à la reprise (2026-11-02) : la machine de recréage du dernier salon hébergé.
+ * Créée dans `bootstrap` APRÈS les fenêtres et les handlers — le premier état publié doit trouver
+ * un renderer à qui parler, comme la découverte et les mises à jour. `null` avant (ou sous la
+ * sonde de test sans démarrage), et le handler de relecture rend alors l'état `idle` : une ligne
+ * d'UI ne s'invente pas sans machine derrière elle.
+ */
+let roomRecreator: RoomRecreator | null = null;
+/** Dernière publication de la machine — instantané rendu au lobby au montage (`roomRecreateStatusGet`). */
+let recreateState: RecreateState = { phase: 'idle', roomName: null, reasonKey: null };
+
+/** Publie l'état de la machine de recréage vers la fenêtre principale seule (l'overlay n'a rien à dire). */
+function publishRecreateState(state: RecreateState): void {
+  recreateState = state;
+  sendEvent(IPC.eventRoomRecreateState, state, 'main');
+}
+
+/**
+ * Mesure du dernier salon hébergé (2026-11-02) : écrite quand CE poste crée un salon avec succès,
+ * effacée quand l'utilisateur le quitte VOLONTAIREMENT (quitter = intention de ne pas reprendre ;
+ * éjection ou coupure = la mesure reste en place, c'est le `stopSignalingLink` d'un départ subi qui
+ * ne touche RIEN ici). Écriture silencieuse en cas d'échec, comme les mesures de `update` : un
+ * réglage de mesure ne doit jamais casser le geste qui vient de réussir.
+ */
+function persistLastHostedRoom(next: Settings['room']['lastHosted']): void {
+  try {
+    persist({ ...settings, room: { ...settings.room, lastHosted: next } });
+  } catch (error) {
+    console.error('[réglages] mesure lastHosted non enregistrée', error);
+  }
+}
+
+/**
+ * Le geste réel du recréage : le MÊME chemin que le flux manuel « Créer et rejoindre » du lobby —
+ * le `join` du pont, puis le tuyau de signalisation que le main ouvre derrière (rôles, écoute,
+ * annonce mDNS). Aucune voie bis : si le flux manuel ne peut pas créer ce salon, l'automatisme
+ * non plus, et il le dit (`false`) au lieu d'inventer un second chemin qui lui, réussirait.
+ *
+ * Les champs du `join` sont exactement ceux que passe le lobby : `roomId` = le nom (un salon créé
+ * localement s'identifie par son nom — contrat `RoomJoinPayload`), `name` = le nom affiché. La
+ * capacité n'est pas un paramètre du `join` : c'est la constante du maillage, que le pont applique
+ * lui-même (`IPC_MAX_PARTICIPANTS`) — elle n'est persistée que comme témoin de ce qui était promis.
+ *
+ * `false` = le salon n'est pas là : refus du pont (`notice`) ou salon déjà porté par un pair que
+ * la découverte a vu entre-temps. `true` = l'état du pont est bien celui du salon visé.
+ */
+async function hostRoomFromSettings(name: string): Promise<boolean> {
+  // Jamais pendant un salon : la personne a ouvert/join un salon pendant les 2 s du délai — son
+  // geste premier passe avant l'automatisme, qui se retire sans rien écrire.
+  if (roomActiveForUpdate()) return false;
+  const wanted = name.trim().toLocaleLowerCase();
+  // Anti-doublon relu AU GESTE (l'état du registre a pu bouger depuis la décision de la minuterie) :
+  // créer un SECOND salon du même nom trahirait la règle anti-hôte-doublon du lobby (31/10/2026).
+  const taken = discovery.list().some((room) => room.roomName.trim().toLocaleLowerCase() === wanted);
+  if (taken) return false;
+  const state = bridge.join({ roomId: name, name }, resolveDisplayName(settings.nickname, osUserName()));
+  if (state.roomId === null || state.selfId === null) {
+    // Refus du pont (`notice`) : rien à publier, la machine comptera l'échec.
+    return false;
+  }
+  bridge.setSelfAvatar(avatarRefForJoin(settings.avatar) ?? null);
+  startSignalingLink(state.roomId, name, state.selfId, avatarRefForJoin(settings.avatar));
+  return true;
+}
 
 /**
  * La garde « jamais pendant un salon » (condition 6 de l'avenant) : les phases `joining`,
@@ -1088,6 +1178,13 @@ function registerIpcHandlers(): void {
       if (state.roomId !== null && state.selfId !== null) {
         bridge.setSelfAvatar(avatarRefForJoin(settings.avatar) ?? null);
         startSignalingLink(state.roomId, join.name, state.selfId, avatarRefForJoin(settings.avatar));
+        // Salon automatique (2026-11-02) : si CE poste est l'HÔTE du salon qui vient de naître,
+        // la mesure est prise (nom + capacité promise du maillage) — c'est elle qui autorisera la
+        // reprise au prochain démarrage. Un CLIENT ne mesure rien : il ne peut pas recréer le salon
+        // d'un autre ; un salon refusé (`notice`) ne mesure pas davantage.
+        if (signalingLink?.role === 'host') {
+          persistLastHostedRoom({ name: join.name.trim(), capacity: MAX_ROOM_PARTICIPANTS });
+        }
       }
       return state;
     },
@@ -1096,6 +1193,11 @@ function registerIpcHandlers(): void {
       // Le salon n'est plus : plus personne n'est mesuré, la baisse des autres applications
       // s'arrête immédiatement (restaurée par le contrôleur).
       resetDucking();
+      // Salon automatique (2026-11-02) : quitter VOLONTAIREMENT = intention de ne pas reprendre —
+      // la mesure est effacée. Se faire éjecter ou perdre le réseau passe par `stopSignalingLink`
+      // seul (reconnexion, fermeture de l'app) et ne touche RIEN ici : la mesure survit, et le
+      // prochain démarrage retrouvera le salon.
+      persistLastHostedRoom(null);
       return bridge.leave();
     },
     // La charge utile a déjà été validée par `guardPayload(IPC.signalSend, …)` : ici on ne
@@ -1182,6 +1284,9 @@ function registerIpcHandlers(): void {
       return bridge.setMode(mode);
     },
     [IPC.talkGetMode]: () => bridge.getControlState(),
+    // Salon automatique à la reprise (2026-11-02) : simple relecture — le lobby affiche la ligne
+    // sobre au montage. Machine absente (avant bootstrap) ⇒ l'état `idle` initial : rien d'inventé.
+    [IPC.roomRecreateStatusGet]: () => (roomRecreator === null ? recreateState : roomRecreator.getState()),
   };
 
   for (const channel of Object.keys(handlers) as IpcInvokeChannel[]) {

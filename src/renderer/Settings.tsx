@@ -668,6 +668,27 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
             </span>
           </div>
         </section>
+
+        {/* --- Salon automatique à la reprise (2026-11-02) --------------------------------- */}
+        <section className="sheet__section" aria-labelledby="settings-room">
+          <h3 id="settings-room" className="sheet__section-title">
+            {t('room.auto.title')}
+          </h3>
+
+          <label className="field field--inline">
+            <input
+              type="checkbox"
+              checked={settings.room.auto}
+              onChange={(event) => {
+                // Patch partiel : SEULE la cle modifiee est nommee. `room.lastHosted` est une
+                // MESURE du main (jamais patchable par le renderer) — le contrat la refuse.
+                void onChange({ room: { auto: event.target.checked } });
+              }}
+            />
+            <span className="field__label">{t('room.auto.settings')}</span>
+            <span className="field__help">{t('room.auto.help')}</span>
+          </label>
+        </section>
       </div>
 
       <footer className="sheet__footer">

@@ -1,19 +1,19 @@
 # T8 — Parité contrat ↔ preload
 
-## État mesuré au 2026-10-31 (cette section remplace les constats ci-dessous)
+## État mesuré au 2026-11-02 (cette section remplace les constats ci-dessous)
 
 Compté sur `src/shell/ipc-contract.ts` (`IPC`, `INVOKE_CHANNELS`, `EVENT_CHANNELS`) et
-`src/preload/index.ts` (12 abonnements, `subscribe`) :
+`src/preload/index.ts` (13 abonnements, `subscribe`) :
 
-- **34 canaux** dans le contrat : **22 invoke** (`settingsGet`, `settingsSet`, `settingsOpen`,
+- **36 canaux** dans le contrat : **23 invoke** (`settingsGet`, `settingsSet`, `settingsOpen`,
   `profileOpen`, `lobbyStatusGet`, `roomJoin`, `roomLeave`, `roomsDiscover`, `controlSetMute`,
   `controlSetDeafen`, `controlSetPushToTalk`, `controlSetGain`, `overlaySet`, `speakingSet`,
   `signalSend`, `avatarChoose`, `avatarGetImage`, `duckingApply`, `updateCheckNow`,
-  `updateInstallNow`, `talkSetMode`, `talkGetMode`) et
-  **12 événements** (`eventParticipants`, `eventRoomState`, `eventRoomsDiscovered`,
+  `updateInstallNow`, `talkSetMode`, `talkGetMode`, `roomRecreateStatusGet`) et
+  **13 événements** (`eventParticipants`, `eventRoomState`, `eventRoomsDiscovered`,
   `eventControlState`, `eventSettingsChanged`, `eventOverlayGeometry`, `eventShortcutConflict`,
   `eventProfileOpen`, `eventDiscoveryStatus`, `eventSignal`, `eventSpeakingSet`,
-  `eventUpdateState`).
+  `eventUpdateState`, `eventRoomRecreateState`).
   (`profileOpen` / `eventProfileOpen` : porte du panneau profil pseudo + avatar.
   `avatarChoose` / `avatarGetImage` : image locale et service de l'avatar aux pairs.
   `lobbyStatusGet` / `eventDiscoveryStatus` : pied de lobby structuré et santé de la découverte.
@@ -26,8 +26,13 @@ Compté sur `src/shell/ipc-contract.ts` (`IPC`, `INVOKE_CHANNELS`, `EVENT_CHANNE
   `updateCheckNow` / `updateInstallNow` / `eventUpdateState` (avenant SPEC-006b, 2026-11-01) :
   le renderer DEMANDE et AFFICHE, le main vérifie, télécharge et installe — `node:https` seul,
   hôtes allowlistés en dur, empreinte SHA-256 publiée vérifiée, jamais d'installation en salon
-  actif ; les invoke portent une charge utile VIDE (le renderer ne choisit ni URL, ni version).)
-- Exposés au renderer : les 22 invoke + les 12 événements. Manquants : aucun. En trop : aucun.
+  actif ; les invoke portent une charge utile VIDE (le renderer ne choisit ni URL, ni version).
+  `roomRecreateStatusGet` / `eventRoomRecreateState` (2026-11-02, salon automatique à la reprise) :
+  le lobby RELIT et S'ABONNE seulement — la machine de recréage (`src/main/room-recreate.ts`) vit
+  dans le main, décide (option `room.auto`, mesure `room.lastHosted` non patchable), attend 2 s via
+  `MainTimers`, et recrée le dernier salon hébergé par le MÊME chemin que le « Créer et rejoindre »
+  manuel ; une seule tentative par session, un échec publié `failed` ne se répète pas.)
+- Exposés au renderer : les 23 invoke + les 13 événements. Manquants : aucun. En trop : aucun.
 - Les quatre écarts décrits plus bas sont **corrigés** :
   1. `room-bridge.ts` type son discriminant sur la **VALEUR** du canon
      (`{ channel: typeof IPC.eventRoomState; payload: RoomStateCore }`) et émet `IPC.eventRoomState` :
