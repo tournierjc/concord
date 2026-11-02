@@ -286,7 +286,13 @@ async function bootstrap(): Promise<void> {
   // « Créer et rejoindre » manuel du lobby, jamais une voie bis.
   roomRecreator = createRoomRecreator({
     host: hostRoomFromSettings,
-    settings: () => ({ auto: settings.room.auto, lastHosted: settings.room.lastHosted }),
+    // `updatePendingInstall` lu À L'ÉCHÉANCE : une mise à jour prête verrouille le recréage —
+    // entrer en salon empêcherait l'installation pour toute la session (règle « jamais en salon »).
+    settings: () => ({
+      auto: settings.room.auto,
+      lastHosted: settings.room.lastHosted,
+      updatePendingInstall: updateService?.getState().state === 'downloaded',
+    }),
     discoveredNames: () => discovery.list().map((room) => room.roomName),
     timers: systemTimers,
     onStateChange: publishRecreateState,

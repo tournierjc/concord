@@ -92,6 +92,8 @@ interface Scenario {
   hostResult?: boolean | 'throws';
   /** Les noms des salons vus sur le réseau au moment du geste. */
   discovered?: readonly string[];
+  /** Une mise à jour est prête à installer (lue à l'échéance). */
+  updatePendingInstall?: boolean;
 }
 
 function scenario(options: Scenario = {}) {
@@ -100,6 +102,7 @@ function scenario(options: Scenario = {}) {
   const timers = fakeTimers();
   let auto = options.auto ?? true;
   let lastHosted = options.lastHosted === undefined ? { name: 'Cuisine', capacity: 8 } : options.lastHosted;
+  let updatePendingInstall = options.updatePendingInstall ?? false;
   const discovered = options.discovered ?? [];
   const recreator = createRoomRecreator({
     host: (name) => {
@@ -107,7 +110,7 @@ function scenario(options: Scenario = {}) {
       if (options.hostResult === 'throws') throw new Error('réseau coupé');
       return options.hostResult ?? true;
     },
-    settings: () => ({ auto, lastHosted }),
+    settings: () => ({ auto, lastHosted, updatePendingInstall }),
     discoveredNames: () => discovered,
     timers,
     onStateChange: (state) => states.push(state),
@@ -123,6 +126,9 @@ function scenario(options: Scenario = {}) {
     },
     setLastHosted(value: { name: string; capacity: number } | null): void {
       lastHosted = value;
+    },
+    setUpdatePendingInstall(value: boolean): void {
+      updatePendingInstall = value;
     },
     lastState(): RecreateState {
       return states[states.length - 1] ?? IDLE_RECREATE_STATE;
@@ -252,6 +258,26 @@ describe('room-recreate — le cycle sur horloge injectée', () => {
     assert.deepEqual(s.hostCalls, [], 'jamais un second salon du même nom');
     assert.equal(s.lastState().phase, 'failed');
     assert.equal(s.lastState().reasonKey, 'room.auto.failed.hosting');
+  });
+
+  it('mise à jour PRÊTE à l’échéance : failed/update et host JAMAIS appelé (le salon n’verrouille pas l’installation)', async () => {
+    const s = scenario({ updatePendingInstall: true });
+    s.recreator.arm();
+    await s.timers.advance(RECREATE_STARTUP_DELAY_MS + 50);
+    assert.deepEqual(s.hostCalls, [], 'aucun salon quand une mise à jour attend');
+    assert.equal(s.lastState().phase, 'failed');
+    assert.equal(s.lastState().reasonKey, 'room.auto.failed.update');
+  });
+
+  it('mise à jour prête à l’ARMEMENT mais installée PENDANT le délai : le geste part', async () => {
+    // La valeur est relue À L'ÉCHÉANCE : si l'installation a eu lieu pendant les 2 s
+    // (redémarrage de la session suivante, en pratique), le recréage retrouve son droit.
+    const s = scenario({ updatePendingInstall: true });
+    s.recreator.arm();
+    s.setUpdatePendingInstall(false);
+    await s.timers.advance(RECREATE_STARTUP_DELAY_MS + 50);
+    assert.deepEqual(s.hostCalls, ['Cuisine']);
+    assert.equal(s.lastState().phase, 'recreated');
   });
 
   it('éteint PENDANT le délai : l’option est relue à l’échéance, rien ne part, l’état retombe idle', async () => {

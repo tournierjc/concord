@@ -191,6 +191,7 @@
   "room.auto.failed.create": "Could not reopen “{{name}}”.",
   "room.auto.failed.hosting": "“{{name}}” already exists on the network.",
   "room.auto.failed.network": "No network: “{{name}}” could not be reopened.",
+  "room.auto.failed.update": "“{{name}}” was not reopened: an update is ready to install.",
   "update.available": "New version {{version}} is available.",
   "update.downloading": "Downloading ({{percent}}%).",
   "update.ready": "Update ready.",

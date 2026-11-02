@@ -55,7 +55,11 @@ export type RecreatePhase =
   | 'failed';
 
 /** La raison d'un échec, sous forme de CLÉ (le renderer traduit, le main ne connaît pas la langue). */
-export type RecreateFailureKey = 'room.auto.failed.hosting' | 'room.auto.failed.network' | 'room.auto.failed.create';
+export type RecreateFailureKey =
+  | 'room.auto.failed.hosting'
+  | 'room.auto.failed.network'
+  | 'room.auto.failed.create'
+  | 'room.auto.failed.update';
 
 /** L'état publié au lobby à chaque transition (`eventRoomRecreate`). */
 export interface RecreateState {
@@ -72,6 +76,12 @@ export const IDLE_RECREATE_STATE: RecreateState = { phase: 'idle', roomName: nul
 export interface RecreateSettingsView {
   auto: boolean;
   lastHosted: { name: string; capacity: number } | null;
+  /**
+   * Une mise à jour est PRÊTE à installer (état `downloaded` du service de mise à jour) —
+   * lue À L'ÉCHÉANCE du délai. Vraie ⇒ le recréage se retire : entrer en salon verrouillerait
+   * l'installation (« jamais en salon ») pour toute la session (retour JC, 2026-11-02).
+   */
+  updatePendingInstall?: boolean;
 }
 
 /**
@@ -171,6 +181,15 @@ export function createRoomRecreator(options: RoomRecreatorOptions): RoomRecreato
       const atDelay = options.settings();
       if (!shouldAutoRecreateOnStartup(atDelay) || atDelay.lastHosted === null) {
         publish(IDLE_RECREATE_STATE);
+        return;
+      }
+      // Une mise à jour PRÊTE à installer bloque le recréage (2026-11-02, retour JC : l'app
+      // recréait le salon 2 s après le boot, la règle « jamais d'installation en salon »
+      // restait donc vraie pour toujours et le bouton Installer restait grisé). Ne PAS entrer
+      // en salon : l'installateur (auto à la cadence ou bouton) prend la main, redémarre l'app,
+      // et le PROCHAIN démarrage recréera le salon — une session de retard, pas une perte.
+      if (atDelay.updatePendingInstall) {
+        publish({ phase: 'failed', roomName: atDelay.lastHosted.name, reasonKey: 'room.auto.failed.update' });
         return;
       }
       // Anti-doublon : un nom déjà porté sur le réseau ⇒ on ne crée PAS, on le dit une fois.
