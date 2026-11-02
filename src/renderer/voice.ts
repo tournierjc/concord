@@ -50,13 +50,19 @@ import {
 import type { RoomPhase, SignalIn, SignalOut } from '../shell/ipc-contract';
 import { lanApi } from './api';
 import { createAudioSinkRegistry, documentSinkHost, type AudioSinkRegistry } from './audio-sink';
+import { browserBeat } from './browser-beat.ts';
 import {
   SAMPLE_PERIOD_MS,
   createPeerSpeechTracker,
+  rmsToDbfs,
+  type MeterBeatDriver,
   type PeerSpeechTracker,
 } from './peer-speech.ts';
 import { PEER_LEVELS, peerSpeaking } from './participant-state.ts';
 import { createSpeakingRelay, type SpeakingRelay } from './speaking-relay.ts';
+import { buildMicrophoneConstraints } from '../engine/rtc/media-config.ts';
+import { DEFAULT_VAD_CONFIG } from '../engine/vad.ts';
+import type { Settings } from '../shell/settings-schema';
 
 /** Où en est la voix locale. `unavailable` est un état de première classe, pas une erreur muette. */
 export type VoiceStatus = 'idle' | 'starting' | 'live' | 'unavailable';
@@ -126,7 +132,17 @@ interface VoiceSession {
   readonly key: string;
   readonly wire: VoiceWiring;
   readonly link: LinkState;
-  frame: number | null;
+  /**
+   * Fabrique du port de cadence du battement (fix 0.4.2, 2026-11-02). La production reçoit
+   * `pageMeterBeat` (battement `setInterval` de la page, seule porte `browser-beat.ts`) ;
+   * un test reçoit une pompe manuelle. Jamais `requestAnimationFrame` : une fenêtre cachée
+   * gèle ses rAF et les halos mouraient en silence.
+   */
+  readonly makeBeat: () => MeterBeatDriver;
+  /** Port de cadence armé pour la session (construit à l'ouverture par `makeBeat`). */
+  readonly beat: MeterBeatDriver;
+  /** Arrêt du battement armé par `startMeter` ; `null` tant qu'aucun battement ne court. */
+  stopBeat: (() => void) | null;
   live: boolean;
   want: boolean;
   /**
@@ -144,6 +160,13 @@ interface VoiceSession {
    * sa tenue de 600 ms et son dernier ensemble publié ne survivent pas à un départ de salon.
    */
   readonly relay: SpeakingRelay;
+  /**
+   * Seuil RMS local « soi qui parle » : `SPEAKING_LEVEL` par défaut, ou son équivalent
+   * réglé (`talk.vadThresholdDb` → `speakingRmsFromThresholdDb`). Figé à l'ouverture de la
+   * session : changer le réglage prend effet à la session suivante, comme tout le câblage
+   * du micro — une mesure ne se re-seuil pas en cours de parole.
+   */
+  readonly selfSpeakingRms: number;
 }
 
 let snapshot: VoiceSnapshot = IDLE;
@@ -397,35 +420,64 @@ function subscribeSignals(handler: (message: SignalIn) => void): (() => void) | 
  * de relâchement ne soit jamais interrompue, assez léger pour un overlay (SPEC-013 §2 R-U8 §1).
  */
 function startMeter(current: VoiceSession): void {
-  if (typeof requestAnimationFrame !== 'function') return;
-  let last = 0;
-  const tick = (now: number): void => {
-    if (session !== current) return;
-    if (now - last >= SAMPLE_PERIOD_MS) {
-      last = now;
-      const level = readLevel(current);
-      publish({ level });
-      // Parole distante : une mesure par pair et par trame, écrite dans la table que lit le
-      // rendu. C'est le SEUL producteur (`peer-speech.ts`) — un pair non mesuré n'est pas écrit.
-      current.speech.sample(
-        { peers: peerIds(current), level: (peerId) => readPeerLevel(current, peerId) },
-        now,
-      );
-      // Parole locale et distante, dans le MÊME ensemble (AD-20 D1) : la mesure locale est
-      // certaine (`level()` du plan média), elle n'a donc pas besoin d'échantillon daté.
-      publishSpeaking(current, level, now);
-    }
-    current.frame = requestAnimationFrame(tick);
-  };
-  current.frame = requestAnimationFrame(tick);
+  // Le battement sort de `requestAnimationFrame` (fix 0.4.2, 2026-11-02) : une fenêtre
+  // cachée dans la barre système voit ses rAF throttlées puis gelées par Chromium, et les
+  // halos « qui parle » mouraient silencieusement dans leur dernier état — exactement le
+  // cas d'usage de l'overlay. La cadence vient du port `browserBeat()` (`setInterval` de
+  // la page, seule porte autorisée), la RAF ne sert plus qu'au rendu.
+  const driver = current.beat;
+  // Un redémarrage (`resumeVoiceMeter` sur `show`) désarme le battement qui courrait avant
+  // d'en armer un nouveau : jamais deux cadences sur la même session.
+  stopMeter(current);
+  current.stopBeat = driver.start((now) => meterTick(current, now), SAMPLE_PERIOD_MS);
+  // Premier battement immédiat : une session live ne doit pas attendre 50 ms pour sa
+  // première mesure, et un redémarrage (`show`) rafraîchit sans attendre le prochain tour.
+  meterTick(current, driver.now());
+}
+
+/**
+ * Une trame du battement : mesure locale, échantillons par pair, publication « qui parle ».
+ * Séparée de l'armement pour qu'un test rejoue LA même fonction sans horloge réelle.
+ */
+function meterTick(current: VoiceSession, now: number): void {
+  const level = readLevel(current);
+  publish({ level });
+  // Parole distante : une mesure par pair et par trame, écrite dans la table que lit le
+  // rendu. C'est le SEUL producteur (`peer-speech.ts`) — un pair non mesuré n'est pas écrit.
+  current.speech.sample(
+    { peers: peerIds(current), level: (peerId) => readPeerLevel(current, peerId) },
+    now,
+  );
+  // Parole locale et distante, dans le MÊME ensemble (AD-20 D1) : la mesure locale est
+  // certaine (`level()` du plan média), elle n'a donc pas besoin d'échantillon daté.
+  publishSpeaking(current, level, now);
+}
+
+/**
+ * Le seuil RMS local « soi qui parle » (fix 0.4.2, 2026-11-02).
+ *
+ * `SPEAKING_LEVEL` (RMS 0,02 ≈ −34 dBFS) reste le défaut ABSOLU — un poste sans réglage
+ * mesure comme avant. `talk.vadThresholdDb` (−80..−10, persistance déjà là, aucun
+ * consommateur jusqu'ici) est converti en RMS par la MÊME fonction que le chemin distant
+ * (`rmsToDbfs`, seule conversion dBFS↔RMS du projet, seuils du moteur inchangés). Un
+ * réglage absent, non numérique ou hors bornes retombe sur `SPEAKING_LEVEL`, jamais sur un
+ * seuil inventé. La porte de l'émetteur (`OPEN_DBFS` du moteur) n'est PAS touchée — seule
+ * l'affichage local suit le réglage (SPEC-019 avenant 2026-11-02, condition 3).
+ */
+export function speakingRmsFromThresholdDb(vadThresholdDb: number | undefined): number {
+  if (typeof vadThresholdDb !== 'number' || !Number.isFinite(vadThresholdDb)) return SPEAKING_LEVEL;
+  if (vadThresholdDb > DEFAULT_VAD_CONFIG.openDbfs) return SPEAKING_LEVEL;
+  if (vadThresholdDb < DEFAULT_VAD_CONFIG.minDbfs) return SPEAKING_LEVEL;
+  return Math.min(1, Math.max(0, 10 ** (vadThresholdDb / 20)));
 }
 
 /**
  * Publie l'ensemble « qui parle » vers l'overlay (AD-19 D1 / AD-20 D1, cadence D3).
  *
- * Ce fichier ne décide QUE de qui : soi (`level()` local, seuil `SPEAKING_LEVEL`) et les pairs
- * mesurés au-dessus du seuil de la table. `speaking-relay.ts` décide QUAND — transitions seules
- * plus tenue de 600 ms — et c'est la seule chose qui empêche un budget de 50 messages/10 s.
+ * Ce fichier ne décide QUE de qui : soi (`level()` local, seuil `SPEAKING_LEVEL` ou son
+ * équivalent réglé `talk.vadThresholdDb`) et les pairs mesurés au-dessus du seuil de la
+ * table. `speaking-relay.ts` décide QUAND — transitions seules plus tenue de 600 ms — et
+ * c'est la seule chose qui empêche un budget de 50 messages/10 s.
  *
  * `peerSpeaking` (et non la table brute) : un échantillon périmé n'est pas « parle ». L'id publié
  * est l'id de SIGNALISATION, celui que l'overlay connaît déjà par `room-info`.
@@ -436,7 +488,7 @@ function publishSpeaking(current: VoiceSession, selfLevel: number, now: number):
     if (peerSpeaking(peerId, PEER_LEVELS, now) === 'true') peers.push(peerId);
   }
   const ids = current.relay.update(
-    { selfId: current.selfId, self: selfLevel >= SPEAKING_LEVEL, peers },
+    { selfId: current.selfId, self: selfLevel >= current.selfSpeakingRms, peers },
     now,
   );
   if (ids === null) return;
@@ -506,10 +558,9 @@ function readPeerLevel(current: VoiceSession, peerId: string): number | null {
 }
 
 function stopMeter(current: VoiceSession): void {
-  if (current.frame !== null && typeof cancelAnimationFrame === 'function') {
-    cancelAnimationFrame(current.frame);
-  }
-  current.frame = null;
+  const stop = current.stopBeat;
+  current.stopBeat = null;
+  if (stop !== null) stop();
   // Plus de métrage ⇒ plus d'échantillon : sans ce vidage, la table garderait des `'true'`
   // jusqu'à ce que la péremption les éteigne, sur une session qui n'existe plus.
   current.speech.reset();
@@ -605,10 +656,72 @@ export function suspendVoice(): void {
 }
 
 /**
+ * Le battement de production : cadence ET temps de la porte `browser-beat.ts` (seule
+ * porte, fix 0.4.2, 2026-11-02). Le battement n'a aucune pendule privée : le temps vient
+ * du PORT lui-même, et un test qui injecte son propre driver injecte son temps avec.
+ */
+function pageMeterBeat(): MeterBeatDriver {
+  const beat = browserBeat();
+  return {
+    now: () => beat.now(),
+    start(tick: (now: number) => void, periodMs: number): () => void {
+      // Le battement est une cadence, pas une file : si un battement court déjà, le
+      // contrat du port (`MeterBeatDriver`) est qu'il est désarmé avant l'armement du
+      // nouveau — un redémarrage (`show` de la fenêtre) ne duplique jamais la mesure.
+      const handle = beat.repeat(periodMs, tick);
+      let stopped = false;
+      return () => {
+        if (stopped) return;
+        stopped = true;
+        beat.cancel(handle);
+      };
+    },
+  };
+}
+
+/**
+ * Relance le battement de la session vivante quand la page redevient visible (fix 0.4.2,
+ * 2026-11-02). Le geste est POSÉ par le hook (`useVoicePlane`) et non par une écoute
+ * globale : `voice.ts` reste sans DOM ambiant, et un test rejoue la fonction directement.
+ * Sans session ou sans battement armé, le geste est un no-op.
+ */
+export function resumeVoiceMeter(): void {
+  const current = session;
+  if (current === null || !current.live) return;
+  if (current.stopBeat === null) return;
+  startMeter(current);
+}
+
+/**
+ * Les réglages que la voix lit (fix 0.4.2, 2026-11-02), sous leur forme partielle : le hook
+ * les passe, `openVoice` les conserve pour la session. `undefined` = poste sans réglage lu
+ * (tests, première seconde) → défauts absolus d'avant 0.4.2 partout.
+ */
+export interface VoiceSettings {
+  readonly audio?: Settings['audio'];
+  readonly talk?: Settings['talk'];
+}
+
+/**
+ * Options d'ouverture de la voix. `makeBeat` (fix 0.4.2, 2026-11-02) est le SEUL point
+ * d'injection du battement : la production omet le champ et reçoit `pageMeterBeat`
+ * (cadence `setInterval` de la page — jamais de RAF, qui gèle quand la fenêtre est cachée) ;
+ * un test passe une pompe manuelle et rejoue les tours sans aucune horloge réelle.
+ */
+export interface OpenVoiceOptions {
+  readonly makeBeat?: () => MeterBeatDriver;
+}
+
+/**
  * Ouvre le plan média pour `key`. Une instance par clé : un second appel identique ne fait rien,
  * un appel avec une autre clé ferme d'abord l'ancienne.
  */
-export function openVoice(key: string, localId: string): void {
+export function openVoice(
+  key: string,
+  localId: string,
+  settings?: VoiceSettings,
+  options?: OpenVoiceOptions,
+): void {
   if (session !== null && session.key === key) return;
   if (session !== null) closeVoice();
 
@@ -630,6 +743,12 @@ export function openVoice(key: string, localId: string): void {
     // les candidats locaux avec leur pair émetteur (T17) et les achemine lui-même.
     wire = createVoiceWiring({
       localId,
+      // Réglages traduits en contraintes de capture + état initial de la piste
+      // (SPEC-019 avenant 2026-11-02). Un réglage absent laisse le moteur à ses défauts.
+      ...(settings?.audio === undefined
+        ? {}
+        : { microConstraints: buildMicrophoneConstraints(settings.audio) }),
+      ...(settings?.talk?.mode === 'vad' ? { microOpenOnStart: true } : {}),
       send: (message) => {
         emitSignal(message);
       },
@@ -688,16 +807,20 @@ export function openVoice(key: string, localId: string): void {
     return;
   }
 
+  const makeBeat = options?.makeBeat ?? pageMeterBeat;
   const created: VoiceSession = {
     key,
     wire,
     link,
-    frame: null,
+    makeBeat,
+    beat: makeBeat(),
+    stopBeat: null,
     live: false,
     want: false,
     speech: createPeerSpeechTracker(),
     selfId: localId,
     relay: createSpeakingRelay(),
+    selfSpeakingRms: speakingRmsFromThresholdDb(settings?.talk?.vadThresholdDb),
   };
   current = created;
   // Enregistré AVANT l'attente du micro : deux appels concurrents voient la même instance, et un
@@ -750,6 +873,13 @@ export interface UseVoicePlaneOptions {
    * reconstruit une. Absente ⇒ la session suit seulement la clé, comme avant T16d.
    */
   readonly phase?: RoomPhase;
+  /**
+   * Réglages lus par la voix (fix 0.4.2, 2026-11-02) : contraintes de capture du micro
+   * (`audio.*`) et mode de prise de parole + seuil VAD (`talk.*`). Absents = défauts
+   * absolus d'avant 0.4.2. La session est OUVERTE avec ces valeurs — les changer en salon
+   * prend effet à la session suivante (la clé change, ou on quitte/rentre).
+   */
+  readonly settings?: VoiceSettings;
 }
 
 /**
@@ -757,14 +887,14 @@ export interface UseVoicePlaneOptions {
  * applique l'intention de transmission. Le rendu ne dépend que de `VoiceSnapshot`.
  */
 export function useVoicePlane(options: UseVoicePlaneOptions): VoiceSnapshot {
-  const { enabled, localId, roomId, wantTransmit, phase } = options;
+  const { enabled, localId, roomId, wantTransmit, phase, settings } = options;
   const current = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
   // (1) La SESSION suit la clé, pas la phase : une reconnexion ne doit pas fermer/rouvrir en
   // boucle, et `openVoice` est idempotent par clé (au plus un maillage par salon).
   useEffect(() => {
     if (!enabled || roomId === null) return;
-    openVoice(`${roomId}|${localId}`, localId);
+    openVoice(`${roomId}|${localId}`, localId, settings);
     return () => {
       closeVoice();
     };
@@ -778,13 +908,33 @@ export function useVoicePlane(options: UseVoicePlaneOptions): VoiceSnapshot {
       suspendVoice();
       return;
     }
-    if (phase === 'connected') openVoice(`${roomId}|${localId}`, localId);
+    if (phase === 'connected') openVoice(`${roomId}|${localId}`, localId, settings);
   }, [enabled, roomId, localId, phase]);
 
   useEffect(() => {
     if (!enabled || roomId === null) return;
     setTransmitting(wantTransmit);
   }, [enabled, roomId, wantTransmit]);
+
+  // (3) Fix 0.4.2, 2026-11-02 — la page cachée ne gèle plus les halos : le battement vient
+  // d'un `setInterval` et bat déjà hors visibilité. Ce geste est le complément honnête :
+  // quand la page REDEVIENT visible, on relance un battement propre (un onglet
+  // throttlé/backdrop peut avoir fait traîner le dernier tour). `setInterval` n'est pas
+  // gelé par Chromium quand la page est cachée — seul le rendu l'est ; cette écoute est
+  // donc une sécurité, pas le mécanisme principal. Posée ici (le hook), jamais en écoute
+  // globale : `voice.ts` reste testable sans DOM.
+  useEffect(() => {
+    if (!enabled || roomId === null) return;
+    if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return;
+    const onVisible = (): void => {
+      if (document.visibilityState === 'hidden') return;
+      resumeVoiceMeter();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [enabled, roomId]);
 
   return current;
 }

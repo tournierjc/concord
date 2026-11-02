@@ -48,6 +48,7 @@ import {
   summarizeStats,
   withOpusSdpParams,
 } from './media-config.ts'
+import type { MicrophoneConstraints } from './media-config.ts'
 
 /** Le connecteur d'un flux vers un analyseur, tel que la page le fait réellement. */
 export type MeterSource = (
@@ -117,6 +118,25 @@ export interface MediaPlaneOptions {
    * dégrade pas en silence, elle ne compile pas — `npx tsc --noEmit` est l'arbitre.
    */
   timers: Timers
+  /**
+   * Contraintes de capture du micro (SPEC-019, avenant 2026-11-02, arbitrage JC).
+   *
+   * `undefined` = `MIC_CONSTRAINTS` — les défauts exacts d'avant 0.4.2 (mono, EC/NS/AGC).
+   * La coquille fournit `buildMicrophoneConstraints(reglages.audio)` pour brancher le
+   * périphérique, la réduction de bruit, l'annulation d'écho et le gain réglés par
+   * l'utilisateur. Le moteur ne lit AUCUN réglage : il reçoit des contraintes prêtes.
+   * Ce champ ne touche pas le contrat média (ni ICE, ni Opus, ni la topologie).
+   */
+  microConstraints?: MicrophoneConstraints
+  /**
+   * Piste micro OUVERTE à l'ouverture du micro (mode VAD, SPEC-019 avenant 2026-11-02).
+   *
+   * `undefined`/`false` = push-to-talk historique : piste fermée au repos, ouverte par
+   * `setTransmitting(true)`. `true` = détection de voix — la piste reste `enabled`, c'est
+   * la mesure (battement + seuil) qui décide de qui parle. La coquille le dérive de
+   * `talk.mode` ; le moteur, lui, ne connaît aucun réglage.
+   */
+  microOpenOnStart?: boolean
 }
 
 /** Compteurs d'un pair distant. Tous les champs sont des nombres (jamais undefined). */
@@ -257,14 +277,24 @@ function rootMeanSquare(samples: Float32Array<ArrayBuffer>): number {
 }
 
 /**
- * Ouvre le micro avec les contraintes mono/EC/NS/AGC.
- * Enveloppé dans une fonction pour que l'erreur du navigateur soit traduite en
- * message lisible (et pour ne jamais manipuler une variable « peut-être non
- * affectée » après un try/catch).
+ * Ouvre le micro avec les contraintes reçues (défaut : mono/EC/NS/AGC, SPEC-019 avenant
+ * 2026-11-02). Enveloppé dans une fonction pour que l'erreur du navigateur soit traduite en
+ * message lisible (et pour ne jamais manipuler une variable « peut-être non affectée »
+ * après un try/catch).
  */
-async function requestMicrophone(): Promise<MediaStream> {
+async function requestMicrophone(constraints: MicrophoneConstraints): Promise<MediaStream> {
   try {
-    return await navigator.mediaDevices.getUserMedia({ audio: MIC_CONSTRAINTS })
+    // Le type DOM accepte `MediaTrackConstraints` ; nos facettes normalisées s'y rangent
+    // sans conversion (toutes primitives du type DOM, `gain` seul est ignoré du navigateur
+    // et porté par la facette pour le prétraitement amont).
+    const audio: MediaTrackConstraints = {
+      channelCount: constraints.channelCount,
+      echoCancellation: constraints.echoCancellation,
+      noiseSuppression: constraints.noiseSuppression,
+      autoGainControl: constraints.autoGainControl,
+      ...(constraints.deviceId === undefined ? {} : { deviceId: constraints.deviceId }),
+    }
+    return await navigator.mediaDevices.getUserMedia({ audio })
   } catch (error) {
     throw new Error(`getUserMedia audio a échoué : ${describeError(error)}`)
   }
@@ -577,7 +607,23 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
 
   async function startMicrophone(): Promise<void> {
     if (localTrack !== null) return
-    const stream = await requestMicrophone()
+    // Facettes de capture normalisées une par une (jamais un spread du type DOM) : la facette
+    // du réglage est une CHAÎNE ou rien, un booléen est un booléen ou rien — une valeur que
+    // le schéma ne produit jamais retombe sur le défaut (micro système, EC/NS/AGC actifs).
+    const requested = o.microConstraints ?? MIC_CONSTRAINTS
+    const constraints: MicrophoneConstraints = {
+      channelCount: 1,
+      echoCancellation: requested.echoCancellation === true,
+      noiseSuppression: requested.noiseSuppression === true,
+      autoGainControl: requested.autoGainControl === true,
+    }
+    if (typeof requested.deviceId === 'string' && requested.deviceId !== '') {
+      constraints.deviceId = requested.deviceId
+    }
+    if (typeof requested.gain === 'number' && Number.isFinite(requested.gain)) {
+      constraints.gain = requested.gain
+    }
+    const stream = await requestMicrophone(constraints)
     const first = stream.getAudioTracks()[0]
     if (first === undefined) {
       stream.getTracks().forEach((track) => track.stop())
@@ -585,8 +631,11 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     }
     localStream = stream
     localTrack = first
-    // Push-to-talk : micro fermé au repos, ouvert par setTransmitting(true).
-    localTrack.enabled = false
+    // Push-to-talk : micro fermé au repos, ouvert par setTransmitting(true) — SAUF si
+    // l'appelant a demandé l'inverse à la construction (mode VAD, SPEC-019 avenant
+    // 2026-11-02) : en détection de voix le micro doit rester ouvert, c'est la mesure qui
+    // décide de qui parle. Le défaut (`undefined`) garde le comportement d'avant.
+    localTrack.enabled = o.microOpenOnStart === true
     addMeter(LOCAL_METER_KEY, stream, 'micro local')
     for (const [remoteId, peer] of peers) {
       await attachLocalTrack(remoteId, peer)

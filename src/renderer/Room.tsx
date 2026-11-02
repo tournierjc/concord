@@ -9,11 +9,12 @@
 
 import { useEffect, useState } from 'react';
 import type { ControlStateDto, ParticipantDto, RoomStateDto } from '../shell/ipc-contract';
+import type { TalkMode } from '../shell/settings-schema';
 import { avatarEmojiFor, isAvatarRef } from '../shell/avatar';
 import { createTranslator, type Locale } from './i18n';
 import { lanApi } from './api';
 import { HeadphonesIcon, HeadphonesOffIcon, LeaveIcon, MicIcon, MicOffIcon } from './icons';
-import { setTransmitting, SPEAKING_LEVEL, useVoicePlane, type VoiceSnapshot } from './voice';
+import { setTransmitting, SPEAKING_LEVEL, useVoicePlane, type VoiceSettings, type VoiceSnapshot } from './voice';
 import {
   joinStates,
   mutedAttr,
@@ -32,9 +33,26 @@ export interface RoomProps {
   maxParticipants: number;
   /** Raccourci push-to-talk effectif, affiché tel quel (ex. `Alt+Space`). */
   shortcut: string;
+  /**
+   * Réglages lus par la voix (fix 0.4.2, 2026-11-02) : contraintes de capture et mode de
+   * prise de parole. Passés tels quels au hook — la session est ouverte avec eux.
+   */
+  voiceSettings?: VoiceSettings;
+  /**
+   * Le mode de prise de parole vient d'ÊTRE changé au pont (fix 0.4.2, 2026-11-02) : la
+   * clé de session intègre le mode côté pont, et ce compteur force l'application de la
+   * piste (VAD ⇒ micro ouvert, PTT ⇒ micro fermé) sur la session en cours.
+   */
+  modeEpoch?: number;
   onMute: (muted: boolean) => void;
   onDeafen: (deafened: boolean) => void;
   onPushToTalk: (active: boolean) => void;
+  /**
+   * Le sélecteur PTT/VAD du salon (fix 0.4.2, 2026-11-02) : la VALEUR du pont (`setTalkMode`),
+   * pas seulement le réglage — `RoomBridge.setMode` n'avait aucun appelant et le halo ne
+   * suivait plus le mode.
+   */
+  onSetMode?: (mode: TalkMode) => void;
   onGain: (participantId: string, gain: number) => void;
   onLeave: () => void;
 }
@@ -99,9 +117,12 @@ export function Room({
   control,
   maxParticipants,
   shortcut,
+  voiceSettings,
+  modeEpoch,
   onMute,
   onDeafen,
   onPushToTalk,
+  onSetMode,
   onGain,
   onLeave,
 }: RoomProps): JSX.Element {
@@ -114,10 +135,27 @@ export function Room({
     enabled: room.roomId !== null,
     localId: room.selfId ?? '',
     roomId: room.roomId,
-    wantTransmit: control.pushToTalk && !control.muted && !control.deafened,
+    // Mode VAD : le micro reste OUVERT (c'est la mesure qui décide), le PTT ne pilote plus
+    // l'intention — sinon un clic sur « parler » en VAD fermerait la piste au relâchement.
+    wantTransmit:
+      (control.mode === 'vad' || (control.pushToTalk && !control.muted && !control.deafened)),
     // SPEC-009 §1(e) : `retrying` détruit la session (mesh compris), `connected` en recrée une.
     phase: room.phase,
+    settings: voiceSettings,
   });
+
+  // Fix 0.4.2, 2026-11-02 — le mode vient d'être changé au pont : la piste suit le mode
+  // sur la session EN COURS (VAD ⇒ ouverte, PTT ⇒ fermée au repos). Sans ce geste, seul
+  // un départ/retour en salon aurait appliqué le nouveau mode.
+  useEffect(() => {
+    if (room.roomId === null) return;
+    if (modeEpoch === undefined) return;
+    if (control.mode === 'vad') {
+      setTransmitting(true);
+      return;
+    }
+    setTransmitting(control.pushToTalk && !control.muted && !control.deafened);
+  }, [modeEpoch, control.mode, room.roomId]);
 
   // Anneau « parle » alimenté par `level()` du plan média, pour le participant local.
   const selfSpeaking = voice.status === 'live' && voice.level >= SPEAKING_LEVEL;
@@ -302,8 +340,25 @@ export function Room({
 
         <div className="controls__mode">
           <span className="controls__label">{t('control.mode')}</span>
-          <span className="controls__value">
-            {control.mode === 'ptt' ? t('control.mode.ptt') : t('control.mode.vad')}
+          {/* Fix 0.4.2, 2026-11-02 — le mode est un SÉLECTEUR câblé, pas une étiquette :
+              chaque choix appelle le pont (`setTalkMode`) qui écrit le réglage côté main
+              ET met `RoomBridge` à jour (`RoomBridge.setMode` n'avait aucun appelant et
+              l'état de contrôle publié restait `ptt` quoi qu'affiche le réglage). */}
+          <span className="segmented" role="group" aria-label={t('control.mode')}>
+            {(['ptt', 'vad'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className="button button--compact button--toggle"
+                aria-pressed={control.mode === mode}
+                onClick={() => {
+                  if (control.mode === mode) return;
+                  onSetMode?.(mode);
+                }}
+              >
+                {mode === 'ptt' ? t('control.mode.ptt') : t('control.mode.vad')}
+              </button>
+            ))}
           </span>
         </div>
 

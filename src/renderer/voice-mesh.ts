@@ -40,6 +40,7 @@
 
 import { browserTimers } from './browser-timers.ts';
 import { createMediaPlane, type MediaPlane } from '../engine/rtc/media-plane.ts';
+import type { MicrophoneConstraints } from '../engine/rtc/media-config.ts';
 import { createMesh, type Mesh, type SignalIn, type SignalOut } from '../engine/net/mesh.ts';
 import type { MeshPeerState, PeerStateCause } from '../engine/net/mesh.ts';
 
@@ -92,6 +93,14 @@ export interface VoiceWiringOptions {
    * candidats sans destinataire soit comptée au lieu d'être diffusée.
    */
   readonly earlyCandidates?: readonly RTCIceCandidateInit[];
+  /**
+   * Contraintes de capture du micro, issues des réglages par la coquille
+   * (`buildMicrophoneConstraints(reglages.audio)` — SPEC-019 avenant 2026-11-02).
+   * `undefined` = défauts historiques (mono, EC/NS/AGC, micro du système).
+   */
+  readonly microConstraints?: MicrophoneConstraints;
+  /** Piste micro ouverte dès l'ouverture du micro (mode VAD) ; défaut : push-to-talk. */
+  readonly microOpenOnStart?: boolean;
 }
 
 export interface VoiceWiring {
@@ -138,6 +147,12 @@ export function createVoiceWiring(options: VoiceWiringOptions): VoiceWiring {
   const plane: MediaPlane = createMediaPlane({
     localId: options.localId,
     timers,
+    // Réglages traduits en contraintes de capture (SPEC-019 avenant 2026-11-02) : la
+    // coquille les lit, le moteur les reçoit toutes faites — jamais l'inverse.
+    ...(options.microConstraints === undefined ? {} : { microConstraints: options.microConstraints }),
+    ...(options.microOpenOnStart === undefined
+      ? {}
+      : { microOpenOnStart: options.microOpenOnStart }),
     onLocalCandidate: (peerId, candidate) => {
       const current = mesh;
       if (current === null) {

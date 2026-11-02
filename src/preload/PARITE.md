@@ -5,11 +5,11 @@
 Compté sur `src/shell/ipc-contract.ts` (`IPC`, `INVOKE_CHANNELS`, `EVENT_CHANNELS`) et
 `src/preload/index.ts` (12 abonnements, `subscribe`) :
 
-- **32 canaux** dans le contrat : **20 invoke** (`settingsGet`, `settingsSet`, `settingsOpen`,
+- **34 canaux** dans le contrat : **22 invoke** (`settingsGet`, `settingsSet`, `settingsOpen`,
   `profileOpen`, `lobbyStatusGet`, `roomJoin`, `roomLeave`, `roomsDiscover`, `controlSetMute`,
   `controlSetDeafen`, `controlSetPushToTalk`, `controlSetGain`, `overlaySet`, `speakingSet`,
   `signalSend`, `avatarChoose`, `avatarGetImage`, `duckingApply`, `updateCheckNow`,
-  `updateInstallNow`) et
+  `updateInstallNow`, `talkSetMode`, `talkGetMode`) et
   **12 événements** (`eventParticipants`, `eventRoomState`, `eventRoomsDiscovered`,
   `eventControlState`, `eventSettingsChanged`, `eventOverlayGeometry`, `eventShortcutConflict`,
   `eventProfileOpen`, `eventDiscoveryStatus`, `eventSignal`, `eventSpeakingSet`,
@@ -20,11 +20,14 @@ Compté sur `src/shell/ipc-contract.ts` (`IPC`, `INVOKE_CHANNELS`, `EVENT_CHANNE
   `duckingApply` : le renderer qui mesure publie les pairs parlants, le main baisse les autres
   applications — la décision (jamais soi) est gardée par `shouldDuckForPeers`, l'exécution par
   le seam `DuckExec` de `src/main/ducking.ts`.
+  `talkSetMode` / `talkGetMode` (fix 0.4.2, 2026-11-02) : le sélecteur PTT/VAD écrit le mode AU PONT
+  (`{ mode: 'ptt' | 'vad' }`, garde close) et relit l'état de contrôle — une écriture, deux effets
+  cohérents (réglage persisté + piste micro).
   `updateCheckNow` / `updateInstallNow` / `eventUpdateState` (avenant SPEC-006b, 2026-11-01) :
   le renderer DEMANDE et AFFICHE, le main vérifie, télécharge et installe — `node:https` seul,
   hôtes allowlistés en dur, empreinte SHA-256 publiée vérifiée, jamais d'installation en salon
   actif ; les invoke portent une charge utile VIDE (le renderer ne choisit ni URL, ni version).)
-- Exposés au renderer : les 20 invoke + les 12 événements. Manquants : aucun. En trop : aucun.
+- Exposés au renderer : les 22 invoke + les 12 événements. Manquants : aucun. En trop : aucun.
 - Les quatre écarts décrits plus bas sont **corrigés** :
   1. `room-bridge.ts` type son discriminant sur la **VALEUR** du canon
      (`{ channel: typeof IPC.eventRoomState; payload: RoomStateCore }`) et émet `IPC.eventRoomState` :

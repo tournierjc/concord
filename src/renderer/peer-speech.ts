@@ -72,6 +72,29 @@ export interface PeerSpeechTracker {
   reset(): void;
 }
 
+/**
+ * Le battement de métrage, comme PORT injectable (fix 0.4.2, 2026-11-02).
+ *
+ * Le battement de `voice.ts` échantillonnait `plane.level()` au rythme de
+ * `requestAnimationFrame`. Or la fenêtre principale se cache dans la barre système à la
+ * croix (0.4.2) : Chromium throttle puis gèle les rAF d'une page cachée, et les halos
+ * « qui parle » mouraient silencieusement dans leur dernier état. La cadence sort donc
+ * d'un port — `browserBeat()` en production (la seule porte de cadence du renderer, même
+ * loi que `browser-timers.ts` pour l'échéance, SPEC-012 §4 côté page), une pompe manuelle
+ * en test. `voice.ts` ne pose AUCUN `setInterval` ambiant : la garde A4 de
+ * `tests/main-timers.node.test.ts` reste verte, et c'est voulu.
+ */
+export interface MeterBeatDriver {
+  /** Le temps courant du battement (`performance.now()` en production). */
+  now(): number;
+  /**
+   * Arme `tick` toutes les `periodMs`. Si un battement court déjà, l'ancien est désarmé
+   * avant l'armement : un redémarrage (`show` de la fenêtre) ne duplique jamais la cadence.
+   * Rend l'arrêt, idempotent.
+   */
+  start(tick: (now: number) => void, periodMs: number): () => void;
+}
+
 /** RMS linéaire (0..1) → dBFS borné à `MIN_DBFS`. Seule conversion du chemin distant. */
 export function rmsToDbfs(rms: number, config: VadConfig = DEFAULT_VAD_CONFIG): number {
   if (!Number.isFinite(rms) || rms <= 0) return MIN_DBFS;

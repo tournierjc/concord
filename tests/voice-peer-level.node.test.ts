@@ -29,6 +29,7 @@ import {
   type FakeDom,
 } from './fake-rtc.ts';
 import { PEER_LEVELS, peerSpeaking, SPEAKING_STALE_MS } from '../src/renderer/participant-state.ts';
+import type { MeterBeatDriver } from '../src/renderer/peer-speech.ts';
 import type { SignalIn } from '../src/engine/net/mesh.ts';
 
 /**
@@ -64,29 +65,31 @@ function installLanApi(sent: unknown[]): { setSpeakingCalls: string[][] } {
   return { setSpeakingCalls };
 }
 
-/** Le battement de `startMeter` est privé : on rejoue SA logique (50 ms) depuis le test. */
-function installFrameClock(): { ticks: Array<(now: number) => void>; pump: (now: number) => void } {
+/**
+ * Faux battement (fix 0.4.2, 2026-11-02) : le battement n'est plus une rAF mais un port
+ * injectable (`MeterBeatDriver`). Le test arme une pompe manuelle — aucune horloge réelle,
+ * aucun frame. Chaque `pump(now)` rejoue TOUS les tours armés (le battement réel est une
+ * cadence qui se retient), et le temps horodaté est celui que le test donne.
+ */
+function installFrameClock(): { pump: (now: number) => void; makeBeat: () => MeterBeatDriver } {
   const ticks: Array<(now: number) => void> = [];
-  Object.defineProperty(globalThis, 'requestAnimationFrame', {
-    value: (callback: (now: number) => void): number => {
-      ticks.push(callback);
-      return ticks.length;
+  let time = 0;
+  const driver: MeterBeatDriver = {
+    now: () => time,
+    start(tick: (now: number) => void): () => void {
+      ticks.push(tick);
+      return () => {
+        const index = ticks.indexOf(tick);
+        if (index >= 0) ticks.splice(index, 1);
+      };
     },
-    configurable: true,
-    writable: true,
-  });
-  Object.defineProperty(globalThis, 'cancelAnimationFrame', {
-    value: (): void => undefined,
-    configurable: true,
-    writable: true,
-  });
+  };
   return {
-    ticks,
+    makeBeat: () => driver,
     pump(now: number): void {
-      // Une pastille par tour : `tick` se re-planifie lui-même, comme dans la page.
-      const pending = [...ticks];
-      ticks.length = 0;
-      for (const tick of pending) tick(now);
+      time = now;
+      // Le battement est une cadence persistante : chaque tour rejoue le tick armé.
+      for (const tick of [...ticks]) tick(now);
     },
   };
 }
@@ -120,7 +123,7 @@ describe('défaut (a) — la table PEER_LEVELS est alimentée par le plan média
     // Niveau contrôlé : `b` est LOUD, `c` n'est JAMAIS mesuré (aucun flux).
     setFakeAnalyserLevel('pair-b', LOUD);
 
-    voice.openVoice('salon|a', 'a');
+    voice.openVoice('salon|a', 'a', undefined, { makeBeat: clock.makeBeat });
     // L'abonnement du câblage : `installLanApi` n'a pas de porte publique de delivery,
     // on la prend par un second écouteur que le faux lanAPI n'a pas — à la place, on
     // utilise la VRAIE porte : `openVoice` s'abonne via `lanApi().onSignal`. Le faux
@@ -169,7 +172,7 @@ describe('défaut (a) — la table PEER_LEVELS est alimentée par le plan média
     PEER_LEVELS.clear();
 
     setFakeAnalyserLevel('pair-b', LOUD);
-    voice.openVoice('salon|a', 'a');
+    voice.openVoice('salon|a', 'a', undefined, { makeBeat: clock.makeBeat });
     const deliver = makeDeliverer();
     await flush();
     deliver({ kind: 'peer-joined', peerId: 'b', name: 'Bob' });
@@ -200,7 +203,7 @@ describe('défaut (a) — la table PEER_LEVELS est alimentée par le plan média
     PEER_LEVELS.clear();
 
     setFakeAnalyserLevel('pair-b', LOUD);
-    voice.openVoice('salon|a', 'a');
+    voice.openVoice('salon|a', 'a', undefined, { makeBeat: clock.makeBeat });
     const deliver = makeDeliverer();
     await flush();
     deliver({ kind: 'peer-joined', peerId: 'b', name: 'Bob' });
@@ -234,7 +237,7 @@ describe('défaut (a) — la table PEER_LEVELS est alimentée par le plan média
     const voice = await import('../src/renderer/voice.ts');
     voice.closeVoice();
     PEER_LEVELS.clear();
-    voice.openVoice('salon|a', 'a');
+    voice.openVoice('salon|a', 'a', undefined, { makeBeat: clock.makeBeat });
     const deliver = makeDeliverer();
     await flush();
     deliver({ kind: 'peer-joined', peerId: 'b', name: 'Bob' });

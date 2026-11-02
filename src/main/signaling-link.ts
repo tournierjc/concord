@@ -40,6 +40,7 @@ import { isLanCandidate } from '../engine/rtc/ice-filter';
 import { isAvatarRef } from '../shell/avatar';
 import { AVATAR_WIRE_BASE64_MAX_CHARS, encodeAvatarPngForWire, type AvatarStore } from './avatar-store';
 import { systemTimers, type MainTimers } from './timers';
+import { isOrchestratorAddress } from './discovery-bridge';
 import { SIGNAL_MAX_LINE_BYTES, type SignalIn, type SignalOut } from '../shell/ipc-contract';
 
 /** Longueur maximale d'une ligne JSON (SPEC-007 §4.3) : au-delà, la connexion est fermée. */
@@ -83,6 +84,13 @@ export interface SignalingLinkOptions {
    * permet, sans scrutation ni délai arbitraire.
    */
   onListen?: (listen: { host: string; port: number }) => void;
+  /**
+   * Appelé une fois, quand AUCUN des ports n'a pu être écouté (rôle hôte uniquement ; fix 0.4.2,
+   * 2026-11-02, D2). Sans ce rappel, un refus de bind (10 ports occupés) restait invisible :
+   * `onListen` ne venait jamais, aucune annonce n'était publiée, et le lobby affichait un salon
+   * « créé » silencieux. Le main s'en sert pour publier un état `discovery` dégradé motivé.
+   */
+  onBindRefused?: (detail: string) => void;
 }
 
 export interface SignalingLinkStats {
@@ -131,9 +139,15 @@ export interface InterfaceLike {
  * Rend l'adresse d'écoute du lien : la première adresse IPv4 privée (RFC1918) non interne, et le
  * loopback à défaut. Aucune autre valeur ne sort d'ici : `0.0.0.0`, `::` et les adresses publiques
  * ne sont jamais des candidats, donc le lien ne peut pas écouter large par accident.
+ *
+ * Multi-homing (fix 0.4.2, 2026-11-02, D3) : un pont Docker (`172.17.x.x`, `172.18.x.x`) est une
+ * candidate privée LÉGITIME mais injoignable depuis le LAN physique — un voisin qui la joint se
+ * heurte au mur du conteneur. Comme dans `discovery-bridge.rankAnnounceAddresses`, ces plages ne
+ * passent devant une candidate privée ordinaire que si rien de meilleur n'existe.
  */
 export function pickListenHost(interfaces: Record<string, InterfaceLike[] | undefined>): string {
   const sorted = Object.keys(interfaces).sort((a, b) => a.localeCompare(b));
+  const candidates: string[] = [];
   for (const name of sorted) {
     for (const entry of interfaces[name] ?? []) {
       const isV4 = entry.family === 'IPv4' || entry.family === 4;
@@ -141,10 +155,13 @@ export function pickListenHost(interfaces: Record<string, InterfaceLike[] | unde
       if (!isAllowedListenHost(entry.address)) continue;
       // Une adresse de lien-local (169.254/16) n'est pas un réseau local utile : on l'ignore.
       if (entry.address.startsWith('169.254.')) continue;
-      return entry.address;
+      candidates.push(entry.address);
     }
   }
-  return '127.0.0.1';
+  // Priorité aux adresses joignables depuis le LAN : un pont Docker n'est retenu qu'en dernier.
+  const plausible = candidates.filter((address) => !isOrchestratorAddress(address));
+  const chosen = plausible.length > 0 ? plausible[0] : candidates[0];
+  return chosen ?? '127.0.0.1';
 }
 
 /* ------------------------------------------------------------------ */
@@ -612,6 +629,13 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
         refuse(
           `lien refusé : aucune des ${SIGNALING_PORT_RANGE} adresses de port ${basePort}-${basePort + SIGNALING_PORT_RANGE - 1} n'a pu être écoutée sur ${host} (${lastDetail})`,
         );
+        // Le refus de bind doit être DIT (fix 0.4.2, 2026-11-02, D2) : `onListen` ne viendra
+        // jamais, donc l'annonce du salon non plus. Sans ce rappel, le lobby restait muet.
+        try {
+          options.onBindRefused?.(lastDetail);
+        } catch {
+          // Un callback qui lève ne doit jamais empêcher le refus lui-même.
+        }
         return;
       }
       const candidateServer = createServer();

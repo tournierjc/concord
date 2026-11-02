@@ -45,11 +45,84 @@ const OPUS_FMTP_OVERRIDES: ReadonlyArray<readonly [string, string]> = [
 const OPUS_DEFAULT_MINPTIME = 'minptime=10'
 
 /** Contraintes micro : mono, annulation d'écho, réduction de bruit, gain auto. */
-export const MIC_CONSTRAINTS: MediaTrackConstraints = {
+export const MIC_CONSTRAINTS: MicrophoneConstraints = {
   channelCount: 1,
   echoCancellation: true,
   noiseSuppression: true,
   autoGainControl: true,
+}
+
+/**
+ * Contraintes micro réglables (SPEC-019, avenant 2026-11-02, arbitrage JC).
+ *
+ * Ce que l'amendement autorise, et rien de plus : la COQUILLE peut traduire ses réglages en
+ * contraintes de capture — quel périphérique parle, si le navigateur annule l'écho et réduit le
+ * bruit, et de combien le signal est monté. Ces valeurs ne voyagent jamais sur le réseau : ni
+ * ICE, ni Opus, ni la topologie du maillage ne sont touchés. Le contrat média gelé de SPEC-005 §2
+ * reste intact ; seul le prétraitement du micro devient réglable.
+ *
+ * `autoGainControl` n'est PAS exposé : le réglage `audio.inputGain` existe déjà et un AGC qui
+ * pomperait par-dessus rendrait le gain imprévisible — les deux traitements se contrediraient.
+ * Le gain est borné 0..2 par le schéma de réglages ; la borne est re-vérifiée ICI, côté moteur,
+ * parce qu'un appelant qui propagerait une valeur aberrante couperait le micro sans explication.
+ */
+export interface MicrophoneSettingsLike {
+  /** Identifiant du périphérique d'entrée (`null`/absent = défaut du système). */
+  readonly inputDeviceId?: string | null
+  /** Réduction de bruit (RNNoise côté navigateur). */
+  readonly noiseSuppression?: boolean
+  /** Annulation d'écho. */
+  readonly echoCancellation?: boolean
+  /**
+   * Gain d'entrée, 0..2 (1 = neutre). Une valeur hors bornes est refusée, pas arrondie.
+   * Nom explicite (`inputGain`) : `MediaTrackConstraints` ne définit pas de `gain`, le
+   * champ additionnel doit donc être porté par `MicrophoneConstraints` lui-même.
+   */
+  readonly inputGain?: number
+}
+
+/** Contraintes prêtes pour `getUserMedia({ audio: … })` (deviceId est une contrainte idéale). */
+export interface MicrophoneConstraints {
+  /** Une facette OBLIGATOIREMENT chaîne : jamais le `ConstrainDOMString` du DOM (tableau/objet). */
+  deviceId?: string
+  channelCount?: number
+  echoCancellation?: boolean
+  noiseSuppression?: boolean
+  autoGainControl?: boolean
+  /** Gain appliqué au signal capturé, 0..2 (seule extension hors type DOM, cf. `MicrophoneSettingsLike`). */
+  gain?: number
+}
+
+/**
+ * Fabrique les contraintes de capture depuis les réglages. PURE, aucune horloge, aucun I/O.
+ *
+ * Les valeurs absentes ou non valides retombent sur les défauts de `MIC_CONSTRAINTS` (mono,
+ * EC/NS/AGC à `true`) : un réglage manquant ne peut pas éteindre le traitement anti-bruit par
+ * accident, pas plus qu'un `inputGain` non numérique ne peut passer — il est ignoré, le gain
+ * reste neutre.
+ */
+export function buildMicrophoneConstraints(
+  settings: MicrophoneSettingsLike | undefined,
+): MicrophoneConstraints {
+  const constraints: MicrophoneConstraints = {
+    channelCount: 1,
+    echoCancellation:
+      typeof settings?.echoCancellation === 'boolean'
+        ? settings.echoCancellation
+        : MIC_CONSTRAINTS.echoCancellation === true,
+    noiseSuppression:
+      typeof settings?.noiseSuppression === 'boolean'
+        ? settings.noiseSuppression
+        : MIC_CONSTRAINTS.noiseSuppression === true,
+    autoGainControl: MIC_CONSTRAINTS.autoGainControl === true,
+  }
+  const deviceId = settings?.inputDeviceId
+  if (typeof deviceId === 'string' && deviceId.length > 0) constraints.deviceId = deviceId
+  const gain = settings?.inputGain
+  if (typeof gain === 'number' && Number.isFinite(gain) && gain >= 0 && gain <= 2) {
+    constraints.gain = gain
+  }
+  return constraints
 }
 
 /** Résumé numérique d'un `RTCStatsReport` (forme identique à `PeerStats`). */

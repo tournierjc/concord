@@ -34,6 +34,7 @@ import {
   type SignalIn,
   type SignalOut,
   type SpeakingSetPayload,
+  type TalkModeDto,
   type UpdateStateDto,
   type AvatarChooseResult,
 } from '../shell/ipc-contract';
@@ -134,6 +135,10 @@ const lanAPI: LanAPI = {
   },
   onUpdateState: (listener: (state: UpdateStateDto) => void) =>
     subscribe<UpdateStateDto>(IPC.eventUpdateState, listener),
+  // Mode de prise de parole (fix 0.4.2, 2026-11-02) : deux méthodes en queue, jamais un tri.
+  // Le renderer ne déduit pas le mode, il l'écrit au pont puis relit l'état de contrôle.
+  setTalkMode: (mode: TalkModeDto) => invoke<ControlStateDto>(IPC.talkSetMode, { mode }),
+  getTalkMode: () => invoke<ControlStateDto>(IPC.talkGetMode),
 };
 
 // Gel : le renderer ne peut ni ajouter, ni remplacer, ni supprimer une méthode du pont.

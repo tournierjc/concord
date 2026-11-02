@@ -76,6 +76,7 @@ import {
   type SignalIn,
   type SignalOut,
   type SpeakingSetPayload,
+  type TalkModeDto,
   type UpdateStateDto,
 } from '../shell/ipc-contract';
 import {
@@ -876,6 +877,14 @@ function isDuckingApplyPayload(raw: unknown): raw is { speaking: string[] } {
   return Array.isArray(speaking) && speaking.every((id: unknown) => typeof id === 'string');
 }
 
+// Mode de prise de parole (fix 0.4.2, 2026-11-02) : le contrat a déjà borné la valeur à
+// 'ptt' | 'vad', ce prédicat ne fait que la rendre typée au handler (jamais un cast).
+function isTalkModePayload(raw: unknown): raw is { mode: TalkModeDto } {
+  if (!isRecord(raw)) return false;
+  const mode = raw['mode'];
+  return mode === 'ptt' || mode === 'vad';
+}
+
 function isOverlayPatchPayload(raw: unknown): raw is OverlayPatchPayload {
   if (!isRecord(raw)) return false;
   const visible = raw['visible'];
@@ -932,6 +941,13 @@ function startSignalingLink(roomId: string, name: string, selfId: string, avatar
     host: role === 'client' && remote ? remote.host : listenHost,
     ...(role === 'client' && remote ? { port: remote.port } : {}),
     now: () => systemTimers.now(),
+    // Bind refusé (fix 0.4.2, 2026-11-02, D2) : les 10 ports sont occupés — `onListen` ne
+    // viendra jamais, donc aucune annonce ne partira. Le dire au lobby vaut mieux qu'un salon
+    // « créé » muet : même événement de santé que les échecs mDNS, motif « port indisponible ».
+    onBindRefused: (detail) => {
+      console.warn(`[signalisation] bind refusé sur ${listenHost} : ${detail}`);
+      publishDiscoveryHealth('mdns-down');
+    },
     onMessage: (message) => {
       // L'annuaire suit la présence de signalisation AVANT d'envoyer le message au renderer :
       // `peer-joined`/`peer-left` étaient jusqu'ici transmis sans que personne ne tienne la liste.
@@ -1146,6 +1162,26 @@ function registerIpcHandlers(): void {
       if (service === null) return;
       void service.installUpdateNow();
     },
+    // Mode de prise de parole (fix 0.4.2, 2026-11-02) : UNE écriture, deux effets cohérents.
+    // Le pont (`RoomBridge.setMode`) publie l'état de contrôle que l'UI lit — et le réglage
+    // `talk.mode` est persisté par le même geste : le renderer ne peut pas écrire l'un sans
+    // l'autre (c'était le défaut : le sélecteur écrivait les réglages, personne ne les lisait).
+    // La persistance suit le même chemin que `settingsSet` (`applySettingsPatch` + `persist`).
+    [IPC.talkSetMode]: (payload: unknown) => {
+      const mode = expectPayload(IPC.talkSetMode, payload, isTalkModePayload).mode;
+      const result = applySettingsPatch(settings, { talk: { ...settings.talk, mode } });
+      // `applySettingsPatch` peut refuser (schéma invalide) : le pont ne prend alors QUE la
+      // valeur du contrat validé — un refus de persistance ne laisse jamais l'UI croire au
+      // nouveau mode sans que le réglage le porte. On persiste ce qui est accepté, sinon on
+      // refuse net (le renderer voit l'erreur, pas un mode affiché à tort).
+      if (!result.ok) {
+        const detail = result.errors.map((error) => `${error.path}:${error.code}`).join(', ');
+        throw new Error(`mode de prise de parole refusé (${detail})`);
+      }
+      persist(result.value);
+      return bridge.setMode(mode);
+    },
+    [IPC.talkGetMode]: () => bridge.getControlState(),
   };
 
   for (const channel of Object.keys(handlers) as IpcInvokeChannel[]) {

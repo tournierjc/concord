@@ -314,6 +314,10 @@ export function App(): JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [discovery, setDiscovery] = useState<DiscoveryState>(EMPTY_DISCOVERY);
+  // Fix 0.4.2, 2026-11-02 — compteur de CHANGEMENT de mode de prise de parole : il ne
+  // s'incrément que quand `control.mode` change vraiment, et `Room` l'utilise pour
+  // réappliquer la piste (VAD ouvre le micro, PTT le ferme) sur la session en cours.
+  const [modeEpoch, setModeEpoch] = useState(0);
   // Pied de lobby : les trois mesures du main (port lu, méthode, santé), jamais recomposées ici.
   const [lobbyStatus, setLobbyStatus] = useState<LobbyStatusDto>(EMPTY_LOBBY_STATUS);
   // Notification du main : `openProfile()` a été demandé (bouton d'identité, puis panneau complet
@@ -344,7 +348,16 @@ export function App(): JSX.Element {
         setRoom(state);
         setScreen(state.roomId ? 'room' : 'rooms');
       }),
-      api.onControlState(setControl),
+      api.onControlState((state) => {
+        // Fix 0.4.2, 2026-11-02 — un changement de MODE de prise de parole doit être appliqué
+        // à la piste immédiatement (VAD ⇒ micro ouvert, PTT ⇒ repos fermé). `modeEpoch` ne
+        // bouge que sur un vrai changement de mode : un appui PTT (qui change `pushToTalk`,
+        // pas `mode`) ne déclenche aucun geste de mode.
+        setControl((previous) => {
+          if (previous.mode !== state.mode) setModeEpoch((epoch) => epoch + 1);
+          return state;
+        });
+      }),
       api.onSettingsChanged(({ settings: next }) => {
         setSettings(next);
         applyTheme(document.documentElement, next.theme);
@@ -616,9 +629,12 @@ export function App(): JSX.Element {
           control={control}
           maxParticipants={MAX_ROOM_PARTICIPANTS}
           shortcut={settings.talk.pttAccelerator}
+          voiceSettings={{ audio: settings.audio, talk: settings.talk }}
+          modeEpoch={modeEpoch}
           onMute={(muted) => void api.setMute(muted)}
           onDeafen={(deafened) => void api.setDeafen(deafened)}
           onPushToTalk={(active) => void api.setPushToTalk(active)}
+          onSetMode={(mode) => void api.setTalkMode(mode).catch(() => undefined)}
           onGain={(participantId, gain) => void api.setGain({ participantId, gain })}
           onLeave={() => void leaveRoom()}
         />

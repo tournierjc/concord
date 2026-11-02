@@ -30,6 +30,7 @@ import {
 } from './fake-rtc.ts';
 import { PEER_LEVELS } from '../src/renderer/participant-state.ts';
 import type { SignalIn } from '../src/engine/net/mesh.ts';
+import type { MeterBeatDriver } from '../src/renderer/peer-speech.ts';
 
 let deliverer: ((message: SignalIn) => void) | null = null;
 
@@ -58,26 +59,24 @@ function installLanApi(sent: unknown[]): void {
   });
 }
 
-function installFrameClock(): { pump: (now: number) => void } {
+function installFrameClock(): { pump: (now: number) => void; makeBeat: () => MeterBeatDriver } {
   const ticks: Array<(now: number) => void> = [];
-  Object.defineProperty(globalThis, 'requestAnimationFrame', {
-    value: (callback: (now: number) => void): number => {
-      ticks.push(callback);
-      return ticks.length;
+  let time = 0;
+  const driver: MeterBeatDriver = {
+    now: () => time,
+    start(tick: (now: number) => void): () => void {
+      ticks.push(tick);
+      return () => {
+        const index = ticks.indexOf(tick);
+        if (index >= 0) ticks.splice(index, 1);
+      };
     },
-    configurable: true,
-    writable: true,
-  });
-  Object.defineProperty(globalThis, 'cancelAnimationFrame', {
-    value: (): void => undefined,
-    configurable: true,
-    writable: true,
-  });
+  };
   return {
+    makeBeat: () => driver,
     pump(now: number): void {
-      const pending = [...ticks];
-      ticks.length = 0;
-      for (const tick of pending) tick(now);
+      time = now;
+      for (const tick of [...ticks]) tick(now);
     },
   };
 }
@@ -109,7 +108,7 @@ describe('défaut (b) — la coquille route l’état ICE pair par pair, sur pre
     const voice = await import('../src/renderer/voice.ts');
     voice.closeVoice();
     PEER_LEVELS.clear();
-    voice.openVoice('salon|a', 'a');
+    voice.openVoice('salon|a', 'a', undefined, { makeBeat: clock.makeBeat });
     await flush();
     const deliver = deliverer;
     if (deliver === null) throw new Error('lanAPI non installé');

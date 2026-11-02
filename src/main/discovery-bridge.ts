@@ -28,12 +28,43 @@ import { systemTimers, type MainTimers } from './timers';
 import {
   MAX_ROOM_NAME_LENGTH,
   ROOM_DISCOVERY_MAX_ROOMS,
+  ROOM_DISCOVERY_TTL_MS,
   createRoomRegistry,
   type MdnsRecordLike,
 } from '../engine/net/room-discovery';
 
 /** Type de service annoncé par un salon : `_concord._udp.local`. */
 export const DISCOVERY_SERVICE_TYPE = 'concord';
+
+/**
+ * Adresses d'interface plausibles pour ANNONCER un salon (fix 0.4.2, 2026-11-02, D3).
+ *
+ * Une machine multi-homed (Docker, WSL, VPN) présente souvent `172.17.x.x` (pont Docker) en
+ * tête de liste : l'adresse est techniquement privée (RFC 1918) mais injoignable depuis le
+ * LAN physique — le voisin qui la joint se heurte au mur du conteneur. La règle est pure et
+ * bornée : si AU MOINS UNE candidate privée hors ces plages d'orchestrateur existe, on ne retient
+ * que celles-là ; sinon (machine uniquement derrière Docker) on garde tout, car rien de meilleur
+ * n'existe. Le registre reste seul juge de l'acceptation LAN (`isLanCandidate`).
+ */
+const ORCHESTRATOR_PREFIXES: readonly string[] = ['172.17.', '172.18.'];
+
+/** Vrai si l'adresse appartient à une plage de pont d'orchestrateur (Docker/WSL : 172.17/16, 172.18/16). */
+export function isOrchestratorAddress(address: string): boolean {
+  return ORCHESTRATOR_PREFIXES.some((prefix) => address.startsWith(prefix));
+}
+
+/**
+ * Classe les adresses annoncables : les plausibles d'abord, dans l'ordre reçu ; les plages
+ * d'orchestrateur ne passent devant une candidate privée ordinaire que si rien de meilleur
+ * n'existe. Pure, aucune I/O, testable sur une table de candidates.
+ */
+export function rankAnnounceAddresses(addresses: readonly string[]): string[] {
+  const strings = addresses.filter((entry) => typeof entry === 'string' && entry.length > 0);
+  const plausible = strings.filter((entry) => !isOrchestratorAddress(entry));
+  // Si TOUTES sont des ponts d'orchestrateur, on les garde dans l'ordre — un voisin sur le
+  // même pont reste joignable, et rien de mieux n'existe sur cette machine.
+  return plausible.length > 0 ? plausible : strings;
+}
 
 /**
  * Fenêtre du scan initial, bornée à 3 s : à son terme la liste courante est publiée une dernière
@@ -145,6 +176,12 @@ export interface DiscoveryBridge {
   retract(): void;
   /** Ce que NOUS annonçons (`null` sinon) — permet de vérifier et de diagnostiquer. */
   announced(): { name: string; port: number } | null;
+  /**
+   * Le pont est-il en santé (`health === 'ok'`) ? Lu par le main pour armer la re-annonce
+   * périodique du salon hébergé (fix 0.4.2, 2026-11-02) : publier sur une pile mDNS morte
+   * serait un geste compté sans effet.
+   */
+  healthy(): boolean;
 }
 
 /** Objet nu, ou `null` : évite tout `as` non justifié sur une donnée venue du réseau. */
@@ -180,8 +217,10 @@ function normaliseTxt(txt: unknown): Readonly<Record<string, string>> | null {
  * Service mDNS → `MdnsRecordLike`.
  *
  * Choix de l'hôte, et pourquoi ce n'est PAS un filtre : on préfère le nom mDNS (`*.local`) quand il
- * est annoncé, sinon la première adresse fournie. Le registre reste seul juge de l'acceptation
- * (`isLanCandidate`) ; la règle LAN n'est pas réimplémentée ici.
+ * est annoncé, sinon la PREMIÈRE adresse plausible (fix 0.4.2, 2026-11-02, D3 : un pont Docker
+ * 172.17/172.18 en tête de liste est recalé derrière toute candidate privée ordinaire — voir
+ * `rankAnnounceAddresses`). Le registre reste seul juge de l'acceptation (`isLanCandidate`) ;
+ * la règle LAN n'est pas réimplémentée ici.
  */
 function toRecord(service: Service): MdnsRecordLike | null {
   const name = typeof service.name === 'string' ? service.name.trim() : '';
@@ -190,9 +229,10 @@ function toRecord(service: Service): MdnsRecordLike | null {
 
   const mdnsHost = typeof service.host === 'string' ? service.host.trim() : '';
   const addresses = Array.isArray(service.addresses) ? service.addresses : [];
+  const ranked = rankAnnounceAddresses(addresses);
   const host = mdnsHost.toLowerCase().endsWith('.local')
     ? mdnsHost
-    : (addresses.find((address) => typeof address === 'string') ?? mdnsHost);
+    : (ranked[0] ?? mdnsHost);
   if (typeof host !== 'string' || host.length === 0) return null;
 
   const txt = normaliseTxt(service.txt);
@@ -248,6 +288,19 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
   let mdns: MdnsPort | null = null;
   let browser: BrowserLike | null = null;
   let scanTimer: unknown = null;
+  // Watchdog réseau (fix 0.4.2, 2026-11-02) : `start()` n'était appelé qu'UNE fois au boot.
+  // Une machine sans IPv4 routable au démarrage restait `offline` pour toute la session — le
+  // commentaire « laisse le prochain start() relire le réseau » n'avait aucun appelant. Le
+  // watchdog relit `hasNetwork()` et rappelle `start()` (déjà gardé, donc idempotent) tant
+  // que la santé n'est pas `ok`.
+  let watchdogTimer: unknown = null;
+  const WATCHDOG_INTERVAL_MS = 5000;
+  // Re-annonce périodique du salon hébergé (fix 0.4.2, 2026-11-02) : le registre du LECTEUR
+  // pérempe une annonce après `ROOM_DISCOVERY_TTL_MS` (12 s). Sans battement, la re-annonce
+  // ne partait que si la population bougeait — un salon calme disparaissait de la liste des
+  // voisins au bout de 12 s, silencieusement, et revenait au premier arrivé.
+  let reannounceTimer: unknown = null;
+  let reannounceOptions: AnnounceOptions | null = null;
   let lastPublished = '';
   let closed = false;
 
@@ -255,6 +308,20 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
     if (scanTimer !== null) {
       timers.cancel(scanTimer);
       scanTimer = null;
+    }
+  }
+
+  function clearWatchdog(): void {
+    if (watchdogTimer !== null) {
+      timers.cancel(watchdogTimer);
+      watchdogTimer = null;
+    }
+  }
+
+  function clearReannounce(): void {
+    if (reannounceTimer !== null) {
+      timers.cancel(reannounceTimer);
+      reannounceTimer = null;
     }
   }
 
@@ -269,6 +336,25 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
     if (next === health) return;
     health = next;
     options.onHealth?.(next);
+  }
+
+  /**
+   * Le watchdog réseau (fix 0.4.2, 2026-11-02) : tant que la santé n'est pas `ok`, relire
+   * `hasNetwork()` et retenter `start()` toutes les ~5 s. `start()` est déjà gardée
+   * (`browser !== null` ⇒ no-op), donc un tick sur une découverte vivante est gratuit. La
+   * cadence est désarmée dès que la santé revient à `ok` et au `close()` — aucune échéance
+   * ne survit au bridge.
+   */
+  function armWatchdog(): void {
+    if (closed || watchdogTimer !== null) return;
+    watchdogTimer = timers.repeat(WATCHDOG_INTERVAL_MS, () => {
+      if (closed) return;
+      if (health === 'ok') {
+        clearWatchdog();
+        return;
+      }
+      start();
+    });
   }
 
   function list(): RoomSummaryDto[] {
@@ -319,9 +405,10 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
     if (!hasNetwork()) {
       setHealth('offline');
       // Sans interface, le browse échouerait de toute façon : on ne réveille pas la pile mDNS
-      // pour rien et on laisse le prochain `start()` (celui qu'une remontée d'interface rend
-      // légitime) relire le réseau. C'est aussi ce qui rend « relisible » le contrat d'idempotence
-      // de `onHealth` : un `start()` hors-ligne suivi d'un `start()` en ligne publie bien « ok ».
+      // pour rien. C'est le WATCHDOG (fix 0.4.2, 2026-11-02) qui est « le prochain start() »
+      // que ce commentaire promettait : il relit le réseau toutes les ~5 s tant que la santé
+      // n'est pas `ok` et rappelle cette fonction (garde d'idempotence ci-dessus).
+      armWatchdog();
       return;
     }
     try {
@@ -337,6 +424,9 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
       // interface ; le réseau est revenu depuis). Sans cette sortie, le bandeau « hors-ligne »
       // restait affiché jusqu'au redémarrage alors que la découverte fonctionne de nouveau.
       if (health !== 'ok') setHealth(hasNetwork() ? 'ok' : 'offline');
+      // Santé revenue : le watchdog n'a plus rien à relire (il se redésarme aussi à son prochain
+      // tour, mais le faire ici évite un tick inutile après chaque remontée).
+      if (health === 'ok') clearWatchdog();
     } catch (error) {
       // mDNS indisponible (port 5353 occupé, interface absente) : on dégrade, on ne plante pas —
       // et on le DIT au lobby, qui affiche `discovery.error.mdns.*` ou `discovery.offline.*`.
@@ -344,6 +434,8 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
       browser = null;
       mdns = null;
       setHealth(hasNetwork() ? 'mdns-down' : 'offline');
+      // Le browse a échoué : le prochain tick du watchdog retentera (5353 peut se libérer).
+      armWatchdog();
     }
     clearScanTimer();
     scanTimer = timers.once(scanWindowMs, () => {
@@ -387,12 +479,38 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
       console.warn('[discovery] annonce mDNS refusée', error);
       return;
     }
+    // Re-annonce périodique (fix 0.4.2, 2026-11-02, D2) : le registre du LECTEUR pérempe une
+    // annonce après `ROOM_DISCOVERY_TTL_MS` (12 s). Sans battement sous le TTL, un salon calme
+    // disparaissait de la liste des voisins jusqu'au prochain mouvement de population. La
+    // cadence est strictement inférieure au TTL (TTL/2 = 6 s) : deux marges de sécurité.
+    reannounceOptions = { roomName: room.roomName, port, participants: room.participants };
+    armReannounce();
     // Une entrée de nous-mêmes laissée par un passage précédent ne doit pas rester dans la liste.
     registry.remove(instanceId);
     publish();
   }
 
+  /**
+   * Le battement de re-annonce (fix 0.4.2, 2026-11-02) : tant qu'une annonce vit, la republier
+   * à une cadence sous le TTL du registre. Le battement ne fait qu'appeler `announce()` — le
+   * même chemin que le geste initial (retrait puis republication, TXT à jour). Désarmé par
+   * `retract()` et par `close()` : aucune cadence ne survit au retrait de l'annonce.
+   */
+  function armReannounce(): void {
+    if (reannounceTimer !== null) return;
+    const everyMs = Math.max(1000, Math.floor(ROOM_DISCOVERY_TTL_MS / 2));
+    reannounceTimer = timers.repeat(everyMs, () => {
+      const pending = reannounceOptions;
+      if (closed || pending === null || announcedService === null) return;
+      announce(pending);
+    });
+  }
+
   function retract(): void {
+    // Le retrait de l'annonce désarme AUSSI son battement de rafraîchissement (fix 0.4.2,
+    // 2026-11-02) : sans quoi un salon fermé continuerait de se faire annoncer par le timer.
+    clearReannounce();
+    reannounceOptions = null;
     const service = announcedService;
     announcedService = null;
     announcedPort = null;
@@ -412,6 +530,7 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
   function close(): void {
     closed = true;
     clearScanTimer();
+    clearWatchdog();
     retract();
     const activeBrowser = browser;
     const activeMdns = mdns;
@@ -429,5 +548,5 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
     }
   }
 
-  return { list, start, close, announce, retract, announced };
+  return { list, start, close, announce, retract, announced, healthy: () => health === 'ok' };
 }

@@ -222,14 +222,20 @@ describe('SPEC-012 §4 — la porte unique, mesurée dans les sources', () => {
   const AMBIENT = /\bset(Timeout|Interval)\s*\(/;
 
   it('A3 : les appels ambiants n’existent que dans une porte par processus', () => {
+    // Porte de cadence du renderer (fix 0.4.2, 2026-11-02) : `browser-beat.ts` est la SEULE
+    // porte de `setInterval` de la page — le battement de mesure ne peut plus dépendre des
+    // rAF, gelées quand la fenêtre est cachée dans la barre système.
     assert.deepEqual(filesMatching(AMBIENT), [
       'src/main/timers.ts',
+      'src/renderer/browser-beat.ts',
       'src/renderer/browser-timers.ts',
     ]);
   });
 
   it('A4 : `setInterval` n’existe que dans la porte du main (une seule cadence légitime)', () => {
-    assert.deepEqual(filesMatching(/\bsetInterval\s*\(/), ['src/main/timers.ts']);
+    // `browser-beat.ts` (2026-11-02) : la cadence de la page est une deuxième porte, la
+    // seule cadence légitime du renderer (mesure « qui parle » hors rAF).
+    assert.deepEqual(filesMatching(/\bsetInterval\s*\(/), ['src/main/timers.ts', 'src/renderer/browser-beat.ts']);
   });
 
   it('`unref` et les désarmements bruts ne sortent pas de `src/main/timers.ts`', () => {

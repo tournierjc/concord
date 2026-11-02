@@ -57,6 +57,13 @@ export const IPC = {
   // Deux invoke à charge utile VIDE — le renderer ne choisit ni URL, ni version, ni chemin.
   updateCheckNow: 'lan:update:check-now',
   updateInstallNow: 'lan:update:install-now',
+  // Mode de prise de parole (fix 0.4.2, 2026-11-02) : le sélecteur PTT/VAD du salon et le
+  // panneau Réglages étaient SANS CHEMIN — `RoomBridge.setMode` n'avait aucun appelant et
+  // aucun canal `talk.*` n'existait. Deux invoke ADDITIFS en queue de liste : `talkSetMode`
+  // écrit le réglage `talk.mode` ET met le pont à jour ; `talkGetMode` rend l'état de
+  // contrôle courant (le renderer ne déduit pas le mode, il le lit).
+  talkSetMode: 'lan:talk:set-mode',
+  talkGetMode: 'lan:talk:get-mode',
   // main → renderer (send/on)
   eventParticipants: 'lan:event:participants',
   // (AD-17 D1) `lan:event:speaking` retiré : le renderer mesure déjà le niveau, et le main n'a
@@ -103,7 +110,9 @@ export type IpcInvokeChannel = (typeof IPC)[
   | 'avatarGetImage'
   | 'duckingApply'
   | 'updateCheckNow'
-  | 'updateInstallNow'];
+  | 'updateInstallNow'
+  | 'talkSetMode'
+  | 'talkGetMode'];
 
 export type IpcEventChannel = (typeof IPC)[
   | 'eventParticipants'
@@ -140,6 +149,9 @@ export const INVOKE_CHANNELS: readonly IpcInvokeChannel[] = [
   IPC.duckingApply,
   IPC.updateCheckNow,
   IPC.updateInstallNow,
+  // Mode de prise de parole (2026-11-02) : ajoutés en QUEUE, aucun réordonnancement.
+  IPC.talkSetMode,
+  IPC.talkGetMode,
 ];
 
 export const EVENT_CHANNELS: readonly IpcEventChannel[] = [
@@ -480,6 +492,14 @@ export interface LanAPI {
   installUpdateNow(): Promise<void>;
   /** L'état de la machine de mise à jour, publié par le main à chaque transition. */
   onUpdateState(listener: (state: UpdateStateDto) => void): () => void;
+  /**
+   * Mode de prise de parole (fix 0.4.2, 2026-11-02) : écrire `talk.mode` AU PONT (le main
+   * écrit le réglage ET met `RoomBridge` à jour, d'une seule source) et rendre l'état de
+   * contrôle. Charge utile validée par la garde : `{ mode: 'ptt' | 'vad' }`, rien d'autre.
+   */
+  setTalkMode(mode: TalkModeDto): Promise<ControlStateDto>;
+  /** L'état de contrôle courant lu du pont (le renderer ne déduit pas le mode, il le lit). */
+  getTalkMode(): Promise<ControlStateDto>;
 }
 
 /** Ce que le choix d'une image rend au renderer — jamais un chemin, jamais un binaire. */
@@ -707,6 +727,10 @@ const JOIN_KEYS = ['roomId', 'name'] as const;
 const MUTE_KEYS = ['muted'] as const;
 const DEAFEN_KEYS = ['deafened'] as const;
 const PTT_KEYS = ['active'] as const;
+// Mode de prise de parole (fix 0.4.2, 2026-11-02) : une clé, deux valeurs — les mêmes mots
+// que `TalkModeDto` (le DTO est la source du vocabulaire, pas un duplicata).
+const TALK_MODE_KEYS: readonly string[] = ['mode'];
+const TALK_MODE_VALUES: readonly TalkModeDto[] = ['ptt', 'vad'];
 const GAIN_KEYS = ['participantId', 'gain'] as const;
 const OVERLAY_KEYS = ['visible', 'opacity', 'scale', 'screenId', 'position'] as const;
 // `readonly string[]` plutôt qu'un tuple littéral : la clé inspectée vient d'un `Object.keys`
@@ -764,6 +788,7 @@ function guardInvoke(channel: string, raw: unknown): GuardResult<unknown> {
     case IPC.settingsOpen:
     case IPC.profileOpen:
     case IPC.lobbyStatusGet:
+    case IPC.talkGetMode:
     case IPC.roomLeave:
     // Mises à jour (2026-11-01) : le renderer ne choisit NI l'URL, NI la version, NI le chemin —
     // le main seul décide. Une charge utile serait un essai de piloter le téléchargement depuis la page.
@@ -824,6 +849,15 @@ function guardInvoke(channel: string, raw: unknown): GuardResult<unknown> {
       const active = guard.boolean(payload, 'active', 'payload');
       if (guard.errors.length > 0) return guardError(channel, guard);
       return { ok: true, value: { active } };
+    }
+    case IPC.talkSetMode: {
+      // Mode de prise de parole (fix 0.4.2, 2026-11-02) : une seule clé, une seule valeur
+      // close — les mêmes mots que le schéma de réglages (`TALK_MODES` côté schema), refusés
+      // ici si le renderer invente un troisième mode.
+      const payload = guard.object(raw, 'payload', TALK_MODE_KEYS);
+      const mode = guard.oneOf(payload, 'mode', 'payload', TALK_MODE_VALUES);
+      if (guard.errors.length > 0 || mode === null) return guardError(channel, guard);
+      return { ok: true, value: { mode } };
     }
     case IPC.controlSetGain: {
       const payload = guard.object(raw, 'payload', GAIN_KEYS);
