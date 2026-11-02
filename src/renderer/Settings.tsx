@@ -23,11 +23,30 @@ import {
   type Settings,
   type SettingsPatch,
   type TalkMode,
+  type Theme,
 } from '../shell/settings-schema';
 import { isValidAccelerator, normalizeAccelerator } from '../shell/settings-schema';
 import type { LobbyStatusDto, RoomStateDto, UpdateStateDto } from '../shell/ipc-contract';
 import { createTranslator, type Locale } from './i18n';
 import { lanApi } from './api';
+
+/**
+ * Clés de libellés en littéral : le garde i18n (tests/i18n-dead-keys) n'identifie une clé du
+ * catalogue que citée textuellement — une clé construite par gabarit (`settings.theme.${theme}`)
+ * lui est invisible, et la clé serait réputée morte (le défaut même des étiquettes d'échelle
+ * d'overlay restées sans libellé en 0.4.1).
+ */
+const THEME_LABEL_KEYS: Readonly<Record<Theme, string>> = {
+  system: 'settings.theme.system',
+  dark: 'settings.theme.dark',
+  light: 'settings.theme.light',
+};
+const THEME_CHOICES: readonly Theme[] = ['system', 'dark', 'light'];
+const SCALE_LABEL_KEYS: Readonly<Record<OverlayScale, string>> = {
+  sm: 'settings.overlay.scale.sm',
+  md: 'settings.overlay.scale.md',
+  lg: 'settings.overlay.scale.lg',
+};
 
 export interface SettingsPanelProps {
   settings: Settings;
@@ -40,9 +59,9 @@ export interface SettingsPanelProps {
    */
   session: RoomStateDto;
   /**
-   * La vue du pied de lobby, lue du main (port, méthode, santé). L'onglet Réseau s'en sert pour la
-   * ligne « Découverte » : la méthode RÉELLEMENT en service, jamais une méthode supposée
-   * (SPEC-002 S3.15 — hors-ligne, le main rend `'none'`, et c'est ce qui s'affiche).
+   * La vue du pied de lobby, lue du main (port, santé). L'onglet Réseau s'en sert pour la
+   * ligne « Port de signalisation » : le port RÉELLEMENT en service, jamais un port supposé
+   * (SPEC-002 S3.15 — hors-ligne, le main ne publie pas de vue en service, et c'est ce qui s'affiche).
    */
   lobbyStatus: LobbyStatusDto;
   onChange: (patch: SettingsPatch) => Promise<void> | void;
@@ -198,6 +217,30 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
       </header>
 
       <div className="sheet__body">
+        {/* --- Apparence ---------------------------------------------------------------------- */}
+        <section className="sheet__section" aria-labelledby="settings-appearance">
+          <h3 id="settings-appearance" className="sheet__section-title">
+            {t('settings.tab.appearance')}
+          </h3>
+
+          <div className="field">
+            <span className="field__label">{t('settings.theme')}</span>
+            <div className="segmented" role="group" aria-label={t('settings.theme')}>
+              {THEME_CHOICES.map((theme) => (
+                <button
+                  key={theme}
+                  type="button"
+                  className="button button--toggle"
+                  aria-pressed={settings.theme === theme}
+                  onClick={() => void onChange({ theme })}
+                >
+                  {t(THEME_LABEL_KEYS[theme])}
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+
         {/* --- Périphériques et traitement audio --------------------------------------------- */}
         <section className="sheet__section" aria-labelledby="settings-audio">
           <h3 id="settings-audio" className="sheet__section-title">
@@ -441,7 +484,7 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
                   aria-pressed={settings.overlay.scale === scale}
                   onClick={() => overlayPatch({ scale })}
                 >
-                  {t(`settings.overlay.scale.${scale}`)}
+                  {t(SCALE_LABEL_KEYS[scale])}
                 </button>
               ))}
             </div>

@@ -274,11 +274,37 @@ body {
 .segmented {
   display: flex;
   gap: var(--space-2);
+  /* Les segments restent dans leur cadre : à largeur de feuille réduite (fenêtre étroite), la
+     rangée passe à la ligne au lieu de déborder (retour utilisateur 0.4.2). */
+  flex-wrap: wrap;
 }
 
 .segmented .button[aria-pressed='true'] {
   background: var(--color-accent-subtle);
   border-color: var(--color-accent-default);
+}
+
+/* --- Boutons icônes ---------------------------------------------------------------------- */
+
+.icon {
+  width: var(--space-5);
+  height: var(--space-5);
+  flex: none;
+}
+
+.button--icon {
+  width: var(--component-button-height);
+  /* Carré : l'icône occupe le centre, aucun padding horizontal à compenser. */
+  padding-inline: 0;
+}
+
+.button--icon[aria-pressed='true'] {
+  background: var(--color-accent-subtle);
+  border-color: var(--color-accent-default);
+}
+
+.button--icon[aria-pressed='true'] .icon {
+  color: var(--color-accent-default);
 }
 
 /* --- Bandeaux -------------------------------------------------------------------------- */
@@ -452,8 +478,12 @@ body {
   align-items: center;
   gap: var(--space-3);
   flex-wrap: wrap;
-  border-top: var(--component-hairline) solid var(--color-border-subtle);
-  padding-top: var(--space-4);
+  /* Le pied de salon est une barre d'outils à part entière : posée sur une surface relevée et
+     arrondie, elle se lit d'un coup d'œil au lieu de flotter sous la liste (0.4.2). */
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-bg-surface);
+  border: var(--component-hairline) solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
 }
 
 .controls__mode,

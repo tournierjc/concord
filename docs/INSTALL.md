@@ -31,18 +31,30 @@ ailleurs que le réseau local.
 
 ## Linux
 
-- **AppImage** (recommandée, toutes distributions) :
+- **AppImage** (toutes distributions) :
   ```bash
-  chmod +x concord-0.3.0-x86_64.AppImage
-  ./concord-0.3.0-x86_64.AppImage
+  chmod +x concord-0.4.2-x86_64.AppImage
+  ./concord-0.4.2-x86_64.AppImage
   ```
-- **.deb** (Debian/Ubuntu) :
+  Aucun drapeau spécial n'est nécessaire. Sur Ubuntu 24.04+ (et toute
+  distribution sans `libfuse2` préinstallé), l'AppImage exige la bibliothèque
+  FUSE 2 :
   ```bash
-  sudo apt install ./concord-0.3.0-linux-amd64.deb
+  sudo apt install libfuse2     # Ubuntu 24.04+ (fournie par défaut sur 22.04)
+  ```
+  Sans elle, l'AppImage s'arrête avant toute fenêtre avec
+  « dlopen(): error loading libfuse.so.2 » — c'est une dépendance du format
+  AppImage lui-même, pas de Concord (voir Dépannage).
+- **.deb** (Debian/Ubuntu — recommandé sur Ubuntu 24.04+) :
+  ```bash
+  sudo apt install ./concord-0.4.2-linux-amd64.deb
   concord
   ```
   Le paquet déclare les dépendances Electron standard (libgtk-3, libnss3…) —
-  toutes en paquets des dépôts officiels, aucune dépendance réseau.
+  toutes en paquets des dépôts officiels, aucune dépendance réseau. Depuis la
+  0.4.2, son `chrome-sandbox` est installé **setuid root** : le bac à sable
+  Chromium démarre normalement même sur les systèmes qui restreignent les
+  espaces de noms utilisateur (Ubuntu 24.04+), sans `--no-sandbox`.
 
 ## Vérifier l'intégrité
 
@@ -50,9 +62,9 @@ Chaque publication Releases porte les empreintes SHA-256 des trois fichiers.
 Vérification locale :
 
 ```bash
-sha256sum concord-0.3.0-setup-x64.exe   # Windows (Git Bash) ou shasum -a 256
-sha256sum concord-0.3.0-x86_64.AppImage
-sha256sum concord-0.3.0-linux-amd64.deb
+sha256sum concord-0.4.2-setup-x64.exe   # Windows (Git Bash) ou shasum -a 256
+sha256sum concord-0.4.2-x86_64.AppImage
+sha256sum concord-0.4.2-linux-amd64.deb
 ```
 
 L'empreinte affichée doit être identique à celle de la page Releases.
@@ -96,7 +108,19 @@ node scripts/verify-build.mjs --asar release/win-unpacked/resources/app.asar
 - **Fenêtre vide ou noire** : relancer depuis un terminal avec
   `--enable-logging` ; depuis cette version, une erreur de rendu affiche un
   écran d'erreur lisible au lieu d'une fenêtre vide.
-- **Linux, l'AppImage s'arrête aussitôt** (Ubuntu 24.04+ : « SUID sandbox
-  helper binary… ») : les espaces de noms utilisateur non privilégiés sont
-  restreints par AppArmor. Installer le `.deb` (qui configure
-  `chrome-sandbox`) ou lancer l'AppImage avec `--no-sandbox`.
+- **Linux, l'AppImage ne démarre pas du tout** (« dlopen(): error loading
+  libfuse.so.2 ») : il manque la bibliothèque FUSE 2, retirée de
+  l'installation par défaut d'Ubuntu 24.04. `sudo apt install libfuse2`, puis
+  relancer l'AppImage normalement — sans aucun drapeau. Le format AppImage
+  lui-même a cette dépendance : aucune application AppImage n'y échappe.
+- **Linux, « The SUID sandbox helper binary was found, but is not configured
+  correctly »** : les espaces de noms utilisateur non privilégiés sont
+  restreints par AppArmor (Ubuntu 24.04+) ET l'aide de bac à sable n'est pas
+  setuid. Installer le `.deb` 0.4.2+ : son `chrome-sandbox` est setuid root et
+  le bac à sable démarre normalement. NE PAS lancer avec `--no-sandbox` :
+  cela désactive la protection du processus de rendu, ce n'est pas un contournement
+  acceptable.
+- **Windows/Linux — fermer la fenêtre ne quitte plus l'application** (0.4.2) :
+  la fenêtre se range dans la zone de notification (barre des tâches) ; son
+  icône « Concord » donne « Ouvrir Concord » et « Quitter Concord ». Relancer
+  Concord pendant qu'elle est cachée ramène la fenêtre existante.

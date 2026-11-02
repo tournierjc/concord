@@ -145,6 +145,10 @@ class FakeBrowserWindow {
   setContentBounds(): void {}
   setMenuBarVisibility(): void {}
   setAutoHideMenuBar(): void {}
+  // Utilisés par l'icône de la zone de notification (0.4.2) : `Tray` est doublé par cette même
+  // classe, les deux méthodes doivent donc exister.
+  setToolTip(): void {}
+  setContextMenu(): void {}
   setKiosk(): void {}
   setSkipTaskbar(): void {}
   setBackgroundColor(): void {}
@@ -231,6 +235,11 @@ function fakeElectronModule(): FakedElectron {
     dialog: { showMessageBox: (): Promise<{ response: number }> => Promise.resolve({ response: 0 }) },
     powerMonitor: { on: (): void => undefined },
     nativeTheme: { shouldUseDarkColors: true, on: (): void => undefined },
+    // L'icône de la zone de notification (0.4.2) : image lisible, pour que le chemin réel
+    // (création de l'icône + menu) s'exécute dans la sonde plutôt que d'être court-circuité.
+    nativeImage: {
+      createFromPath: (): { isEmpty: () => boolean } => ({ isEmpty: (): boolean => false }),
+    },
     ipcRenderer: {
       sendSync: (): null => null,
       on: (): void => undefined,

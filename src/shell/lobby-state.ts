@@ -114,9 +114,14 @@ export function resolveCreateRoomAction(
   return { kind: 'create', name: draft };
 }
 
-/** Ce que le pied de lobby sait, en champs séparés (jamais une phrase reconstruite à la main). */
+/**
+ * Ce que le pied de lobby sait, en champs séparés (jamais une phrase reconstruite à la main).
+ * Le mécanisme de découverte (mDNS, broadcast, port d'annonce) n'est PAS affiché : c'est un détail
+ * technique, pas une information dont l'utilisateur a besoin — le pied dit CE QUI SE PASSE
+ * (« recherche en cours »), jamais COMMENT (retour utilisateur 0.4.2).
+ */
 export type LobbyFooterView =
-  /** Hors-ligne : `discovery.footer.offline` remplace port + méthode (S1.10 — pas de socket). */
+  /** Hors-ligne : `discovery.footer.offline` remplace port + recherche (S1.10 — pas de socket). */
   | { offline: true; offlineKey: 'discovery.footer.offline' }
   | {
       offline: false;
@@ -124,21 +129,13 @@ export type LobbyFooterView =
       portKey: 'discovery.footer.port' | 'discovery.footer.port.none';
       /** Le port lu, ou `null` — jamais le port des réglages. */
       port: number | null;
-      /** Clé de la méthode (`discovery.method.*`), rendue depuis `status.method`. */
-      methodKey: 'discovery.method.mdns' | 'discovery.method.broadcast' | 'discovery.method.both' | 'discovery.method.none';
     };
-
-const METHOD_KEYS = {
-  mdns: 'discovery.method.mdns',
-  broadcast: 'discovery.method.broadcast',
-  both: 'discovery.method.both',
-  none: 'discovery.method.none',
-} as const;
 
 /**
  * Vue du `LobbyFooter` (SPEC-002 : 32 px, bordure haute, `bg.surface`). La règle S1.10 est ici :
- * `health === 'offline'` efface le port et la méthode — afficher un port sans socket serait un
- * mensonge, et la méthode « mDNS » alors que rien ne tourne aussi.
+ * `health === 'offline'` efface le port et la recherche — afficher un port sans socket serait un
+ * mensonge, et une « recherche » alors que rien ne tourne aussi. En service, le pied annonce une
+ * recherche de salons, sans exposer la méthode ni le port d'annonce.
  */
 export function lobbyFooterView(status: LobbyStatusDto): LobbyFooterView {
   if (status.health === 'offline') return { offline: true, offlineKey: 'discovery.footer.offline' };
@@ -146,6 +143,5 @@ export function lobbyFooterView(status: LobbyStatusDto): LobbyFooterView {
     offline: false,
     portKey: status.port === null ? 'discovery.footer.port.none' : 'discovery.footer.port',
     port: status.port,
-    methodKey: METHOD_KEYS[status.method],
   };
 }

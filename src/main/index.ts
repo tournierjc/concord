@@ -15,7 +15,7 @@
  * `node_modules`). Sa vérification future est `npm run build:main` puis un lancement réel.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, screen, session } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, screen, session, Tray } from 'electron';
 import { readFileSync } from 'node:fs';
 import { networkInterfaces, userInfo } from 'node:os';
 import { join } from 'node:path';
@@ -85,6 +85,7 @@ import {
   resolveDisplayName,
   type Settings,
 } from '../shell/settings-schema';
+import { trayLabels } from '../shell/tray-labels';
 
 /**
  * Serveur de développement Vite (boucle locale uniquement, port 5173). Jamais défini en production :
@@ -94,6 +95,14 @@ const DEV_SERVER = process.env['LAN_DEV_SERVER'] ?? null;
 
 let mainWindow: BrowserWindow | null = null;
 let settings: Settings = defaultSettings();
+/** Icône de la barre des tâches/système. `null` tant que l'app n'a pas démarré (ou sans icône). */
+let tray: Tray | null = null;
+/**
+ * Vrai UNIQUEMENT pendant une fermeture voulue (`app.quit()` : menu de l'icône, mise à jour
+ * installée). Fermer la fenêtre autrement la cache dans la zone de notification au lieu de
+ * quitter — la sortie réelle passe par le menu de l'icône, jamais par un process invisible.
+ */
+let quitting = false;
 let store: SettingsStore;
 let networkGuard: ReturnType<typeof installNetworkGuard> | null = null;
 let ptt: PttRegistration | null = null;
@@ -148,10 +157,9 @@ if (!hasLock) {
   app.on('second-instance', () => {
     // A relaunch must always end with a visible window: returning early when the main window was
     // gone swallowed every launch from the Start menu shortcut while the first process lived on.
-    const window = mainWindow ?? createMainWindow();
-    if (window.isMinimized()) window.restore();
-    window.show();
-    window.focus();
+    // Same contract when the first instance sits hidden in the notification area (0.4.2): the
+    // second launch brings the existing window back on screen instead of doing nothing.
+    showMainWindow();
   });
   // Doit être appelé avant `app.whenReady()`.
   registerAppScheme();
@@ -160,7 +168,15 @@ if (!hasLock) {
 
 app.on('window-all-closed', () => {
   // L'overlay est une fenêtre outil : sa fermeture ne doit pas laisser le process tourner.
+  // La fenêtre principale ne ferme plus : elle se cache dans la zone de notification (0.4.2) —
+  // cet évènement ne se déclenche donc plus que sur une sortie réelle (`app.quit()`).
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  // La fermeture de fenêtre qui suit `app.quit()` doit PASSER : c'est une sortie voulue, pas un
+  // rangement dans la zone de notification.
+  quitting = true;
 });
 
 app.on('activate', () => {
@@ -169,6 +185,10 @@ app.on('activate', () => {
 
 app.on('will-quit', () => {
   releasePushToTalk();
+  // L'icône de la zone de notification ne survit pas au process : sans destruction explicite, elle
+  // resterait affichée après la sortie (icône fantôme jusqu'au survol).
+  tray?.destroy();
+  tray = null;
   // Le ducking ne survit pas à la fermeture : si une baisse était en cours, elle est annulée.
   resetDucking();
   // Les minuteries du service de mise à jour ne survivent pas à la fermeture (un téléchargement
@@ -201,6 +221,7 @@ async function bootstrap(): Promise<void> {
 
   applySecurityPolicies();
   createMainWindow();
+  createTray();
   // No overlay at boot: `syncOverlayGeometry` creates it when a room is joined and destroys it on
   // leave (one renderer process fewer, ~90 MB, while idle in the lobby).
 
@@ -313,6 +334,62 @@ function windowBackground(): string {
   return dark ? '#0E1116' : '#F4F6F9';
 }
 
+/**
+ * Ramène la fenêtre principale à l'écran : relance existante (`second-instance`), clic sur
+ * l'icône de la zone de notification, entrée « Ouvrir » de son menu. Une fenêtre cachée dans la
+ * zone de notification doit revenir EXACTEMENT comme une fenêtre minimisée : montrée, ramenée de
+ * la barre des tâches si besoin, et focalisée.
+ */
+function showMainWindow(): void {
+  const window = mainWindow ?? createMainWindow();
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+}
+
+/**
+ * L'icône de la zone de notification, lue dans les ressources de l'app (embarquée dans l'asar
+ * comme le reste du paquet — `nativeImage` sait lire un chemin d'asar). En développement, c'est
+ * le `buildResources` du dépôt. `isEmpty()` fait foi : sans image lisible, pas d'icône — et
+ * surtout pas de rangement dans une zone de notification qui n'existerait nulle part.
+ */
+function trayIconPath(): string {
+  return join(app.getAppPath(), 'build', 'icon.png');
+}
+
+/**
+ * L'icône de la zone de notification (0.4.2) : le seul endroit où l'app se rend visible quand sa
+ * fenêtre est cachée, et le seul geste de sortie réel (« Quitter »). Créée au démarrage, détruite
+ * à la fermeture ; sans icône lisible, elle n'est pas créée du tout et la fermeture de fenêtre
+ * reste une vraie fermeture (pas de process sans visage).
+ */
+function createTray(): void {
+  if (tray || process.platform === 'darwin') return;
+  const image = nativeImage.createFromPath(trayIconPath());
+  if (image.isEmpty()) {
+    console.error('[zone de notification] icône illisible :', trayIconPath(), '— fermer la fenêtre quittera l’app');
+    return;
+  }
+  const labels = trayLabels(settings.locale);
+  tray = new Tray(image);
+  tray.setToolTip('Concord');
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: labels.show, click: () => showMainWindow() },
+      { type: 'separator' },
+      {
+        label: labels.quit,
+        click: () => {
+          quitting = true;
+          app.quit();
+        },
+      },
+    ]),
+  );
+  // Clic gauche (Windows) / clic simple (la plupart des bureaux Linux) : la fenêtre revient.
+  tray.on('click', () => showMainWindow());
+}
+
 function createMainWindow(): BrowserWindow {
   if (mainWindow && !mainWindow.isDestroyed()) return mainWindow;
 
@@ -336,6 +413,16 @@ function createMainWindow(): BrowserWindow {
   };
   window.once('ready-to-show', reveal);
   systemTimers.once(SHOW_FALLBACK_MS, reveal);
+  window.on('close', (event) => {
+    // Fermer la fenêtre la range dans la zone de notification (0.4.2) : le process reste
+    // joignable (salon en cours, raccourci PTT global, relance qui ramène la fenêtre). La sortie
+    // réelle passe par le menu de l'icône (`Quitter`) — ou par `app.quit()` (mise à jour), qui
+    // bascule `quitting` AVANT que cet évènement ne se déclenche. macOS garde son comportement
+    // standard (fermer la fenêtre, l'app vit dans le dock).
+    if (quitting || process.platform === 'darwin') return;
+    event.preventDefault();
+    window.hide();
+  });
   window.on('closed', () => {
     mainWindow = null;
     // The overlay is a satellite of the main window. Left open, it kept `window-all-closed` from

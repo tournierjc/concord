@@ -860,16 +860,15 @@ export function RoomList({
         </button>
       </div>
 
-      {/* LobbyFooter (SPEC-002 §3) : 32 px, bordure haute, `bg.surface`. Trois champs structurés
-          issus du main — hors-ligne, le port et la méthode disparaissent (S1.10). */}
+      {/* LobbyFooter (SPEC-002 §3) : 32 px, bordure haute, `bg.surface`. Hors-ligne, le port et la
+          recherche disparaissent (S1.10). La recherche est dite en langage clair — le mécanisme
+          (mDNS, broadcast, port d'annonce) n'est pas une information utilisateur (0.4.2). */}
       <footer className="lobby-footer" aria-label={t('room.list.title')}>
         {footer.offline ? (
           <p className="lobby-footer__offline">{t(footer.offlineKey)}</p>
         ) : (
           <>
-            <p className="lobby-footer__method">
-              {t('discovery.footer.method', { method: t(footer.methodKey) })}
-            </p>
+            <p className="lobby-footer__method">{t('discovery.footer.searching')}</p>
             <p className="lobby-footer__port">
               {footer.portKey === 'discovery.footer.port' && footer.port !== null
                 ? t('discovery.footer.port', { port: footer.port })

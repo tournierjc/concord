@@ -12,6 +12,7 @@ import type { ControlStateDto, ParticipantDto, RoomStateDto } from '../shell/ipc
 import { avatarEmojiFor, isAvatarRef } from '../shell/avatar';
 import { createTranslator, type Locale } from './i18n';
 import { lanApi } from './api';
+import { HeadphonesIcon, HeadphonesOffIcon, LeaveIcon, MicIcon, MicOffIcon } from './icons';
 import { setTransmitting, SPEAKING_LEVEL, useVoicePlane, type VoiceSnapshot } from './voice';
 import {
   joinStates,
@@ -134,8 +135,14 @@ export function Room({
         <span className="room__members">
           {t('room.header.members', { count: participants.length, max: maxParticipants })}
         </span>
-        <button type="button" className="button button--compact" onClick={onLeave}>
-          {t('room.leave')}
+        <button
+          type="button"
+          className="button button--compact button--icon"
+          aria-label={t('room.leave')}
+          title={t('room.leave')}
+          onClick={onLeave}
+        >
+          <LeaveIcon />
         </button>
       </header>
 
@@ -272,21 +279,25 @@ export function Room({
       <footer className="controls">
         <button
           type="button"
-          className="button button--toggle"
+          className="button button--icon"
           aria-pressed={control.muted}
+          aria-label={control.muted ? t('control.mute.off') : t('control.mute.on')}
+          title={control.muted ? t('control.mute.off') : t('control.mute.on')}
           onClick={() => onMute(!control.muted)}
         >
           {/* The label names the action the click performs: `mute.on` = "Mute my mic". */}
-          {control.muted ? t('control.mute.off') : t('control.mute.on')}
+          {control.muted ? <MicOffIcon /> : <MicIcon />}
         </button>
 
         <button
           type="button"
-          className="button button--toggle"
+          className="button button--icon"
           aria-pressed={control.deafened}
+          aria-label={control.deafened ? t('control.deafen.off') : t('control.deafen.on')}
+          title={control.deafened ? t('control.deafen.off') : t('control.deafen.on')}
           onClick={() => onDeafen(!control.deafened)}
         >
-          {control.deafened ? t('control.deafen.off') : t('control.deafen.on')}
+          {control.deafened ? <HeadphonesOffIcon /> : <HeadphonesIcon />}
         </button>
 
         <div className="controls__mode">

@@ -185,13 +185,13 @@ test('même nom porté par DEUX hôtes distincts : rejoindre le premier de la li
 
 const OK: LobbyStatusDto = { port: 47823, method: 'mdns', health: 'ok' };
 
-test('nominal : le port mesuré et la méthode mDNS s’affichent en champs séparés', () => {
+test('nominal : le port mesuré s’affiche, la recherche est annoncée sans détail technique', () => {
   const view = lobbyFooterView(OK);
   assert.equal(view.offline, false);
   if (view.offline) return;
   assert.equal(view.portKey, 'discovery.footer.port');
   assert.equal(view.port, 47823);
-  assert.equal(view.methodKey, 'discovery.method.mdns');
+  assert.equal('methodKey' in view, false, 'la méthode de découverte n’est plus affichée (0.4.2)');
 });
 
 test('hors salon : aucun port n’est revendiqué, la clé « aucun salon » prend le relais', () => {
@@ -202,14 +202,15 @@ test('hors salon : aucun port n’est revendiqué, la clé « aucun salon » pre
   assert.equal(view.port, null, 'null reste null : l’UI ne remplace jamais par 47821');
 });
 
-test('hors-ligne (S1.10) : port et méthode disparaissent, la clé dédiée les remplace', () => {
+test('hors-ligne (S1.10) : port et recherche disparaissent, la clé dédiée les remplace', () => {
   const view = lobbyFooterView({ port: 47823, method: 'mdns', health: 'offline' });
   assert.deepEqual(view, { offline: true, offlineKey: 'discovery.footer.offline' });
 });
 
-test('mDNS en échec : le pied dit la méthode « aucune », pas le port des réglages', () => {
+test('mDNS en échec : le pied reste en « recherche », jamais le port des réglages', () => {
   const view = lobbyFooterView({ port: null, method: 'none', health: 'mdns-down' });
   assert.equal(view.offline, false);
   if (view.offline) return;
-  assert.equal(view.methodKey, 'discovery.method.none');
+  assert.equal(view.portKey, 'discovery.footer.port.none');
+  assert.equal('methodKey' in view, false, 'l’état dégradé ne réintroduit pas le jargon technique');
 });

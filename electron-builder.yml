@@ -23,6 +23,7 @@ directories:
 files:
   - dist/**/*
   - package.json
+  - build/icon.png
   - '!**/*.map'
   - '!**/*.md'
   - '!**/{.git,.github,test,tests,SPECS,src,.vscode}/**'
