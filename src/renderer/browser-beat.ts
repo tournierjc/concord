@@ -36,7 +36,7 @@ function isHandle(handle: unknown): handle is NodeJS.Timeout {
 }
 
 /** L'instant monotone de la page. SEULE lecture de l'horloge ambiante du renderer (A9). */
-function pageNow(): number {
+export function pageNow(): number {
   return performance.now();
 }
 

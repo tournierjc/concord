@@ -145,3 +145,58 @@ export function lobbyFooterView(status: LobbyStatusDto): LobbyFooterView {
     port: status.port,
   };
 }
+
+/* ------------------------------------------------------------------ */
+/* Fusion anti-clignotement de la liste des salons (2026-11-02)         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Délai de grâce, en millisecondes, accordé à un salon absent de la dernière liste publiée
+ * avant de le retirer de l'affichage. Calibré sur le mécanisme réel du registre mDNS : la
+ * péremption (TTL 12 s) purge `list()` à chaque lecture, mais la pile bonjour ne réémet pas
+ * les services qu'elle connaît déjà — entre deux ré-annonces, la liste publiée se vide puis
+ * se remplit, et le lobby clignote (retour JC sur la 0.4.3). Une grâce d'une trentaine de
+ * secondes couvre le trou entre péremption et ré-annonce ; un hôte réellement parti
+ * disparaît avec ce léger retard, jamais avant.
+ */
+export const LOBBY_ROOM_GRACE_MS = 30_000;
+
+/**
+ * La fusion anti-clignotement, sous forme de fermeture à horloge injectée : elle PORTE la
+ * fraîcheur de chaque salon entre deux rafraîchissements (un DTO ne la porte pas).
+ *
+ * Mécanique :
+ *  - un salon présent dans `found` est pris tel quel, sa fraîcheur remise à `now()` ;
+ *  - un salon ABSENT de `found` CONSERVE sa fraîcheur d'avant — il sort de l'affichage
+ *    exactement `graceMs` après sa dernière apparition réelle dans une liste publiée ;
+ *  - une liste `found` vide n'efface donc RIEN d'un coup (c'était le clignotement), elle
+ *    ne fait que vieillir les salons affichés.
+ *
+ * La déduplication `hôte:port` reste du ressort de `groupDiscoveredRooms` : ici on fusionne
+ * par `roomId`, l'identité stable du salon (la clé React des lignes). L'ordre rendu est
+ * déterministe : fraîcheur décroissante, puis `roomId`.
+ */
+export function createRoomMerger(options: {
+  /** L'horloge (ms epoch ou monotone — seule la comparaison compte). */
+  now: () => number;
+  /** Grâce accordée à un salon absent (défaut `LOBBY_ROOM_GRACE_MS`). */
+  graceMs?: number;
+}): { merge: (found: readonly RoomSummaryDto[]) => RoomSummaryDto[] } {
+  const graceMs = options.graceMs ?? LOBBY_ROOM_GRACE_MS;
+  const seen = new Map<string, { room: RoomSummaryDto; lastSeen: number }>();
+  return {
+    merge(found: readonly RoomSummaryDto[]): RoomSummaryDto[] {
+      const now = options.now();
+      for (const room of found) seen.set(room.roomId, { room, lastSeen: now });
+      const merged: { room: RoomSummaryDto; lastSeen: number }[] = [];
+      for (const entry of seen.values()) {
+        if (now - entry.lastSeen <= graceMs) merged.push(entry);
+        else seen.delete(entry.room.roomId);
+      }
+      merged.sort((a, b) =>
+        a.lastSeen !== b.lastSeen ? b.lastSeen - a.lastSeen : a.room.roomId < b.room.roomId ? -1 : 1,
+      );
+      return merged.map((entry) => entry.room);
+    },
+  };
+}

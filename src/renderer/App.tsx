@@ -10,7 +10,9 @@
  * mDNS sur un vrai réseau ; la liste des salons n'a donc jamais été vue se remplir à l'écran.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+import { pageNow } from './browser-beat';
 
 import type {
   ControlStateDto,
@@ -23,6 +25,7 @@ import type {
   UpdateStateDto,
 } from '../shell/ipc-contract';
 import {
+  createRoomMerger,
   groupDiscoveredRooms,
   lobbyFooterView,
   resolveCreateRoomAction,
@@ -415,6 +418,16 @@ export function App(): JSX.Element {
   }, [settings]);
 
   // Découverte réelle des salons : scan mDNS borné côté main, résultats uniquement issus de l'IPC.
+  // La fusion anti-clignotement (2026-11-02, arbitrage JC) : la liste publiée n'a pas le droit
+  // de remplacer l'affichage par un vide — le registre mDNS purgé par TTL entre deux ré-annonces
+  // fait onduler la liste brute. Le merger garde chaque salon `LOBBY_ROOM_GRACE_MS` après sa
+  // dernière apparition réelle, puis le retire. Le rafraîchissement manuel suit la même règle.
+  const roomMergerRef = useRef<ReturnType<typeof createRoomMerger> | null>(null);
+  if (roomMergerRef.current === null) {
+    // A9 : l'horloge ambiante du renderer ne se lit que via la porte `pageNow` (jamais `Date.now`).
+    roomMergerRef.current = createRoomMerger({ now: pageNow });
+  }
+  const roomMerge = roomMergerRef.current.merge;
   const refreshRooms = useCallback(async () => {
     setDiscovery((previous) => ({
       phase: previous.rooms.length > 0 ? 'refreshing' : 'loading',
@@ -423,7 +436,9 @@ export function App(): JSX.Element {
     }));
     try {
       const found = await api.discoverRooms();
-      setDiscovery({ phase: 'ready', rooms: found, error: null });
+      // Le refresh manuel est une liste COMPLÈTE du scan : les salons qu'il annonce sont frais,
+      // ceux qu'il tait entrent en grâce — jamais un remplacement sec (le vide intermédiaire).
+      setDiscovery((previous) => ({ phase: 'ready', rooms: roomMerge(found), error: null }));
     } catch (cause) {
       setDiscovery((previous) => ({ phase: 'ready', rooms: previous.rooms, error: messageOf(cause) }));
     }
@@ -435,7 +450,10 @@ export function App(): JSX.Element {
     // par le preload et appelé au démontage.
     const unsubscribe = api.onRoomsDiscovered((found) => {
       if (!active) return;
-      setDiscovery({ phase: 'ready', rooms: found, error: null });
+      // Même fusion anti-clignotement que le refresh manuel : une liste publiée vide (purge TTL
+      // du registre entre deux ré-annonces) ne vide JAMAIS l'écran — les salons absents entrent
+      // en grâce et ne sortent qu'après `LOBBY_ROOM_GRACE_MS` sans réapparition.
+      setDiscovery((previous) => ({ phase: 'ready', rooms: roomMerge(found), error: null }));
       // Le pied de lobby suit la même cadence que la liste : le port effectif change quand un
       // salon s'ouvre ou se ferme, et seule la mesure du main le sait. Un pied figé à l'instant
       // du montage afficherait un port mort après un leave — la garantie « mesure » veut « à jour ».
@@ -457,7 +475,7 @@ export function App(): JSX.Element {
       active = false;
       unsubscribe();
     };
-  }, [api, refreshRooms]);
+  }, [api, refreshRooms, roomMerge]);
 
   // Toast de confirmation (S1.11 : `app.nickname.saved` à la sortie de champ). Il vit dans une
   // région `aria-live="polite"` et se referme tout seul ; l'horloge est celle de la page
