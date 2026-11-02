@@ -102,6 +102,10 @@ win:
   executableName: concord
 
 nsis:
+  # Greffon pare-feu (build/installer.nsh) : règle « autoriser concord.exe » (TCP signalisation
+  # + UDP mDNS en une règle par programme). Best effort : sans élévation, netsh échoue en
+  # silence et Windows reprend sa fenêtre d'autorisation habituelle.
+  include: build/installer.nsh
   # makensis 3.11 du système (build Linux sans wine, 2026-11-01) émet des avertissements
   # sur le gabarit d'electron-builder 24 ; ils ne doivent pas faire échouer le build.
   warningsAsErrors: false

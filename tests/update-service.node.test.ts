@@ -216,6 +216,7 @@ function harness(script: SeamScript, options?: { roomActive?: boolean; auto?: bo
       quits.push(timers.now());
     },
     roomActive: () => roomActive,
+      installedExePath: () => undefined,
     isAutoEnabled: () => auto,
     onStateChange: (state) => {
       published.push({ ...state });
@@ -366,6 +367,7 @@ describe('empreinte SHA-256 (condition 4)', () => {
       timers: timers0,
       quitApp: () => undefined,
       roomActive: () => false,
+      installedExePath: () => undefined,
       isAutoEnabled: () => true,
       onStateChange: (s) => published.push({ ...s }),
     });
@@ -519,6 +521,7 @@ describe('installation immediate', () => {
       timers: scriptedTimers,
       quitApp: () => undefined,
       roomActive: () => false,
+      installedExePath: () => undefined,
       isAutoEnabled: () => true,
       onStateChange: (s) => published.push({ ...s }),
     });

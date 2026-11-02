@@ -143,9 +143,18 @@ export interface InterfaceLike {
  * Multi-homing (fix 0.4.2, 2026-11-02, D3) : un pont Docker (`172.17.x.x`, `172.18.x.x`) est une
  * candidate privée LÉGITIME mais injoignable depuis le LAN physique — un voisin qui la joint se
  * heurte au mur du conteneur. Comme dans `discovery-bridge.rankAnnounceAddresses`, ces plages ne
- * passent devant une candidate privée ordinaire que si rien de meilleur n'existe.
+ * passent devant une candidate privée ordinaire que si rien de mieux n'existe.
+ *
+ * Adresse PRÉFÉRÉE (fix 0.4.4, 2026-11-02) : `preferred` est l'adresse que le noyau utiliserait
+ * pour joindre l'extérieur (route par défaut, lue par `primary-address.ts` sans envoyer un
+ * paquet). Si elle est parmi les candidates, elle PRIME sur le tri des noms d'interfaces — c'est
+ * l'interface réellement joignable, là où un `eth0` alphabétique pouvait désigner une interface
+ * que le LAN ne joint pas. `undefined` : comportement d'avant (repli trié, jamais une panne).
  */
-export function pickListenHost(interfaces: Record<string, InterfaceLike[] | undefined>): string {
+export function pickListenHost(
+  interfaces: Record<string, InterfaceLike[] | undefined>,
+  preferred?: string,
+): string {
   const sorted = Object.keys(interfaces).sort((a, b) => a.localeCompare(b));
   const candidates: string[] = [];
   for (const name of sorted) {
@@ -158,6 +167,9 @@ export function pickListenHost(interfaces: Record<string, InterfaceLike[] | unde
       candidates.push(entry.address);
     }
   }
+  // L'adresse de la route par défaut gagne quand elle existe parmi les candidates : c'est la
+  // seule qui soit GARANTIE joignable depuis l'extérieur du poste (le reste est un tri heuristique).
+  if (preferred !== undefined && candidates.includes(preferred)) return preferred;
   // Priorité aux adresses joignables depuis le LAN : un pont Docker n'est retenu qu'en dernier.
   const plausible = candidates.filter((address) => !isOrchestratorAddress(address));
   const chosen = plausible.length > 0 ? plausible[0] : candidates[0];

@@ -6,6 +6,7 @@ release/
 # être versionnée (un clone nu doit pouvoir rebâtir avec la bonne icône, cf. VERIF 030/031).
 build/*
 !build/icon.png
+!build/installer.nsh
 !build/icon.svg
 !build/icon.ico
 !build/icon.icns

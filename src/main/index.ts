@@ -59,6 +59,7 @@ import {
   type UpdateService,
 } from './update';
 import { createRequire } from 'node:module';
+import { probePrimaryAddress } from './primary-address';
 import {
   createSignalingLink,
   pickListenHost,
@@ -242,6 +243,11 @@ async function bootstrap(): Promise<void> {
   // Après les fenêtres : le premier `onRooms` doit trouver un renderer à qui parler.
   discovery.start();
 
+  // Adresse de sortie (2026-11-02, fix « aucune réponse » du join) : première sonde tout de
+  // suite, puis relecture toutes les 30 s. Le join lit le cache (jamais d'attente réseau).
+  refreshPrimaryAddress();
+  systemTimers.repeat(PRIMARY_ADDRESS_REFRESH_MS, refreshPrimaryAddress);
+
   // Mises à jour (avenant SPEC-006b, 2026-11-01) : créé APRÈS les fenêtres et les handlers IPC —
   // le premier état publié doit trouver un renderer à qui parler, comme la découverte. La cadence
   // (30 s puis 24 h) est armée par `start()` ; la CONDITION `auto` est relue à chaque réveil par
@@ -259,6 +265,9 @@ async function bootstrap(): Promise<void> {
     },
     roomActive: roomActiveForUpdate,
     isAutoEnabled: () => settings.update.auto,
+    // L'exécutable courant : la relance post-installeur attend ce fichier puis le redémarre
+    // (NSIS assisté silencieux ne relance jamais lui-même — fix 2026-11-02).
+    installedExePath: () => process.execPath,
     onStateChange: (state) => {
       // Publication immédiate (l'UI suit la machine en direct), puis enregistrement des MESURES
       // (checkedAt, lastSeenVersion) — des faits observés, jamais des réglages saisis.
@@ -573,6 +582,24 @@ function readAppVersion(): string {
  * gardent le renderer, pas le main ; l'avenant SPEC-006b ne les modifie pas).
  */
 let updateService: UpdateService | null = null;
+
+/**
+ * Adresse de sortie de la machine (route par défaut), lue par la sonde `probePrimaryAddress`
+ * (2026-11-02, fix « aucune réponse » du join). Cache TENU par le main : une sonde au démarrage,
+ * puis toutes les 30 s — une adresse de sortie change rarement en séance, et un join ne doit
+ * JAMAIS attendre une I/O réseau pour choisir son adresse d'écoute. `undefined` : sonde sans
+ * réponse (pas de route) — `pickListenHost` retombe alors sur son tri historique.
+ */
+let primaryAddressCache: string | undefined;
+
+/** Cadence de relecture de l'adresse de sortie (au-dessus, pour l'argument). */
+const PRIMARY_ADDRESS_REFRESH_MS = 30_000;
+
+function refreshPrimaryAddress(): void {
+  void probePrimaryAddress(systemTimers).then((address) => {
+    if (address !== null) primaryAddressCache = address;
+  });
+}
 
 /**
  * Salon automatique à la reprise (2026-11-02) : la machine de recréage du dernier salon hébergé.
@@ -1003,7 +1030,11 @@ function isOverlayPatchPayload(raw: unknown): raw is OverlayPatchPayload {
 function startSignalingLink(roomId: string, name: string, selfId: string, avatarRef: string | undefined): void {
   stopSignalingLink('changement de salon');
   const remote = discovery.list().find((room) => room.roomId === roomId);
-  const listenHost = pickListenHost(networkInterfaces());
+  // Adresse PRÉFÉRÉE (2026-11-02) : la sonde de route par défaut (`primary-address.ts`) est
+  // asynchrone — ses résultats sont mis en cache par la cadence de `bootstrap` (une sonde au
+  // démarrage, puis toutes les 30 s : une adresse de sortie change rarement en séance) et le
+  // join lit le DERNIER résultat connu, sans attendre. `undefined` = repli trié d'avant.
+  const listenHost = pickListenHost(networkInterfaces(), primaryAddressCache);
   const role: 'host' | 'client' = remote ? 'client' : 'host';
   signalingLink = createSignalingLink({
     role,

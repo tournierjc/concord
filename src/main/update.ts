@@ -389,17 +389,51 @@ export interface SpawnPlan {
   spawnArgs: string[];
   /** Environnement de l'enfant (`undefined` = celui du processus). */
   spawnEnv: Record<string, string> | undefined;
+  /**
+   * Relance APRÈS l'installateur (2026-11-02, fix « l'app ne redémarre jamais » sur Windows).
+   * Un installeur NSIS `oneClick: false` lancé silencieusement (`/S`) n'exécute PAS la case
+   * « lancer l'application » de son écran final : il désinstalle l'ancienne version, installe
+   * la nouvelle… et rend la main sans rien démarrer (l'AppImage, elle, se relance seule).
+   * Le plan porte donc, quand l'hôte de relance est connu, un petit détaché qui ATTEND la fin
+   * de l'installation (l'exécutable disparaît pendant la désinstallation, reparaît après) puis
+   * relance l'exécutable fraîchement installé. `undefined` : rien à relancer (AppImage, deb).
+   */
+  relaunch?: { spawnPath: string; spawnArgs: string[] };
+}
+
+/** Délai maximum d'attente de l'EXE courant par la relance détachée (désinstallation en cours). */
+const RELAUNCH_WAIT_GONE_MS = 20;
+/** Délai maximum d'attente du NOUVEL exécutable par la relance détachée (installation en cours). */
+const RELAUNCH_WAIT_BACK_MS = 120;
+
+/**
+ * Le script de relance Windows : PowerShell, présent sur toutes les fenêtres supportées. Trois
+ * temps — attendre que l'EXE COURANT ait disparu (l'installeur le désinstalle), attendre qu'il
+ * REPARAISSE (la nouvelle version le réécrit au même emplacement per-user), le lancer détaché.
+ * Un chemin avec espaces est sûr : la valeur voyage entre guillemets simples PowerShell.
+ */
+export function relaunchPlan(installedExe: string): { spawnPath: string; spawnArgs: string[] } {
+  const script = [
+    `$exe='${installedExe.replace(/'/gu, "''")}'`,
+    `$n=0; while((Test-Path $exe) -and ($n -lt ${RELAUNCH_WAIT_GONE_MS})) { Start-Sleep 1; $n++ }`,
+    `$n=0; while((-not (Test-Path $exe)) -and ($n -lt ${RELAUNCH_WAIT_BACK_MS})) { Start-Sleep 1; $n++ }`,
+    'if (Test-Path $exe) { Start-Process $exe }',
+  ].join('; ');
+  return { spawnPath: 'powershell.exe', spawnArgs: ['-NoProfile', '-Command', script] };
 }
 
 export function planSpawn(
   strategy: InstallerStrategy,
-  input: { installerPath: string; currentEnv: Record<string, string | undefined> },
+  input: { installerPath: string; currentEnv: Record<string, string | undefined>; relaunchExe?: string },
 ): SpawnPlan | null {
   if (strategy.kind === 'nsis') {
     return {
       spawnPath: input.installerPath,
       spawnArgs: nsisSpawnArgs(input.installerPath),
       spawnEnv: undefined,
+      // Relance seulement quand l'appelant connaît son propre exécutable (production). Les
+      // tests et les contextes sans exécutable installé relancent RIEN : l'installeur seul.
+      ...(input.relaunchExe === undefined ? {} : { relaunch: relaunchPlan(input.relaunchExe) }),
     };
   }
   if (strategy.kind === 'appimage') {
@@ -487,6 +521,12 @@ export interface UpdateServiceOptions {
   roomActive: () => boolean;
   /** Le réglage `update.auto`, lu à chaque réveil de cadence (condition 5). */
   isAutoEnabled: () => boolean;
+  /**
+   * Le chemin de l'exécutable COURANT (process.execPath), pour la relance après un installateur
+   * silencieux qui ne relance pas lui-même (NSIS assisté, fix 2026-11-02). `undefined`/`null` :
+   * contexte sans installation connue (tests) — aucune relance n'est planifiée.
+   */
+  installedExePath: () => string | undefined;
   /** Publication de l'état (événement IPC) à CHAQUE transition, pas seulement à la fin. */
   onStateChange: (state: UpdateState) => void;
 }
@@ -651,7 +691,14 @@ export function createUpdateService(options: UpdateServiceOptions): UpdateServic
       seam.log('mise à jour : salon actif — installation refusée');
       return;
     }
-    const plan = planSpawn(ready, { installerPath: ready.path, currentEnv: seam.env() });
+    const plan = planSpawn(ready, {
+      installerPath: ready.path,
+      currentEnv: seam.env(),
+      // L'exécutable COURANT (l'installateur per-user réinstalle au MÊME emplacement) : c'est lui
+      // que la relance attend puis redémarre. `undefined` (contexte de test, portable sans
+      // installation) : aucune relance, l'installateur seul — comme avant.
+      relaunchExe: options.installedExePath(),
+    });
     if (plan === null) {
       fail('stratégie d’installation inconnue');
       return;
@@ -661,6 +708,12 @@ export function createUpdateService(options: UpdateServiceOptions): UpdateServic
     if (!spawned) {
       fail('lancement de l’installateur refusé par le système');
       return;
+    }
+    // Relance détachée (fix « l'app ne redémarre jamais », 2026-11-02) : planifiée seulement
+    // quand l'installeur ne relance pas lui-même (NSIS assisté silencieux). Lancée AVANT de
+    // quitter — elle attend l'installation, pas nous.
+    if (plan.relaunch !== undefined) {
+      await seam.spawn(plan.relaunch.spawnPath, plan.relaunch.spawnArgs, undefined);
     }
     // L'installateur a été lancé détaché : il finira sans nous. On rend la machine.
     options.quitApp();
