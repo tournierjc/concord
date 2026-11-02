@@ -54,16 +54,16 @@ export function isOrchestratorAddress(address: string): boolean {
 }
 
 /**
- * Classe les adresses annoncables : les plausibles d'abord, dans l'ordre reçu ; les plages
- * d'orchestrateur ne passent devant une candidate privée ordinaire que si rien de meilleur
- * n'existe. Pure, aucune I/O, testable sur une table de candidates.
+ * Classe les adresses annoncables : les plausibles D'ABORD (ordre reçu), les ponts
+ * d'orchestrateur ENSUITE (ordre reçu). Pure, aucune I/O, testable sur une table de candidates.
  */
 export function rankAnnounceAddresses(addresses: readonly string[]): string[] {
   const strings = addresses.filter((entry) => typeof entry === 'string' && entry.length > 0);
   const plausible = strings.filter((entry) => !isOrchestratorAddress(entry));
-  // Si TOUTES sont des ponts d'orchestrateur, on les garde dans l'ordre — un voisin sur le
-  // même pont reste joignable, et rien de mieux n'existe sur cette machine.
-  return plausible.length > 0 ? plausible : strings;
+  const bridges = strings.filter((entry) => isOrchestratorAddress(entry));
+  // Si TOUTES sont des ponts d'orchestrateur, `plausible` est vide et les ponts restent —
+  // un voisin sur le même pont est joignable, et rien de mieux n'existe sur cette machine.
+  return [...plausible, ...bridges];
 }
 
 /**
