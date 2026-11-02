@@ -18,6 +18,7 @@ import type {
   ParticipantDto,
   RoomStateDto,
   RoomSummaryDto,
+  RecreateStateDto,
   ShortcutConflictDto,
   UpdateStateDto,
 } from '../shell/ipc-contract';
@@ -373,7 +374,20 @@ export function App(): JSX.Element {
       // Mises à jour (avenant SPEC-006b, 2026-11-01) : l'état de la machine du main, suivi en
       // direct. Le renderer ne DÉCIDE rien — il rend ce que le main publie, rien de plus.
       api.onUpdateState(setUpdateState),
+      // Salon automatique (2026-11-02) : la machine de recréage vit dans le MAIN (le flux créer-
+      // salon y vit aussi — le pont `room:join` + le tuyau de signalisation). Le lobby ne fait que
+      // RELIRE : instantané au montage (la machine a pu publier avant que la page existe), puis
+      // abonnement aux transitions. Le nom du salon vient du main, jamais d'une saisie locale.
+      api.onRoomRecreateState(setRecreateState),
     ];
+    void api
+      .getRoomRecreateStatus()
+      .then((status) => {
+        if (active) setRecreateState(status);
+      })
+      .catch(() => {
+        // Main injoignable : aucune ligne — on n'affirme pas un recréage qu'on n'a pas mesuré.
+      });
     return () => {
       active = false;
       for (const unsubscribe of unsubscribers) unsubscribe();
@@ -437,8 +451,11 @@ export function App(): JSX.Element {
   // (`browser-timers`), seul endroit autorisé à poser un minuteur côté renderer.
   const [toast, setToast] = useState<string | null>(null);
   // Mises à jour (avenant SPEC-006b, 2026-11-01) : la dernière publication du main, rien de plus.
-  // `null` tant qu'aucun état n'est tombé — un bandeau sans publication serait une affirmation.
+  // `null` tant qu'aucun état n'a été publié — un bandeau sans publication serait une affirmation.
   const [updateState, setUpdateState] = useState<UpdateStateDto | null>(null);
+  // Salon automatique à la reprise (2026-11-02) : l'état de la machine du main, lu puis suivi en
+  // direct. `null` tant que rien n'a été publié — la ligne d'état n'affirme rien sans mesure.
+  const [recreateState, setRecreateState] = useState<RecreateStateDto | null>(null);
   // Le bandeau peut être renvoyé par [Plus tard] sans que la machine du main change d'état :
   // c'est un choix d'affichage local, pas un fait mesuré, et il ne dure pas au-delà de l'état.
   const [updateDismissedAt, setUpdateDismissedAt] = useState<string | null>(null);
@@ -604,6 +621,7 @@ export function App(): JSX.Element {
             lobbyStatus={lobbyStatus}
             hosting={room.roomId !== null}
             localRoom={{ roomId: room.roomId, participantCount: room.participantCount }}
+            recreate={recreateState}
             onJoin={(roomId, roomName) => void joinRoom(roomId, roomName)}
             onRefresh={() => void refreshRooms()}
           />
@@ -687,6 +705,12 @@ interface RoomListProps {
   hosting: boolean;
   /** Population réelle du salon local, substituée à l'annonce pour la ligne de CE poste. */
   localRoom: { roomId: string | null; participantCount: number };
+  /**
+   * L'état de la machine de recréage du main (2026-11-02), ou `null` tant que rien n'a été publié.
+   * Le lobby ne fait que le RENDRE : une ligne sobre (`aria-live`), jamais un modal, et rien pendant
+   * qu'un salon est ouvert — la personne est déjà dedans, une bandeau par-dessus serait du bruit.
+   */
+  recreate: RecreateStateDto | null;
   onJoin: (roomId: string, roomName: string) => void;
   onRefresh: () => void;
 }
@@ -705,6 +729,7 @@ export function RoomList({
   lobbyStatus,
   hosting,
   localRoom,
+  recreate,
   onJoin,
   onRefresh,
 }: RoomListProps): JSX.Element {
@@ -859,6 +884,22 @@ export function RoomList({
           {action.kind === 'join' ? t('room.row.join') : t('room.create.confirm')}
         </button>
       </div>
+
+      {/* Salon automatique à la reprise (2026-11-02) : UNE ligne sobre, région `aria-live`, jamais
+          un modal ni une barre. Elle n'affiche que ce que la machine du main a publié (SPEC-002 D1) :
+          `pending`/`recreating` disent la tentative, `failed` dit l'échec SANS boucle (la machine
+          n'essaie qu'une fois — le bouton [Créer et rejoindre] au-dessus reste la vraie réponse).
+          Rien hors lobby : ce composant n'est monté que sur l'écran des salons. */}
+      {recreate !== null && (recreate.phase === 'pending' || recreate.phase === 'recreating') ? (
+        <p className='field__help' role='status' aria-live='polite'>
+          {t('room.auto.recreating', { name: recreate.roomName ?? '' })}
+        </p>
+      ) : null}
+      {recreate !== null && recreate.phase === 'failed' ? (
+        <p className='field__help' role='status' aria-live='polite'>
+          {t(recreate.reasonKey ?? 'room.auto.failed.create', { name: recreate.roomName ?? '' })}
+        </p>
+      ) : null}
 
       {/* LobbyFooter (SPEC-002 §3) : 32 px, bordure haute, `bg.surface`. Hors-ligne, le port et la
           recherche disparaissent (S1.10). La recherche est dite en langage clair — le mécanisme
