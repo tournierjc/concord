@@ -12,7 +12,7 @@
  * NON VÉRIFIÉ ici : React non installable dans cet environnement (voir la livraison T3).
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import {
   DEFAULT_PTT_ACCELERATOR,
@@ -137,6 +137,7 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
   const [inputs, setInputs] = useState<DeviceOption[]>([]);
   const [outputs, setOutputs] = useState<DeviceOption[]>([]);
   const [recording, setRecording] = useState(false);
+  const captureRef = useRef<HTMLInputElement>(null);
   const [shortcutDraft, setShortcutDraft] = useState<string>(settings.talk.pttAccelerator);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
   // Message d'annonce (S3.6 : la séquence finale enregistrée s'annonce). Il vit dans la région
@@ -204,6 +205,19 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
   // raccourci global est bien enregistré — tant que le main ne publie pas l'état d'enregistrement,
   // un libellé optimiste est supprimé plutôt qu'aligné sur une absence de mesure (SPEC-002 D1).
   const shortcutStatusKey = pttConflict ? 'settings.ptt.inactive' : null;
+  useEffect(() => {
+    if (recording) captureRef.current?.focus();
+  }, [recording]);
+  useEffect(() => {
+    // Escape cancels a shortcut recording first; only otherwise does it close the panel.
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (recording) setRecording(false);
+      else onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onClose, recording]);
 
   return (
     <div className="sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -404,6 +418,7 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
               </button>
             </div>
             <input
+              ref={captureRef}
               className="input shortcut__capture"
               aria-label={t('settings.ptt.recording')}
               readOnly
@@ -412,6 +427,11 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
               onKeyDown={(event) => {
                 if (!recording) return;
                 event.preventDefault();
+                if (event.key === 'Escape') {
+                  setRecording(false);
+                  setShortcutError(null);
+                  return;
+                }
                 const candidate = acceleratorFromEvent(event);
                 if (!candidate) return;
                 if (!isValidAccelerator(candidate)) {
@@ -657,9 +677,6 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
           onClick={() => void lanApi().openSettings()}
         >
           {t('settings.about.local')}
-        </button>
-        <button type="button" className="button button--primary" onClick={onClose}>
-          {t('common.close')}
         </button>
       </footer>
     </div>
