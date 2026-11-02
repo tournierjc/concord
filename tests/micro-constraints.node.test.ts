@@ -32,11 +32,13 @@ import { installFakeDom, type FakeDom } from './fake-rtc.ts';
 /* ---------------------------------------------------- 1. la fabrique pure ---- */
 
 describe('buildMicrophoneConstraints — réglages → facettes de capture (SPEC-019 avenant 2026-11-02)', () => {
-  it('réglages absents : les défauts historiques intacts (mono, EC/NS/AGC actifs, pas de facette)', () => {
+  it('réglages absents : défauts du moteur (mono, EC/AGC actifs, NS ÉTEINTE — RNNoise, pas de facette)', () => {
     assert.deepEqual(buildMicrophoneConstraints(undefined), {
       channelCount: 1,
       echoCancellation: true,
-      noiseSuppression: true,
+      // NS éteinte par défaut (2026-11-02) : RNNoise se calibre sur le silence du PTT et
+      // tue la détection de voix à la réactivation.
+      noiseSuppression: false,
       autoGainControl: true,
     });
   });
@@ -86,7 +88,7 @@ describe('createMediaPlane — les facettes réglées arrivent à getUserMedia',
       assert.deepEqual(audio, {
         channelCount: MIC_CONSTRAINTS.channelCount,
         echoCancellation: true,
-        noiseSuppression: true,
+        noiseSuppression: false,
         autoGainControl: true,
       });
       plane.close();
