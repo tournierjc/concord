@@ -71,10 +71,13 @@ describe('garde talkGetMode — charge utile vide (le renderer ne choisit rien)'
 
 /* -------------------------------------------------------- 2. les comptes ---- */
 
-describe('INVOKE_CHANNELS — talkSetMode/talkGetMode en queue, jamais triés', () => {
-  it('les deux canaux existent et ferment la liste', () => {
-    assert.equal(INVOKE_CHANNELS[INVOKE_CHANNELS.length - 2], IPC.talkSetMode);
-    assert.equal(INVOKE_CHANNELS[INVOKE_CHANNELS.length - 1], IPC.talkGetMode);
+describe('INVOKE_CHANNELS — talkSetMode/talkGetMode ajoutés en queue, jamais triés', () => {
+  it('les deux canaux existent, avant le dernier ajouté (salon automatique)', () => {
+    // Depuis la fusion, `roomRecreateStatusGet` ferme la liste : les canaux talk.* sont
+    // les deux qui le précèdent — l'invariant tenu est « ajoutés en queue, jamais triés ».
+    assert.equal(INVOKE_CHANNELS[INVOKE_CHANNELS.length - 3], IPC.talkSetMode);
+    assert.equal(INVOKE_CHANNELS[INVOKE_CHANNELS.length - 2], IPC.talkGetMode);
+    assert.equal(INVOKE_CHANNELS[INVOKE_CHANNELS.length - 1], IPC.roomRecreateStatusGet);
   });
 
   it('aucun canal existant n’a changé de position (préfixe stable)', () => {
