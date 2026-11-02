@@ -1225,11 +1225,15 @@ function registerIpcHandlers(): void {
       const join = expectPayload(IPC.roomJoin, payload, isRoomJoinPayload);
       // `join.name` est le nom du SALON ; le nom du participant local vient des réglages (A6),
       // jamais du champ qui décrit le salon.
-      const state = bridge.join(join, resolveDisplayName(settings.nickname, osUserName()));
+      const displayName = resolveDisplayName(settings.nickname, osUserName());
+      const state = bridge.join(join, displayName);
       // Salon refusé (plafond atteint) : aucun tuyau à ouvrir.
       if (state.roomId !== null && state.selfId !== null) {
         bridge.setSelfAvatar(avatarRefForJoin(settings.avatar) ?? null);
-        startSignalingLink(state.roomId, join.name, state.selfId, avatarRefForJoin(settings.avatar));
+        // Le tuyau porte le NOM DU PARTICIPANT (réglages), jamais le nom du salon : le `join`
+        // du pont décrit le SALON (`join.name`), et passer les deux au même endroit faisait
+        // apparaître le nom du salon comme ligne de pair média (capture JC « gf », 02/11/2026).
+        startSignalingLink(state.roomId, displayName, state.selfId, avatarRefForJoin(settings.avatar));
         // Salon automatique (2026-11-02) : si CE poste est l'HÔTE du salon qui vient de naître,
         // la mesure est prise (nom + capacité promise du maillage) — c'est elle qui autorisera la
         // reprise au prochain démarrage. Un CLIENT ne mesure rien : il ne peut pas recréer le salon
