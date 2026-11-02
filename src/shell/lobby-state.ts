@@ -181,7 +181,7 @@ export function createRoomMerger(options: {
   now: () => number;
   /** Grâce accordée à un salon absent (défaut `LOBBY_ROOM_GRACE_MS`). */
   graceMs?: number;
-}): { merge: (found: readonly RoomSummaryDto[]) => RoomSummaryDto[] } {
+}): { merge: (found: readonly RoomSummaryDto[]) => RoomSummaryDto[]; removeLocal: (roomId: string) => void } {
   const graceMs = options.graceMs ?? LOBBY_ROOM_GRACE_MS;
   const seen = new Map<string, { room: RoomSummaryDto; lastSeen: number }>();
   return {
@@ -197,6 +197,15 @@ export function createRoomMerger(options: {
         a.lastSeen !== b.lastSeen ? b.lastSeen - a.lastSeen : a.room.roomId < b.room.roomId ? -1 : 1,
       );
       return merged.map((entry) => entry.room);
+    },
+    /**
+     * Retrait LOCAL (2026-11-02, retour JC : « je quitte X et je le vois toujours »). Un salon que
+     * CE poste vient de quitter/fermer n'est pas une absence de scrutation — c'est une preuve de
+     * mort : il sort immédiatement, sans les 30 s de grâce (la grâce protège contre un trou mDNS,
+     * pas contre ce que le poste sait déjà). Un `roomId` inconnu est un no-op honnête.
+     */
+    removeLocal(roomId: string): void {
+      seen.delete(roomId);
     },
   };
 }

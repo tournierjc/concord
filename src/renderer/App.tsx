@@ -532,11 +532,16 @@ export function App(): JSX.Element {
     // Le nom est lu AVANT l'appel : après le `leaveRoom()` du main, l'état rendu porte `null` et
     // le toast dirait « Vous avez quitté « » » — un libellé cassé vaut mieux l'éviter que le réparer.
     const leftName = room.roomName;
+    const leftId = room.roomId;
     const state = await api.leaveRoom();
+    // Retrait LOCAL du lobby (2026-11-02, retour JC : « je quitte X et je le vois toujours ») :
+    // ce poste sait qu'il vient de quitter/fermer ce salon — ce n'est pas un trou de scrutation,
+    // le salon sort immédiatement de la liste fusionnée, sans attendre l'expiration de la grâce.
+    if (leftId !== null) roomMergerRef.current?.removeLocal(leftId);
     setRoom(state);
     setScreen('rooms');
     if (leftName !== null) setToast(t('room.leave.toast', { name: leftName }));
-  }, [api, room.roomName, t]);
+  }, [api, room.roomName, room.roomId, t]);
 
   // Bandeau de mise à jour (avenant SPEC-006b, 2026-11-01) : non bloquant, réservé aux états qui
   // demandent une attention — `available`, `downloading`, `downloaded`. Masqué PENDANT un salon
