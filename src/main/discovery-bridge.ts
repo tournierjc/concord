@@ -119,6 +119,16 @@ export interface AnnounceOptions {
   port: number;
   /** Nombre de participants annoncé (TXT `participants`, borné par le registre côté lecteur). */
   participants: number;
+  /**
+   * L'adresse sur laquelle CE poste ÉCOUTE réellement (TXT `addr`, cohérence bind/annonce,
+   * 2026-11-02). Le bind du serveur choisit son adresse par le tri des NOMS d'interfaces
+   * (`pickListenHost`) et bonjour publie les siennes par un autre chemin : sur une machine
+   * multi-interfaces, l'adresse annoncée pouvait différer de l'adresse liée — un client
+   * frappait alors à une adresse où personne n'écoute (« aucun hôte après 5000 ms », retour
+   * JC sur la 0.4.3). Avec `addr`, le lecteur joint l'adresse du bind, pas une devinette.
+   * `undefined` : comportement d'avant (l'annonce reste celle de bonjour).
+   */
+  host?: string;
 }
 
 /**
@@ -222,7 +232,12 @@ function normaliseTxt(txt: unknown): Readonly<Record<string, string>> | null {
  * `rankAnnounceAddresses`). Le registre reste seul juge de l'acceptation (`isLanCandidate`) ;
  * la règle LAN n'est pas réimplémentée ici.
  */
-function toRecord(service: Service): MdnsRecordLike | null {
+/**
+ * Exposé pour les tests (tests/announce-coherence.node.test.ts) : la réduction d'un service
+ * bonjour en enregistrement de registre est la règle « qui est joignable où » — falsifiable
+ * sans socket, comme les autres pures du module.
+ */
+export function toRecord(service: Service): MdnsRecordLike | null {
   const name = typeof service.name === 'string' ? service.name.trim() : '';
   const port = service.port;
   if (name.length === 0 || !Number.isInteger(port)) return null;
@@ -230,12 +245,19 @@ function toRecord(service: Service): MdnsRecordLike | null {
   const mdnsHost = typeof service.host === 'string' ? service.host.trim() : '';
   const addresses = Array.isArray(service.addresses) ? service.addresses : [];
   const ranked = rankAnnounceAddresses(addresses);
-  const host = mdnsHost.toLowerCase().endsWith('.local')
-    ? mdnsHost
-    : (ranked[0] ?? mdnsHost);
+  // TXT `addr` (cohérence bind/annonce, 2026-11-02) : l'adresse que L'HÔTE a réellement liée
+  // prime sur toute reconstruction. Un nom `.local` exige une résolution mDNS de plus chez le
+  // lecteur et peut échouer (Windows) ; une adresse vue par bonjour peut ne pas être celle du
+  // bind (machine multi-interfaces). `addr` est publiée par l'hôte lui-même : c'est la vérité.
+  const txt = normaliseTxt(service.txt);
+  const bound = txt === null ? undefined : txt['addr'];
+  const boundLiteral =
+    typeof bound === 'string' && bound.length > 0 && bound.length <= 45 && !bound.includes('.local') ? bound : undefined;
+  const host =
+    boundLiteral ??
+    (mdnsHost.toLowerCase().endsWith('.local') ? mdnsHost : (ranked[0] ?? mdnsHost));
   if (typeof host !== 'string' || host.length === 0) return null;
 
-  const txt = normaliseTxt(service.txt);
   return txt ? { name, host, port, txt } : { name, host, port };
 }
 
@@ -461,6 +483,11 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
     }
     retract();
     const roomName = room.roomName.trim();
+    // TXT `addr` (cohérence bind/annonce, 2026-11-02) : l'adresse liée, si l'appelant la porte,
+    // voyage dans l'annonce. Une valeur vide ou disproportionnée n'est pas publiée — mieux vaut
+    // l'adresse de bonjour qu'un champ mensonger.
+    const addr =
+      typeof room.host === 'string' && room.host.length > 0 && room.host.length <= 45 ? room.host : undefined;
     try {
       announcedService = mdns.publish({
         name: instanceId,
@@ -470,6 +497,7 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
         txt: {
           roomName: roomName.slice(0, MAX_ROOM_NAME_LENGTH),
           participants: String(Number.isFinite(room.participants) ? Math.max(0, Math.trunc(room.participants)) : 0),
+          ...(addr === undefined ? {} : { addr }),
         },
       });
       announcedPort = port;
@@ -483,7 +511,7 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
     // annonce après `ROOM_DISCOVERY_TTL_MS` (12 s). Sans battement sous le TTL, un salon calme
     // disparaissait de la liste des voisins jusqu'au prochain mouvement de population. La
     // cadence est strictement inférieure au TTL (TTL/2 = 6 s) : deux marges de sécurité.
-    reannounceOptions = { roomName: room.roomName, port, participants: room.participants };
+    reannounceOptions = { roomName: room.roomName, port, participants: room.participants, ...(addr === undefined ? {} : { host: addr }) };
     armReannounce();
     // Une entrée de nous-mêmes laissée par un passage précédent ne doit pas rester dans la liste.
     registry.remove(instanceId);

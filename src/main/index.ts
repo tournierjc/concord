@@ -1077,6 +1077,9 @@ function startSignalingLink(roomId: string, name: string, selfId: string, avatar
         roomName: state.roomName ?? roomId,
         port: listen.port,
         participants: state.participantCount,
+        // Cohérence bind/annonce (2026-11-02) : le lecteur joint l'adresse que CE poste a
+        // réellement liée, jamais une reconstruction de bonjour (machine multi-interfaces).
+        host: listen.host,
       });
     },
   });
@@ -1103,6 +1106,8 @@ function reannounceHostedRoom(): void {
     roomName: state.roomName ?? state.roomId,
     port: listen.port,
     participants: state.participantCount,
+    // Cohérence bind/annonce (2026-11-02) : même règle que le bind initial.
+    host: listen.host,
   });
 }
 

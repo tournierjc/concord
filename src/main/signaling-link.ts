@@ -570,7 +570,12 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
     // `timers.once` arme l'`unref` lui-même : une tentative de lien ne retient pas le processus.
     const timer = timers.once(timeoutMs, () => {
       if (connected) return;
-      refuse(`lien refusé : aucun hôte sur ${host}:${port} après ${timeoutMs} ms`);
+      // Le délai écoulé SANS réponse (aucun RST reçu) dit trois choses possibles : l'hôte
+      // n'existe plus à cette adresse, il n'est pas sur ce réseau, ou un pare-feu jette les
+      // paquets. Le dire, au lieu d'un « aucun hôte » qui n'aide pas (retour JC, 2026-11-02).
+      refuse(
+        `lien refusé : aucune réponse de ${host}:${port} après ${timeoutMs} ms — hôte absent, hors réseau ou pare-feu`,
+      );
       socket.destroy();
     });
 
@@ -602,10 +607,14 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
       timers.cancel(timer);
       socket.write(`${joinRequest()}\n`);
     });
-    socket.on('error', () => {
+    socket.on('error', (error: Error) => {
       timers.cancel(timer);
       if (!connected) {
-        refuse(`lien refusé : connexion impossible vers ${host}:${port}`);
+        // Le code d'erreur distingue deux mondes : `ECONNREFUSED` (la machine répond, le port
+        // est fermé — l'hôte est là mais n'écoute pas ici) d'un `ETIMEDOUT`/`EHOSTUNREACH`
+        // (rien ne répond — pare-feu, hors réseau). Un diagnostic actionnable, pas un écho.
+        const code = 'code' in error && typeof error.code === 'string' ? error.code : 'erreur réseau';
+        refuse(`lien refusé : connexion impossible vers ${host}:${port} (${code})`);
       }
     });
     socket.on('close', () => {
