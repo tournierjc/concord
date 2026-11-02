@@ -26,6 +26,7 @@ import {
   type OverlayGeometryDto,
   type OverlayPatchPayload,
   type ParticipantDto,
+  type RecreateStateDto,
   type RoomJoinPayload,
   type RoomStateDto,
   type RoomSummaryDto,
@@ -134,6 +135,11 @@ const lanAPI: LanAPI = {
   },
   onUpdateState: (listener: (state: UpdateStateDto) => void) =>
     subscribe<UpdateStateDto>(IPC.eventUpdateState, listener),
+  // Salon automatique à la reprise (2026-11-02) : deux méthodes en queue, jamais un tri.
+  // Charge utile vide — le renderer relit l'état du main et s'y abonne ; il ne pilote rien.
+  getRoomRecreateStatus: () => invoke<RecreateStateDto>(IPC.roomRecreateStatusGet),
+  onRoomRecreateState: (listener: (state: RecreateStateDto) => void) =>
+    subscribe<RecreateStateDto>(IPC.eventRoomRecreateState, listener),
 };
 
 // Gel : le renderer ne peut ni ajouter, ni remplacer, ni supprimer une méthode du pont.

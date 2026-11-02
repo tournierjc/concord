@@ -37,11 +37,12 @@ function currentSection(): string {
 test('les comptes annoncés sont ceux du contrat', () => {
   const section = currentSection();
   const total = INVOKE_CHANNELS.length + EVENT_CHANNELS.length;
-  // Comptes actuels (avenant SPEC-006b, 2026-11-01 : +2 invoke, +1 événement) — alignés sur le
-  // fichier source de vérité, `src/shell/ipc-contract.ts`, lus ci-dessus, jamais sur un souhait.
-  assert.equal(total, 32, `canaux du contrat : ${total}`);
-  assert.equal(INVOKE_CHANNELS.length, 20);
-  assert.equal(EVENT_CHANNELS.length, 12);
+  // Comptes actuels (avenant SPEC-006b, 2026-11-01 : +2 invoke, +1 événement ; salon automatique
+  // à la reprise, 2026-11-02 : +1 invoke, +1 événement) — alignés sur le fichier source de vérité,
+  // `src/shell/ipc-contract.ts`, lus ci-dessus, jamais sur un souhait.
+  assert.equal(total, 34, `canaux du contrat : ${total}`);
+  assert.equal(INVOKE_CHANNELS.length, 21);
+  assert.equal(EVENT_CHANNELS.length, 13);
   assert.match(section, new RegExp(`${total} canaux`));
   assert.match(section, new RegExp(`${INVOKE_CHANNELS.length} invoke`));
   assert.match(section, new RegExp(`${EVENT_CHANNELS.length} événements`));

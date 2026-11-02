@@ -52,6 +52,10 @@ export const IPC = {
   // le main applique la baisse/restauration du volume des AUTRES applications. Une seule forme :
   // l'intention `{ active: boolean }` horodatée par le producteur — le main ne décide rien.
   duckingApply: 'lan:ducking:apply',
+
+  // Salon automatique à la reprise (2026-11-02) : le renderer ne fait que RELIRE l'état de la
+  // machine du main — le recréage lui-même est décidé et exécuté par le main seul.
+  roomRecreateStatusGet: 'lan:room-recreate:status',
   // Mises à jour (avenant SPEC-006b, 2026-11-01) : le renderer DEMANDE et AFFICHE, le main
   // vérifie, télécharge et installe (process principal seul, `node:https`, hôtes allowlistés).
   // Deux invoke à charge utile VIDE — le renderer ne choisit ni URL, ni version, ni chemin.
@@ -81,6 +85,11 @@ export const IPC = {
   // Mises à jour (avenant SPEC-006b, 2026-11-01) : l'état de la machine du main, publié à chaque
   // transition (checking/available/downloading NN %/downloaded/installing/up-to-date/disabled/failed).
   eventUpdateState: 'lan:event:update-state',
+
+  // Salon automatique à la reprise (2026-11-02) : l'état de la machine de recréage, publié par le
+  // main à chaque transition (pending → recreating → recreated | failed). Le lobby n'en fait
+  // qu'une ligne sobre — il ne pilote rien.
+  eventRoomRecreateState: 'lan:event:room-recreate-state',
 } as const;
 
 export type IpcInvokeChannel = (typeof IPC)[
@@ -103,7 +112,8 @@ export type IpcInvokeChannel = (typeof IPC)[
   | 'avatarGetImage'
   | 'duckingApply'
   | 'updateCheckNow'
-  | 'updateInstallNow'];
+  | 'updateInstallNow'
+  | 'roomRecreateStatusGet'];
 
 export type IpcEventChannel = (typeof IPC)[
   | 'eventParticipants'
@@ -117,7 +127,8 @@ export type IpcEventChannel = (typeof IPC)[
   | 'eventDiscoveryStatus'
   | 'eventSignal'
   | 'eventSpeakingSet'
-  | 'eventUpdateState'];
+  | 'eventUpdateState'
+  | 'eventRoomRecreateState'];
 
 export const INVOKE_CHANNELS: readonly IpcInvokeChannel[] = [
   IPC.settingsGet,
@@ -140,6 +151,8 @@ export const INVOKE_CHANNELS: readonly IpcInvokeChannel[] = [
   IPC.duckingApply,
   IPC.updateCheckNow,
   IPC.updateInstallNow,
+  // Salon automatique (2026-11-02) : dernier ajouté, en queue — aucun réordonnancement.
+  IPC.roomRecreateStatusGet,
 ];
 
 export const EVENT_CHANNELS: readonly IpcEventChannel[] = [
@@ -155,6 +168,8 @@ export const EVENT_CHANNELS: readonly IpcEventChannel[] = [
   IPC.eventSignal,
   IPC.eventSpeakingSet,
   IPC.eventUpdateState,
+  // Salon automatique (2026-11-02) : dernier ajouté, en queue — aucun réordonnancement.
+  IPC.eventRoomRecreateState,
 ];
 
 // --- DTO -------------------------------------------------------------------------------------
@@ -368,6 +383,34 @@ export type UpdatePhaseDto =
 /** Longueur maximale d'une raison publiée (`failed`, commande `deb-only`). */
 export const UPDATE_REASON_MAX = 240;
 
+// --- Salon automatique à la reprise (2026-11-02) ----------------------------------------------
+
+/**
+ * L'état de la machine de recréage (`src/main/room-recreate.ts`), tel qu'il traverse l'IPC.
+ * Le renderer ne fait que le rendre — il ne le pilote pas :
+ *  - `phase` : liste close (`idle`/`pending`/`recreating`/`recreated`/`failed`) ;
+ *  - `roomName` : le nom mesuré (`null` tant qu'aucun nom n'a été lu) — borne 32, la même que le
+ *    nom de salon du `join`, pour qu'une ligne d'UI ne puisse jamais porter un nom inventé ;
+ *  - `reasonKey` : une CLÉ parmi les trois connues (`room.auto.failed.*`) ou `null` — le main ne
+ *    connaît pas la langue, le renderer traduit. Une phrase brute serait un libellé hors catalogue.
+ */
+export interface RecreateStateDto {
+  phase: RecreatePhaseDto;
+  roomName: string | null;
+  reasonKey: RecreateFailureKeyDto | null;
+}
+
+export type RecreatePhaseDto = 'idle' | 'pending' | 'recreating' | 'recreated' | 'failed';
+
+/** Les trois seules raisons d'échec que le main peut publier (miroir exact de `room-recreate.ts`). */
+export type RecreateFailureKeyDto =
+  | 'room.auto.failed.hosting'
+  | 'room.auto.failed.network'
+  | 'room.auto.failed.create';
+
+/** Longueur maximale d'un nom de salon recréé (miroir de la borne `roomJoin.name`). */
+export const RECREATE_ROOM_NAME_MAX = 32;
+
 // --- Signalisation (T16 / SPEC-007 §4.1) ---------------------------------------------------
 
 /**
@@ -480,6 +523,14 @@ export interface LanAPI {
   installUpdateNow(): Promise<void>;
   /** L'état de la machine de mise à jour, publié par le main à chaque transition. */
   onUpdateState(listener: (state: UpdateStateDto) => void): () => void;
+  /**
+   * Salon automatique à la reprise (2026-11-02) : l'état de la machine de recréage publié par le
+   * main (le lobby le rend en une ligne sobre). Charge utile vide — le renderer ne choisit ni le
+   * nom, ni le moment : le recréage est décidé et exécuté par le main seul.
+   */
+  getRoomRecreateStatus(): Promise<RecreateStateDto>;
+  /** L'état de la machine de recréage, publié par le main à chaque transition. */
+  onRoomRecreateState(listener: (state: RecreateStateDto) => void): () => void;
 }
 
 /** Ce que le choix d'une image rend au renderer — jamais un chemin, jamais un binaire. */
@@ -769,6 +820,9 @@ function guardInvoke(channel: string, raw: unknown): GuardResult<unknown> {
     // le main seul décide. Une charge utile serait un essai de piloter le téléchargement depuis la page.
     case IPC.updateCheckNow:
     case IPC.updateInstallNow:
+    // Salon automatique (2026-11-02) : simple relecture de l'état du main — une charge utile
+    // serait un essai de piloter le recréage depuis la page.
+    case IPC.roomRecreateStatusGet:
     case IPC.roomsDiscover: {
       if (raw !== undefined && raw !== null) {
         const payload = guard.object(raw, 'payload', EMPTY_PAYLOAD_KEYS);
@@ -951,6 +1005,22 @@ const UPDATE_PHASES: readonly UpdatePhaseDto[] = [
   'up-to-date',
   'disabled',
   'failed',
+];
+
+/** Phases admises sur `eventRoomRecreateState` (miroir exact de `RecreatePhaseDto`, 2026-11-02). */
+const RECREATE_PHASES: readonly RecreatePhaseDto[] = [
+  'idle',
+  'pending',
+  'recreating',
+  'recreated',
+  'failed',
+];
+
+/** Raisons admises sur `eventRoomRecreateState` (miroir exact de `RecreateFailureKeyDto`). */
+const RECREATE_FAILURE_KEYS: readonly RecreateFailureKeyDto[] = [
+  'room.auto.failed.hosting',
+  'room.auto.failed.network',
+  'room.auto.failed.create',
 ];
 
 /**
@@ -1218,6 +1288,31 @@ function guardEvent(channel: string, raw: unknown): GuardResult<unknown> {
       const reason = guard.nullableString(payload, 'reason', 'payload', UPDATE_REASON_MAX);
       if (guard.errors.length > 0) return guardError(channel, guard);
       return { ok: true, value: { state, version, percent, reason } };
+    }
+    case IPC.eventRoomRecreateState: {
+      // Salon automatique (2026-11-02) : DTO validé champ par champ, comme `eventUpdateState`.
+      // Une phase inventée, un nom hors borne ou une raison qui n'est pas l'une des trois clés
+      // connues sont refusés — le lobby n'affiche jamais ce que le contrat n'a pas pu nommer.
+      const allowed = ['phase', 'roomName', 'reasonKey'] as const;
+      const payload = guard.object(raw, 'payload', allowed);
+      if (payload === null) return guardError(channel, guard);
+      const phase = guard.oneOf(payload, 'phase', 'payload', RECREATE_PHASES);
+      const rawName = payload['roomName'];
+      let roomName: string | null = null;
+      if (rawName !== undefined && rawName !== null) {
+        const name = guard.string(payload, 'roomName', 'payload', 1, RECREATE_ROOM_NAME_MAX);
+        roomName = name === null ? null : name;
+        if (name === null) return guardError(channel, guard);
+      }
+      const rawReason = payload['reasonKey'];
+      let reasonKey: RecreateFailureKeyDto | null = null;
+      if (rawReason !== undefined && rawReason !== null) {
+        const key = guard.oneOf(payload, 'reasonKey', 'payload', RECREATE_FAILURE_KEYS);
+        if (key === null) return guardError(channel, guard);
+        reasonKey = key;
+      }
+      if (guard.errors.length > 0) return guardError(channel, guard);
+      return { ok: true, value: { phase, roomName, reasonKey } };
     }
     case IPC.eventProfileOpen: {
       // Notification vide : la décision d'afficher le panneau appartient au renderer seul.
