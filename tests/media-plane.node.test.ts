@@ -338,14 +338,16 @@ describe('media-plane — maillage, Opus 32 kbps, push-to-talk, filtre LAN', () 
     plane.close()
   })
 
-  it('micro : mono, EC/NS/AGC, et coupé au repos (push-to-talk)', async () => {
+  it('micro : mono, EC/AGC, NS éteinte (RNNoise casse la reprise), et coupé au repos (push-to-talk)', async () => {
     const plane = createMediaPlane({ localId: 'a', timers: NO_TIMERS })
     await plane.startMicrophone()
     const constraints = gumCalls[0]
     assert.deepEqual(constraints?.['audio'], {
       channelCount: 1,
       echoCancellation: true,
-      noiseSuppression: true,
+      // RNNoise (NS de Chromium) se calibre sur le silence pendant le PTT et tue la parole
+      // à la réactivation (retour JC, 2026-11-02) : le défaut du moteur est ÉTEINT.
+      noiseSuppression: false,
       autoGainControl: true,
     })
     assert.ok(lastTrack !== null, 'une piste doit avoir été ouverte')

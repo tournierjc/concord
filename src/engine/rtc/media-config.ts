@@ -44,11 +44,21 @@ const OPUS_FMTP_OVERRIDES: ReadonlyArray<readonly [string, string]> = [
 /** Valeur par défaut injectée dans un fmtp Opus absent (minptime = 10 ms gardé). */
 const OPUS_DEFAULT_MINPTIME = 'minptime=10'
 
-/** Contraintes micro : mono, annulation d'écho, réduction de bruit, gain auto. */
+/**
+ * Contraintes micro : mono, annulation d'écho, réduction de bruit, gain auto.
+ *
+ * `noiseSuppression: false` (2026-11-02, retour JC) : la NS de Chromium repose désormais sur
+ * RNNoise, et son estimateur se calibre sur ce qu'il reçoit — une piste désactivée par le
+ * push-to-talk (`track.enabled = false`) le nourrit de silence pur, et à la RÉACTIVATION il
+ * traite la parole comme du bruit : le signal tombait à zéro et la détection de voix mourait
+ * après la première activation. Un défaut qui casse le geste premier du produit ne se garde
+ * pas : éteint par défaut, rallongeable dans les réglages (`audio.noiseSuppression`) par qui
+ * préfère la propreté du fond — au prix connu.
+ */
 export const MIC_CONSTRAINTS: MicrophoneConstraints = {
   channelCount: 1,
   echoCancellation: true,
-  noiseSuppression: true,
+  noiseSuppression: false,
   autoGainControl: true,
 }
 

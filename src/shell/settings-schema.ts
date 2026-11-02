@@ -59,7 +59,8 @@ export interface Point {
 export interface AudioSettings {
   inputDeviceId: string | null;
   outputDeviceId: string | null;
-  /** Suppression de bruit (RNNoise côté moteur) — true par défaut. */
+  /** Suppression de bruit (RNNoise côté Chromium) — false par défaut : calibrée sur le
+   * silence pendant le push-to-talk, elle tue la détection de voix à la réactivation. */
   noiseSuppression: boolean;
   /** Annulation d'écho — true par défaut ; l'état réel est relu dans l'UI (A12). */
   echoCancellation: boolean;
@@ -199,7 +200,7 @@ export function defaultSettings(): Settings {
     audio: {
       inputDeviceId: null,
       outputDeviceId: null,
-      noiseSuppression: true,
+      noiseSuppression: false,
       echoCancellation: true,
       inputGain: 1,
       // Zéro réglage requis : le ducking est actif dès le premier lancement.
