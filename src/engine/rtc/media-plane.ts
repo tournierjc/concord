@@ -619,14 +619,55 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     return peer
   }
 
+  /**
+   * Rebâtit `sdpMid`/`sdpMLineIndex` d'un candidat en file depuis la description distante.
+   * Bogue 2026-11-04 : la voie câble textuel (`parseCandidate` sur une ligne nue) remballe
+   * `{ candidate }` sans coordonnées ; Chromium rejette alors l'ajout — « Candidate missing
+   * values for both sdpMid and sdpMLineIndex » — et chaque candidat attendu est perdu (seuls
+   * les prflx, découverts par le contrôle de consentement, sauvent le lien). La coordonnée
+   * canonique est l'index de la media-section `m=audio`, avec son `a=mid:` s'il en porte un ;
+   * jamais un mid inventé.
+   */
+  function rehydrateCandidate(candidate: RTCIceCandidateInit, remoteSdp: string | null | undefined): RTCIceCandidateInit {
+    if (candidate.sdpMid != null || candidate.sdpMLineIndex != null) return candidate
+    if (typeof remoteSdp !== 'string' || remoteSdp.length === 0) return candidate
+    const sections = remoteSdp.split(/\r?\n/)
+    let index = -1
+    let mid: string | undefined
+    let audioIndex = -1
+    let audioMid: string | undefined
+    for (const line of sections) {
+      if (line.startsWith('m=')) {
+        index += 1
+        if (line.startsWith('m=audio')) {
+          if (audioIndex === -1) {
+            audioIndex = index
+            audioMid = undefined // relit le mid de CETTE section
+          } else if (audioMid === undefined) {
+            // section audio déjà vue : on garde la première.
+          }
+        }
+        continue
+      }
+      if (index === audioIndex && audioMid === undefined && line.startsWith('a=mid:')) {
+        audioMid = line.slice('a=mid:'.length).trim()
+      }
+    }
+    if (audioIndex < 0) return candidate
+    const rehydrated: RTCIceCandidateInit = { candidate: candidate.candidate, sdpMLineIndex: audioIndex }
+    if (audioMid !== undefined && audioMid.length > 0) rehydrated.sdpMid = audioMid
+    return rehydrated
+  }
+
   /** Vide la file des candidats distants reçus avant la description distante. */
   async function flushPending(peer: Peer): Promise<void> {
     if (peer.pending.length === 0) return
     const queued = peer.pending.splice(0, peer.pending.length)
     if (debugMedia()) console.warn(`[media-plane] FLUSH ${String(queued.length)} candidats (local=${String(peer.pc.localDescription?.type)}, remote=${String(peer.pc.remoteDescription?.type)})`)
+    const remoteSdp = peer.pc.remoteDescription?.sdp
     for (const candidate of queued) {
       try {
-        await peer.pc.addIceCandidate(candidate)
+        await peer.pc.addIceCandidate(rehydrateCandidate(candidate, remoteSdp))
       } catch (error) {
         warn(`addIceCandidate en attente rejeté : ${describeError(error)}`)
       }
