@@ -53,7 +53,8 @@ function harness(initial: VoiceFilterId = 'none'): Harness {
   const context = new FakeAudioContext()
   const micTrack = new FakeTrack('micro')
   // La fabrique prend un FLUX (le contrat du DOM), pas une piste : le flux d'entrée porte la
-  // piste micro, et c'est lui qui reçoit `addTrack` de la part de la fabrique.
+  // piste micro ; la fabrique le LIT et n'y écrit pas (la source reçoit un flux mono-piste
+  // séparé en lecture seule — le correctif du double clic, cf. le bloc « doublon » ci-dessous).
   const micStream = new FakeMediaStream([micTrack])
   const chain = createVoiceFilterChain(context, micStream, initial)
   return { context, micTrack, chain }
@@ -236,6 +237,37 @@ describe('voice-filter — changer de voix détruit l’ancien graphe, jamais ne
     h.chain.applyFilter('radio')
     assert.equal(h.chain.track, before)
     h.chain.close()
+  })
+})
+
+describe('voice-filter — le flux d’entrée ne reçoit JAMAIS sa propre piste en doublon', () => {
+  // Le bug du double clic (retour JC, 2026-11-03) : la fabrique posait la piste micro SUR son
+  // propre flux d’entrée avant de créer la source. Le navigateur dédouble alors la piste dans le
+  // nœud source — et au premier clic sur une voix, les deux copies traversent les deux instances
+  // du filtre en parallèle : son doublant/annulant, la voix ne change pas. Le second clic
+  // (débranchage puis remontage) le faisait passer. Le flux capté appartient au plan média :
+  // la fabrique lit ses pistes, elle n’y écrit pas.
+  it('addTrack sur le flux d’entrée = 0 appel sur tout le cycle de vie', () => {
+    const context = new FakeAudioContext()
+    const micTrack = new FakeTrack('micro')
+    const micStream = new FakeMediaStream([micTrack])
+    let addTrackCalls = 0
+    const original = micStream.addTrack.bind(micStream)
+    micStream.addTrack = (track: FakeTrack) => {
+      addTrackCalls += 1
+      original(track)
+    }
+    const chain = createVoiceFilterChain(context, micStream, 'none')
+    for (const id of ['robot', 'radio', 'woman', 'none'] as const) chain.applyFilter(id)
+    assert.equal(addTrackCalls, 0, 'le flux capté est LU, jamais écrit (le doublon vient de là)')
+    assert.equal(micStream.getAudioTracks().length, 1, 'le flux d’entrée garde UNE piste')
+    chain.close()
+  })
+
+  it('la source micro est créée sur la PISTE (nouvelles pistes de test) — une entrée par chaîne', () => {
+    const h = harness('robot')
+    h.chain.applyFilter('woman')
+    assert.equal(h.context.created.sources.length, 1, 'changer de voix ne recrée pas l’entrée')
   })
 })
 

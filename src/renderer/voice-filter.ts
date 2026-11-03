@@ -222,6 +222,24 @@ function buildSpec(context: FilterAudioContext, spec: FilterNodeSpec): BuiltSpec
 }
 
 /**
+ * Le flux MONOPISTE présenté à `createMediaStreamSource` : un objet lecture-seule dont la seule
+ * méthode est `getAudioTracks` (la facette `FilterStreamLike`). La fabrique ne construit jamais
+ * `new MediaStream(...)` (global navigateur, absent de Node) et n'écrit jamais dans le flux
+ * capté (cf. le commentaire de `headOf` — le bug du double clic).
+ */
+function wrapTrackAsStream(track: MediaStreamTrack): FilterStreamLike {
+  return {
+    getAudioTracks: () => [track],
+    // Le flux présenté à la source n'est JAMAIS un réceptacle : `addTrack` n'y va pas (la
+    // fabrique ne l'appelle plus), et un appel qui reviendrait par accident lèverait au lieu
+    // de stocker en silence un doublon que les doubles ne verraient pas.
+    addTrack: () => {
+      throw new Error('[voice-filter] addTrack sur le flux de la source : la fabrique ne doit pas écrire dans le flux (bug du double clic, 2026-11-03)')
+    },
+  }
+}
+
+/**
  * Construit la chaîne de filtrage d'une session.
  *
  * @param context l'AudioContext de la session (celui du plan média — une page, une horloge)
@@ -283,8 +301,9 @@ export function createVoiceFilterChain(
    * modulerait une porteuse déjà décalée — un robot dont le vrombissement monterait avec la
    * voix, ce que la recette ne promet pas).
    *
-   * La source est créée sur un flux dont la fabrique POSE la piste (`addTrack`) — jamais sur un
-   * flux qu'elle construirait (`new MediaStream` = global navigateur, absent de Node).
+   * La source est créée sur un flux mono-piste en lecture seule (`wrapTrackAsStream`) : jamais
+   * sur un flux qu'elle construirait (`new MediaStream` = global navigateur, absent de Node),
+   * et jamais en écrivant dans le flux capté (le bug du double clic, cf. `headOf`).
    */
   function headOf(id: VoiceFilterId): FilterNodeLike {
     let entry = sourceNode
@@ -292,8 +311,16 @@ export function createVoiceFilterChain(
       if (source === undefined) {
         throw new Error('[voice-filter] flux micro sans piste audio : rien à filtrer (bug de flux, pas un réglage)')
       }
-      stream.addTrack(source)
-      entry = context.createMediaStreamSource(stream)
+      // Le flux capté appartient au plan média : la fabrique le LIT, n'y écrit JAMAIS.
+      // (Le bug du double clic, retour JC 2026-11-03 : la fabrique posait la piste micro SUR
+      // son propre flux d'entrée avant de créer la source — `stream.addTrack(source)`. Dans le
+      // navigateur, la source d'un flux dont la piste a été re-posée en double ses entrées ;
+      // au premier clic sur une voix, les deux copies traversaient le filtre en parallèle et
+      // se neutralisaient — la voix ne changeait qu'au SECOND clic (débranchage/remontage).
+      // Les doubles le laient passer : `FakeMediaStream.addTrack` stocke en liste, le doublon
+      // était invisible. La facette ne demande que `getAudioTracks` : c'est un flux FAUX que la
+      // fabrique présente à `createMediaStreamSource`, construit par le port injecté.)
+      entry = context.createMediaStreamSource(wrapTrackAsStream(source))
       sourceNode = entry
     }
     if (!voiceFilterShiftsPitch(id)) return entry
