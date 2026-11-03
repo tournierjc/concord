@@ -204,11 +204,23 @@ function describeError(error: unknown): string {
  * pendant l'écoute : l'écoute en cours est ARRÊTÉE puis relancée — entendre une voix périmée
  * sans le savoir serait un mensonge de confort.
  */
-export async function startMicCheck(settings: Settings, port: MicCheckPort = defaultPort): Promise<void> {
+export async function startMicCheck(
+  settings: Settings,
+  port: MicCheckPort = defaultPort,
+  /**
+   * La voix réellement sur le fil, RELUE du plan média (`voice.ts` → `plane.voiceFilter()`).
+   * Par défaut on prend celle du registre — c'est déjà les mêmes contraintes que la session pour
+   * le RNNoise, l'annulation d'écho et le gain. Cet argument n'existe que pour le cas réel où
+   * l'intention écrite et la voix appliquée DIFFÈRENT (voix refusée en page : `setVoiceFilter`
+   * rend `false`) : le test rejoue alors ce que les pairs ENTENDENT, pas ce que le réglage prétend.
+   */
+  appliedVoiceFilter?: VoiceFilterId,
+): Promise<void> {
   stopMicCheck();
   publish({ status: 'starting', level: null, error: null, applied: null });
   const requested = buildMicrophoneConstraints(settings.audio);
   const gain = typeof requested.gain === 'number' ? requested.gain : 1;
+  const voice = appliedVoiceFilter ?? settings.audio.voiceFilter ?? 'none';
   try {
     const stream = await port.getUserMedia({
       audio: {
@@ -226,7 +238,7 @@ export async function startMicCheck(settings: Settings, port: MicCheckPort = def
     void context.resume?.();
     // La MÊME chaîne que la session (mêmes recettes, mêmes poids de formants). La différence est
     // en AVAL : l'hôte d'audition porte la piste vers les HP, pas un connect brut.
-    const chain = port.buildChain(context, stream, settings.audio.voiceFilter ?? 'none');
+    const chain = port.buildChain(context, stream, voice);
     const speakers = port.speakers ?? pageSpeakerHost;
     speakers.play(chain.track);
     // Capteur sur le micro BRUT : la barre prouve la CAPTURE, pas le rendu du filtre.

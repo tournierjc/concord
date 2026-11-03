@@ -896,6 +896,17 @@ export function setVoiceFilter(id: VoiceFilterId): boolean {
   return current.wire.plane.voiceFilter() === id;
 }
 
+/**
+ * La voix RÉELLEMENT sur le fil (2026-11-03) : `plane.voiceFilter()` relu, jamais l'intention
+ * du registre. `null` = aucune session ouverte — le test du micro retombe alors sur le registre
+ * (c'est l'intention que `openVoice` appliquera, et il n'y a rien de plus vrai à mesurer).
+ */
+export function currentVoiceFilter(): VoiceFilterId | null {
+  const current = session;
+  if (current === null) return null;
+  return current.wire.plane.voiceFilter();
+}
+
 /** Lecture directe, hors React (diagnostic, tests de fumée). */
 export function voiceSnapshot(): VoiceSnapshot {
   return snapshot;

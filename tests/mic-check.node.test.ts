@@ -194,6 +194,28 @@ describe('mic-check — la capture porte les réglages du registre', () => {
     assert.equal(snapshot.applied?.gain, 1)
     stopMicCheck()
   })
+
+  it('la voix RELUE du plan média prime sur le registre (voix refusée en page ⇒ le test rejoue la voix brute)', async () => {
+    // Le cas réel : `setVoiceFilter` a rendu `false` (page sans capability). Le registre prétend
+    // 'robot' ; les pairs entendent la voix BRUTE. Le test doit dire et jouer la vérité mesurée.
+    stopMicCheck()
+    const r = rig()
+    const settings = settingsLike()
+    settings.audio.voiceFilter = 'robot'
+    await startMicCheck(settings, r.port, 'none')
+    assert.equal(micCheckSnapshot().applied?.voiceFilter, 'none', 'la voix testée est celle du fil, pas celle du registre')
+    stopMicCheck()
+  })
+
+  it('sans voix relue, le registre fait foi (hors session : c est l intention que openVoice appliquera)', async () => {
+    stopMicCheck()
+    const r = rig()
+    const settings = settingsLike()
+    settings.audio.voiceFilter = 'child'
+    await startMicCheck(settings, r.port, undefined)
+    assert.equal(micCheckSnapshot().applied?.voiceFilter, 'child')
+    stopMicCheck()
+  })
 })
 
 describe('mic-check — audition et mesure', () => {

@@ -27,7 +27,7 @@ import {
 } from '../shell/settings-schema';
 import { isValidAccelerator, normalizeAccelerator } from '../shell/settings-schema';
 import { VOICE_FILTER_IDS } from '../engine/rtc/voice-filters.ts';
-import { setVoiceFilter } from './voice.ts';
+import { currentVoiceFilter, setVoiceFilter } from './voice.ts';
 import {
   MIC_CHECK_SPEAKING_RMS,
   micCheckSnapshot,
@@ -365,7 +365,14 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
                     audioPatch({ voiceFilter: id })
                     // Le retour du plan média est RELU, pas supposé : `false` = la page n'a pas
                     // pu fabriquer la voix (la voix brute part, le réglage reste l'intention).
-                    setVoiceFilterRefused(setVoiceFilter(id))
+                    const applied = setVoiceFilter(id)
+                    setVoiceFilterRefused(applied)
+                    // Le test du micro porte la MÊME voix que la session : si une écoute tourne,
+                    // elle est relancée sur la nouvelle voix (entendre une voix périmée après ce
+                    // clic serait un mensonge de confort — cf. la règle du second « Tester »).
+                    if (micCheck.status === 'listening' || micCheck.status === 'starting') {
+                      void startMicCheck(settings, undefined, applied ? id : currentVoiceFilter() ?? undefined)
+                    }
                   }}
                 >
                   {t(`settings.audio.voiceFilter.${id}`)}
@@ -410,7 +417,10 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
                     stopMicCheck()
                     return
                   }
-                  void startMicCheck(settings)
+                  // Voix RÉELLE d'abord (`plane.voiceFilter()` relu), le registre en repli :
+                  // si une voix demandée a été refusée en page, le test rejoue ce que les pairs
+                  // ENTENDENT — la voix brute — et son aide le dit, pas la voix prétendue.
+                  void startMicCheck(settings, undefined, currentVoiceFilter() ?? undefined)
                 }}
               >
                 {micCheck.status === 'listening' || micCheck.status === 'starting'
