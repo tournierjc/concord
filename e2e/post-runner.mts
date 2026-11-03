@@ -12,7 +12,12 @@ import { systemTimers } from '../src/main/timers.ts';
 
 // e2e du trajet complet (boucle locale, mais deux processus SEPARES — pas de fuite de closure).
 const CHROME = process.env.CHROME_PATH ?? '/opt/data/.pw-browsers/chromium-1234/chrome-linux/chrome';
-const HOST_IP = '127.0.0.1';
+const LAN_IP = process.env['LAN_IP'] ?? '';
+const HOST_IP = process.env['NO_LOOPBACK'] === '1' ? LAN_IP : '127.0.0.1';
+if (process.env['NO_LOOPBACK'] === '1' && !LAN_IP) {
+  console.error('NO_LOOPBACK=1 exige LAN_IP=<ip lan> (ex. 192.168.1.135)');
+  process.exit(2);
+}
 const PORT = Number(process.env.CONCORD_E2E_PORT ?? 47821);
 const ROLE = process.argv[2] === 'client' || process.argv[2] === 'join' ? 'client' : 'host';
 
@@ -153,6 +158,9 @@ async function launchPost(label: string) {
   }
   // Banc: trace toutes les RTCPeerConnection creees par le bundle (hook sans toucher src/).
   // Code passe en CHAINE pour echapper a l'annotation __name d'esbuild dans le bundle runner.
+  if (process.env['NO_LOOPBACK'] === '1') {
+    await page.evaluate(`(() => { (globalThis).__NO_LOOPBACK_ICE = true; })()`);
+  }
   if (process.env['ICE_ONLY_LAN'] === '1') {
     await page.evaluate(`(() => { (globalThis).__ICE_ONLY_LAN = true; })()`);
   }
@@ -202,6 +210,36 @@ async function launchPost(label: string) {
       // Filtre candidats du banc (flag ICE_ONLY_LAN): ne publier que 192.168.1.x — isole le cas
       // multi-interfaces (tailscale fd7a::/100.101., docker 172.17.) SANS toucher src/.
       const onlyLan = g.__ICE_ONLY_LAN === true;
+      const noLoopback = g.__NO_LOOPBACK_ICE === true;
+      const badLine = (l) => (onlyLan && l.startsWith('a=candidate:') && !/ 192\.168\.1\./.test(l))
+        || (noLoopback && l.startsWith('a=candidate:') && !/ 192\.168\.1\.[0-9]+ /.test(l));
+      if (noLoopback) {
+        const kept0 = (desc0) => {
+          if (!desc0 || typeof desc0.sdp !== 'string') return desc0;
+          const CRLF = String.fromCharCode(13, 10);
+          const kept = desc0.sdp.split(CRLF).filter((l) => !badLine(l));
+          return { type: desc0.type, sdp: kept.join(CRLF) };
+        };
+        const _og0 = pc.createOffer.bind(pc);
+        pc.createOffer = async (...a) => kept0(await _og0(...a));
+        const _oa0 = pc.createAnswer.bind(pc);
+        pc.createAnswer = async (...a) => kept0(await _oa0(...a));
+        const _osa0 = pc.setRemoteDescription.bind(pc);
+        pc.setRemoteDescription = async (d, ...a) => {
+          if (d && typeof d.sdp === 'string') {
+            const kept = d.sdp.split(String.fromCharCode(13, 10)).filter((l) => !badLine(l)).join(String.fromCharCode(13, 10));
+            d = { type: d.type, sdp: kept };
+          }
+          return _osa0(d, ...a);
+        };
+        const _oac0 = pc.addIceCandidate.bind(pc);
+        pc.addIceCandidate = async (c, ...a) => {
+          if (c && typeof c.candidate === 'string' && badLine('a=' + c.candidate)) {
+            return undefined; // candidat loopback rejete par le banc (deux machines distinctes)
+          }
+          return _oac0(c, ...a);
+        };
+      }
       if (onlyLan) {
         const origAdd = pc.addIceCandidate.bind(pc);
         pc.addIceCandidate = (c, ...rest) => {

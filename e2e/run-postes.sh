@@ -20,7 +20,7 @@ if [ "${SIMULTANE:-0}" = "1" ]; then
   # Mode simultane : le join se lance des que le port du host EST EN LISTEN (pas de sommeil
   # arbitraire). Les deux postes sont en course des leur hello : c'est la que le glare frappe.
   for i in $(seq 1 300); do
-    (exec 3<>/dev/tcp/127.0.0.1/"${CONCORD_E2E_PORT:-47821}") 2>/dev/null && { exec 3>&- 3<&-; break; }
+    (exec 3<>/dev/tcp/"${LAN_IP:-127.0.0.1}"/"${CONCORD_E2E_PORT:-47821}") 2>/dev/null && { exec 3>&- 3<&-; break; }
     sleep 0.1
   done
 else
