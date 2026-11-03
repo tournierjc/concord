@@ -544,6 +544,35 @@ body {
   border-bottom: var(--component-hairline) solid var(--color-border-subtle);
 }
 
+/* Test du micro (2026-11-03) : bouton + barre de niveau sur la même ligne. La barre est un
+   `role="meter"` : sa largeur EST la valeur, sa couleur passe à `state.ok` quand le RMS dépasse
+   le seuil « capte » — la preuve visuelle qu'un micro vivant est vivant, sans lire de chiffre. */
+.field__row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.mic-check-bar {
+  flex: 1;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--color-bg-inset);
+  overflow: hidden;
+}
+
+.mic-check-bar__fill {
+  display: block;
+  height: 100%;
+  background: var(--color-text-muted);
+  transition: width 80ms linear;
+}
+
+.mic-check-bar--speaking .mic-check-bar__fill {
+  background: var(--color-state-ok);
+}
+
 .identity .field {
   gap: var(--space-1);
 }

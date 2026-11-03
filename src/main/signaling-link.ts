@@ -574,7 +574,10 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
     // Diagnostic e2e 2026-11-02 (bug « pas de flux audio » LAN) : chaque ligne reçue du serveur est
     // tracee sur stderr en mode debug. Sans lui, un `answer` perdu entre le serveur et le lien
     // était inviséable — seul le `noFlow` final remontait.
-    if (process.env.CONCORD_SIGNAL_DEBUG) console.error(`[signal:${role}] <= ${raw.slice(0, 160)}`);
+    if (process.env.CONCORD_SIGNAL_DEBUG || process.env.CONCORD_E2E_DEBUG === '1') {
+      const full = process.env.CONCORD_E2E_DEBUG === '1';
+      console.error(`[signal:${role}] <= ${full ? raw : raw.slice(0, 160)}`);
+    }
     const message = parseServerLine(raw);
     if (message === null) {
       stats.malformed += 1;

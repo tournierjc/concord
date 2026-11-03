@@ -542,6 +542,11 @@ export class FakeAudioContext {
   }
   public workletModuleLoads = 0
 
+  /**
+   * Sans mesure : le test du micro doit rendre `null` (absence d'affirmation, AD-17), et la
+   * SEULE façon de falsifier ce chemin est un contexte dépourvu de la facette. La suppression
+   * en cours de test ne suffit pas : `createAnalyser` vit sur le PROTOTYPE de la doublure.
+   */
   public createAnalyser(): FakeAnalyser {
     return new FakeAnalyser()
   }

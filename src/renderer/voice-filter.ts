@@ -72,6 +72,23 @@ export interface FilterAudioContext {
   createBiquadFilter(): FilterLike
   createWaveShaper(): ShaperLike
   createOscillator(): OscillatorLike
+  /**
+   * Mesure (facultative, et facultative POURTANT obligatoire pour qui veut un VU-mètre) :
+   * le test de micro (`mic-check.ts`) branche un analyseur sur le micro BRUT pour prouver la
+   * capture. La fabrique de filtres, elle, ne mesure rien — ses recettes sont sourdes.
+   */
+  createAnalyser?(): AnalyserLike
+  /** Reprise du contexte (un contexte SUSPENDU rend un RMS figé — le piège RMS du repo). */
+  resume?(): Promise<void>
+  /** Fermeture du contexte. Idempotente côté appelant (le second refus est ignoré). */
+  close?(): Promise<void>
+}
+
+/** Un analyseur vu de la page : la seule facette de mesure dont `mic-check` a besoin. */
+export interface AnalyserLike {
+  fftSize: number
+  smoothingTimeConstant: number
+  getFloatTimeDomainData(destination: Float32Array<ArrayBuffer>): void
 }
 
 /** La destination dont la piste part aux pairs (le `stream` est ce que lit `replaceTrack`). */

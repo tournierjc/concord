@@ -12,7 +12,7 @@
  * NON VÉRIFIÉ ici : React non installable dans cet environnement (voir la livraison T3).
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 
 import {
   DEFAULT_PTT_ACCELERATOR,
@@ -28,6 +28,13 @@ import {
 import { isValidAccelerator, normalizeAccelerator } from '../shell/settings-schema';
 import { VOICE_FILTER_IDS } from '../engine/rtc/voice-filters.ts';
 import { setVoiceFilter } from './voice.ts';
+import {
+  MIC_CHECK_SPEAKING_RMS,
+  micCheckSnapshot,
+  startMicCheck,
+  stopMicCheck,
+  subscribeMicCheck,
+} from './mic-check.ts';
 import type { LobbyStatusDto, RoomStateDto, UpdateStateDto } from '../shell/ipc-contract';
 import { createTranslator, type Locale } from './i18n';
 import { lanApi } from './api';
@@ -149,6 +156,11 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
   // PAS été appliquée au micro ouvert (fabrication impossible — le réglage reste écrit comme
   // intention, la voix brute part aux pairs, et l'aide le dit). Jamais une alerte bloquante.
   const [voiceFilterRefused, setVoiceFilterRefused] = useState<boolean | null>(null);
+  // Test du micro (2026-11-03) : l'état du store `mic-check` — le panneau ne fait que le piloter
+  // et le rendre. Le panneau qui ferme ARRÊTE l'écoute (un micro ouvert derrière une fenêtre
+  // fermée est exactement le genre de fuite que ce poste doit rendre impossible).
+  const micCheck = useSyncExternalStore(subscribeMicCheck, micCheckSnapshot, micCheckSnapshot);
+  useEffect(() => () => stopMicCheck(), []);
   // Mises à jour (avenant SPEC-006b, 2026-11-01) : la dernière publication du main, rendue
   // honnêtement — `null` tant que rien n'a été publié, jamais un état inventé au montage.
   const [updateState, setUpdateState] = useState<UpdateStateDto | null>(null);
@@ -379,6 +391,68 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
               onChange={(event) => audioPatch({ inputGain: Number(event.target.value) })}
             />
           </label>
+
+          {/*
+            Test du micro (2026-11-03, demande JC) : la preuve AVANT le salon. Un clic capte le
+            micro AVEC les réglages du registre (périphérique, réduction de bruit, écho, gain,
+            voix) et les REJOUE dans les HP ; la barre lit le RMS du micro brut — un micro qui
+            capte du vent (mauvais périphérique, mute système, permission refusée) se voit ici.
+            La machine complète (`mic-check.ts`) est injectable et testée en Node ; ici on ne
+            fait que la piloter et rendre ses états. `null` = aucune mesure, jamais « muet ».
+          */}
+          <div className="field">
+            <div className="field__row">
+              <button
+                type="button"
+                className="button"
+                onClick={() => {
+                  if (micCheck.status === 'listening' || micCheck.status === 'starting') {
+                    stopMicCheck()
+                    return
+                  }
+                  void startMicCheck(settings)
+                }}
+              >
+                {micCheck.status === 'listening' || micCheck.status === 'starting'
+                  ? t('settings.audio.micTest.stop')
+                  : t('settings.audio.micTest')}
+              </button>
+              <span
+                className={`mic-check-bar${micCheck.level !== null && micCheck.level >= MIC_CHECK_SPEAKING_RMS ? ' mic-check-bar--speaking' : ''}`}
+                role="meter"
+                aria-label={t('settings.audio.micTest')}
+                aria-valuemin={0}
+                aria-valuemax={1}
+                aria-valuenow={micCheck.level ?? 0}
+              >
+                <span
+                  className="mic-check-bar__fill"
+                  style={{ width: `${Math.round(Math.min(1, micCheck.level ?? 0) * 100)}%` }}
+                />
+              </span>
+            </div>
+            {micCheck.status === 'listening' ? (
+              <span className="field__help" aria-live="polite">
+                {micCheck.level === null
+                  ? t('settings.audio.micTest.noLevel')
+                  : micCheck.level >= MIC_CHECK_SPEAKING_RMS
+                    ? t('settings.audio.micTest.hearing')
+                    : t('settings.audio.micTest.speaking?')}
+                {micCheck.applied !== null
+                  ? ` · ${t('settings.audio.micTest.applied', {
+                      voice: t(`settings.audio.voiceFilter.${micCheck.applied.voiceFilter}`),
+                      gain: Math.round(micCheck.applied.gain * 100),
+                    })}`
+                  : ''}
+              </span>
+            ) : null}
+            {micCheck.status === 'error' ? (
+              <span className="field__help field__error" aria-live="polite">
+                {t('settings.audio.micTest.error', { message: micCheck.error ?? '' })}
+              </span>
+            ) : null}
+            <span className="field__help">{t('settings.audio.micTest.help')}</span>
+          </div>
 
           <div className="field">
             <span className="field__label">{t('settings.audio.mode')}</span>

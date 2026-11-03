@@ -372,6 +372,17 @@ function attachAnalyser(
  * `RTCPeerConnection` du pair, une par identifiant distant, et la gardent
  * jusqu'à `close()`.
  */
+function debugMedia(): boolean {
+  // Traces de diagnostic du banc deux postes — désactivées par défaut. Activer via
+  // `globalThis.__CONCORD_DEBUG__ = true` (page) ou `CONCORD_E2E_DEBUG=1` (node).
+  if (Reflect.get(globalThis, '__CONCORD_DEBUG__') === true) return true
+  const proc = Reflect.get(globalThis, 'process')
+  if (typeof proc !== 'object' || proc === null) return false
+  const env = Reflect.get(proc, 'env')
+  if (typeof env !== 'object' || env === null) return false
+  return Reflect.get(env, 'CONCORD_E2E_DEBUG') === '1'
+}
+
 export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
   const configuration = lanOnlyConfiguration(o.rtcConfig)
   const peers = new Map<string, Peer>()
@@ -612,6 +623,7 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
   async function flushPending(peer: Peer): Promise<void> {
     if (peer.pending.length === 0) return
     const queued = peer.pending.splice(0, peer.pending.length)
+    if (debugMedia()) console.warn(`[media-plane] FLUSH ${String(queued.length)} candidats (local=${String(peer.pc.localDescription?.type)}, remote=${String(peer.pc.remoteDescription?.type)})`)
     for (const candidate of queued) {
       try {
         await peer.pc.addIceCandidate(candidate)
