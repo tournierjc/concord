@@ -581,6 +581,10 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
       sdpMid: candidate.sdpMid,
       sdpMLineIndex: candidate.sdpMLineIndex,
     }
+    // `usernameFragment` identifie la génération ICE. On ne le pose que s'il
+    // existe : `null` (fin de ramassage, ou candidat sans ufrag) n'a rien à dire.
+    const ufrag = candidate.usernameFragment
+    if (typeof ufrag === 'string' && ufrag.length > 0) init.usernameFragment = ufrag
     if (!isLanCandidate(init)) {
       refuseCandidate('local', remoteId, candidate.candidate)
       return
@@ -623,32 +627,33 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
   }
 
   /**
-   * Rebâtit `sdpMid`/`sdpMLineIndex` d'un candidat en file depuis la description distante.
-   * Bogue 2026-11-04 : la voie câble textuel (`parseCandidate` sur une ligne nue) remballe
-   * `{ candidate }` sans coordonnées ; Chromium rejette alors l'ajout — « Candidate missing
-   * values for both sdpMid and sdpMLineIndex » — et chaque candidat attendu est perdu (seuls
-   * les prflx, découverts par le contrôle de consentement, sauvent le lien). La coordonnée
-   * canonique est l'index de la media-section `m=audio`, avec son `a=mid:` s'il en porte un ;
-   * jamais un mid inventé.
+   * Rebâtit `sdpMid`/`sdpMLineIndex` d'un candidat sans coordonnées depuis la
+   * description distante.
+   *
+   * Bogue 2026-11-04 (0.4.17) : la voie câble textuel remballe `{ candidate }`
+   * sans coordonnées ; Chromium rejette alors l'ajout — « Candidate missing
+   * values for both sdpMid and sdpMLineIndex ». La coordonnée canonique est
+   * l'index de la media-section `m=audio`, avec son `a=mid:` s'il en porte un ;
+   * jamais un mid inventé, et aucun index si le SDP n'a pas d'audio. Une
+   * coordonnée déjà présente n'est pas réécrite. `usernameFragment`, quand le
+   * fil le porte, est conservé.
+   *
+   * Les deux chemins passent ici : la file (avant `setRemoteDescription`) et
+   * l'arrivée directe (après).
    */
   function rehydrateCandidate(candidate: RTCIceCandidateInit, remoteSdp: string | null | undefined): RTCIceCandidateInit {
     if (candidate.sdpMid != null || candidate.sdpMLineIndex != null) return candidate
     if (typeof remoteSdp !== 'string' || remoteSdp.length === 0) return candidate
     const sections = remoteSdp.split(/\r?\n/)
     let index = -1
-    let mid: string | undefined
     let audioIndex = -1
     let audioMid: string | undefined
     for (const line of sections) {
       if (line.startsWith('m=')) {
         index += 1
-        if (line.startsWith('m=audio')) {
-          if (audioIndex === -1) {
-            audioIndex = index
-            audioMid = undefined // relit le mid de CETTE section
-          } else if (audioMid === undefined) {
-            // section audio déjà vue : on garde la première.
-          }
+        if (line.startsWith('m=audio') && audioIndex === -1) {
+          audioIndex = index
+          audioMid = undefined
         }
         continue
       }
@@ -659,7 +664,28 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     if (audioIndex < 0) return candidate
     const rehydrated: RTCIceCandidateInit = { candidate: candidate.candidate, sdpMLineIndex: audioIndex }
     if (audioMid !== undefined && audioMid.length > 0) rehydrated.sdpMid = audioMid
+    const ufrag = candidate.usernameFragment
+    if (typeof ufrag === 'string' && ufrag.length > 0) rehydrated.usernameFragment = ufrag
     return rehydrated
+  }
+
+  /**
+   * Ajoute un candidat déjà filtré LAN. La file et le chemin direct (après
+   * `setRemoteDescription`) partagent ce geste : mêmes coordonnées, même
+   * journal si Chromium refuse. L'exception ne sort pas.
+   */
+  async function applyRemoteCandidate(
+    peer: Peer,
+    candidate: RTCIceCandidateInit,
+    queued: boolean,
+  ): Promise<void> {
+    const ready = rehydrateCandidate(candidate, peer.pc.remoteDescription?.sdp)
+    try {
+      await peer.pc.addIceCandidate(ready)
+    } catch (error) {
+      const where = queued ? 'en attente ' : ''
+      warn(`addIceCandidate ${where}rejeté : ${describeError(error)}`)
+    }
   }
 
   /** Vide la file des candidats distants reçus avant la description distante. */
@@ -667,13 +693,8 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     if (peer.pending.length === 0) return
     const queued = peer.pending.splice(0, peer.pending.length)
     if (debugMedia()) console.warn(`[media-plane] FLUSH ${String(queued.length)} candidats (local=${String(peer.pc.localDescription?.type)}, remote=${String(peer.pc.remoteDescription?.type)})`)
-    const remoteSdp = peer.pc.remoteDescription?.sdp
     for (const candidate of queued) {
-      try {
-        await peer.pc.addIceCandidate(rehydrateCandidate(candidate, remoteSdp))
-      } catch (error) {
-        warn(`addIceCandidate en attente rejeté : ${describeError(error)}`)
-      }
+      await applyRemoteCandidate(peer, candidate, true)
     }
   }
 
@@ -846,7 +867,7 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
       peer.pending.push(candidate)
       return
     }
-    await peer.pc.addIceCandidate(candidate)
+    await applyRemoteCandidate(peer, candidate, false)
   }
 
   function setTransmitting(on: boolean): void {

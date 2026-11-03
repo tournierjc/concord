@@ -146,7 +146,7 @@ async function launchPost(label: string) {
   const page = await browser.newPage();
   page.on('console', (m) => {
     const t = m.text();
-    if (t.includes('addIceCandidate en attente rejet')) iceRejets += 1;
+    if (t.includes('addIceCandidate') && t.includes('rejet')) iceRejets += 1;
     console.log(`  [${label}] ${t}`);
   });
   page.on('pageerror', (e) => console.log(`  [${label}] pageerror ${e.message}`));

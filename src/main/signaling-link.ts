@@ -193,13 +193,62 @@ function asText(payload: unknown): string | null {
   return null;
 }
 
-function asCandidate(payload: unknown): string | null {
-  if (typeof payload === 'string') return payload.length > 0 ? payload : null;
-  if (payload !== null && typeof payload === 'object') {
-    const inner = (payload as { candidate?: unknown }).candidate;
-    return typeof inner === 'string' && inner.length > 0 ? inner : null;
+/**
+ * Champs d'un `RTCIceCandidateInit` que le fil sait porter.
+ *
+ * `line` est la seule chose que le filtre LAN lit. Les trois autres sont les
+ * coordonnées que Chromium exige (`sdpMid` ou `sdpMLineIndex`, les deux nulles
+ * lèvent « Candidate missing values for both sdpMid and sdpMLineIndex ») plus
+ * le `usernameFragment` de la génération ICE. Une chaîne nue (pair ancien, ou
+ * charge utile sans coordonnée) n'en a pas : le plan média les réhydrate depuis
+ * le SDP distant.
+ */
+interface IceWireFields {
+  line: string;
+  sdpMid: string | null;
+  sdpMLineIndex: number | null;
+  usernameFragment: string | null;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readIcePayload(payload: unknown): IceWireFields | null {
+  if (typeof payload === 'string') {
+    return payload.length > 0
+      ? { line: payload, sdpMid: null, sdpMLineIndex: null, usernameFragment: null }
+      : null;
   }
-  return null;
+  if (!isPlainRecord(payload)) return null;
+  const line = payload['candidate'];
+  if (typeof line !== 'string' || line.length === 0) return null;
+  const mid = payload['sdpMid'];
+  const index = payload['sdpMLineIndex'];
+  const ufrag = payload['usernameFragment'];
+  return {
+    line,
+    sdpMid: typeof mid === 'string' && mid.length > 0 ? mid : null,
+    sdpMLineIndex: typeof index === 'number' && Number.isFinite(index) ? index : null,
+    usernameFragment: typeof ufrag === 'string' && ufrag.length > 0 ? ufrag : null,
+  };
+}
+
+/** Chaîne de fil : la ligne nue si rien d'autre, sinon le JSON des coordonnées. */
+function encodeIcePayload(fields: IceWireFields): string {
+  if (fields.sdpMid === null && fields.sdpMLineIndex === null && fields.usernameFragment === null) {
+    return fields.line;
+  }
+  const body: {
+    candidate: string;
+    sdpMid?: string;
+    sdpMLineIndex?: number;
+    usernameFragment?: string;
+  } = { candidate: fields.line };
+  if (fields.sdpMid !== null) body.sdpMid = fields.sdpMid;
+  if (fields.sdpMLineIndex !== null) body.sdpMLineIndex = fields.sdpMLineIndex;
+  if (fields.usernameFragment !== null) body.usernameFragment = fields.usernameFragment;
+  return JSON.stringify(body);
 }
 
 /**
@@ -226,17 +275,22 @@ export function toWire(message: SignalOut): ClientMessage | null {
     return { type: message.kind, to, sdp };
   }
   if (message.kind === 'ice') {
-    const candidate = asCandidate(message.payload);
-    if (candidate === null) {
+    const fields = readIcePayload(message.payload);
+    if (fields === null) {
       if (process.env.CONCORD_SIGNAL_DEBUG) console.error(`[signal] >x ice vers ${to} : charge utile sans ligne de candidat`);
       return null;
     }
     // Filtre LAN AVANT l'émission : un srflx/relay/d'adresse publique ne sort jamais.
-    if (!isLanCandidate(candidate)) {
+    // On filtre la LIGNE, pas l'enveloppe : le JSON des coordonnées commencerait par
+    // « { » et serait refusé en bloc.
+    if (!isLanCandidate(fields.line)) {
       if (process.env.CONCORD_SIGNAL_DEBUG) console.error(`[signal] >x ice vers ${to} : candidat hors LAN filtré à l'émission`);
       return null;
     }
-    return { type: 'ice', to, candidate };
+    // L'enveloppe ne sort que lorsqu'il y a une coordonnée (ou un ufrag) à garder.
+    // Une ligne nue reste une ligne nue : un pair d'une version antérieure, qui
+    // réemballe `{ candidate }`, continue de comprendre. Le plan média réhydrate.
+    return { type: 'ice', to, candidate: encodeIcePayload(fields) };
   }
   // Kind inconnu du contrat (un type ajouté sans branche ici) : rien ne sort, tracé —
   // jamais un `undefined` que l'expéditeur relèverait comme un message valide.
@@ -255,10 +309,12 @@ export function decodeCandidatePayload(candidate: string): unknown {
       // Pas du JSON : la cha\u00eene de candidat repart telle quelle.
     }
   }
-  // Forme native du maillage (mesh.ts onLocalCandidate \u2192 payload RTCIceCandidateInit) : le fil ne
-  // porte qu'une cha\u00eene, donc la ligne SDP doit repartir EMBALLEE. Rendue telle quelle, elle
-  // arrivait chez le pair comme une cha\u00eene nue et `parseCandidate` la refusait
-  // (\u00ab charge utile non objet \u00bb) \u2014 le bug du 2026-11-02 qui tuait tout ICE hors boucle locale.
+  // Ligne SDP nue (pair ancien, ou candidat sans coordonnée) : le maillage consomme un
+  // objet, pas une chaîne. `{ candidate }` seul ne suffit PAS à Chromium — il manque
+  // sdpMid et sdpMLineIndex — mais c'est la forme legacy, et le plan média réhydrate
+  // les deux depuis le SDP distant avant `addIceCandidate`. Une chaîne rendue telle
+  // quelle était refusée par `parseCandidate` (« charge utile non objet »), le bug du
+  // 2026-11-02 qui tuait tout ICE hors boucle locale.
   if (trimmed.startsWith('candidate:')) return { candidate };
   return candidate;
 }

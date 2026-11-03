@@ -295,12 +295,19 @@ function parseCandidate(value: unknown): ParsedCandidate {
   if (index !== undefined && index !== null && typeof index !== 'number') {
     return { ok: false, reason: 'champ « sdpMLineIndex » de type invalide' }
   }
+  const ufrag = value['usernameFragment']
+  if (ufrag !== undefined && ufrag !== null && typeof ufrag !== 'string') {
+    return { ok: false, reason: 'champ « usernameFragment » de type invalide' }
+  }
 
   const candidate: RTCIceCandidateInit = {
     candidate: line,
     sdpMid: typeof mid === 'string' ? mid : null,
     sdpMLineIndex: typeof index === 'number' ? index : null,
   }
+  // Absent chez un pair ancien : on ne l'invente pas (un ufrag faux ferait rejeter
+  // le candidat). Présent : il identifie la génération ICE et doit suivre.
+  if (typeof ufrag === 'string' && ufrag.length > 0) candidate.usernameFragment = ufrag
   return { ok: true, value: candidate }
 }
 

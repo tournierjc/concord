@@ -53,6 +53,10 @@ test('ice : l’objet candidat natif fait l’aller-retour complet sans se faire
   const cand = back.payload as { candidate?: string; sdpMid?: unknown; sdpMLineIndex?: unknown };
   assert.equal(typeof cand, 'object', 'jamais une chaîne nue : parseCandidate la refuserait');
   assert.equal(cand.candidate, LAN_LINE);
+  // Sans ces deux champs, Chromium rejette addIceCandidate
+  // (« Candidate missing values for both sdpMid and sdpMLineIndex »).
+  assert.equal(cand.sdpMid, '0');
+  assert.equal(cand.sdpMLineIndex, 0);
 });
 
 test('chaque payload émis par le mesh survit au couple toWire→fromWire INTACT (épreuve de bout en bout)', () => {
