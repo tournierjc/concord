@@ -329,6 +329,19 @@ const FLOW_TIMEOUT_MS = 5_000
  * SPEC-008 §1 (5 s sans flux ⇒ `noFlow`, cause `'timeout'`). Aucune I/O réseau :
  * tout passe par `send` (l'appelant) et par le plan média.
  */
+/** Trace de diagnostic — active uniquement si la page pose `__CONCORD_DEBUG__` ou node
+ *  `CONCORD_E2E_DEBUG=1`. Désactivé par défaut : aucune sortie en production. */
+function debugMesh(): boolean {
+  // Traces de diagnostic du banc deux postes — désactivées par défaut. Activer via
+  // `globalThis.__CONCORD_DEBUG__ = true` (page) ou `CONCORD_E2E_DEBUG=1` (node).
+  if (Reflect.get(globalThis, '__CONCORD_DEBUG__') === true) return true
+  const proc = Reflect.get(globalThis, 'process')
+  if (typeof proc !== 'object' || proc === null) return false
+  const env = Reflect.get(proc, 'env')
+  if (typeof env !== 'object' || env === null) return false
+  return Reflect.get(env, 'CONCORD_E2E_DEBUG') === '1'
+}
+
 export function createMesh(o: MeshOptions): Mesh {
   const localId = o.localId
   const plane = o.plane
@@ -470,6 +483,7 @@ export function createMesh(o: MeshOptions): Mesh {
       warn(`${cause} refusé : borne de ${maxPeers} pairs atteinte (${peerId} reste hors maillage)`)
       return null
     }
+    if (debugMesh()) console.warn(`[mesh] openLink ${peerId} cause=${cause} role=${localId < peerId ? 'offerer' : 'answerer'}`)
     const link: Link = {
       peerId,
       role: localId < peerId ? 'offerer' : 'answerer',
@@ -569,8 +583,10 @@ export function createMesh(o: MeshOptions): Mesh {
       return
     }
     link.phase = 'answered'
+    if (debugMesh()) console.warn(`[mesh] acceptAnswer AVANT ${link.peerId}`)
     try {
       await plane.acceptAnswer(link.peerId, answer)
+      if (debugMesh()) console.warn(`[mesh] acceptAnswer POSÉE ${link.peerId} (ufrag_réponse=${/a=ice-ufrag:(\S+)/.exec(answer.sdp ?? '')?.[1] ?? '?'})`)
       // Défaut (c) : plus de `clearClock()` + `notify('connected','ice')` ici —
       // la réponse SDP reçue n'est pas une preuve de flux. L'horloge des 5 s
       // reste armée ; `onRemoteStream`/`reportFlow` la désarmeront, sinon
