@@ -271,6 +271,16 @@ type ParsedCandidate =
  */
 function parseCandidate(value: unknown): ParsedCandidate {
   if (value === null) return { ok: true, value: null }
+  // 2026-11-03 (banc poste isolé) : le pair d'en face a pu traverser un câble textuel qui
+  // désenveloppe le RTCIceCandidateInit en ligne SDP nue. Un `candidate:` n'est PAS une charge
+  // hors contrat — le refuser produisait le « charge utile non objet » et 5 s plus tard le
+  // noFlow. On remballe la ligne, seule forme que le plan média consomme.
+  if (typeof value === 'string') {
+    const line = value.trim()
+    if (line.length === 0) return { ok: true, value: null }
+    if (line.startsWith('candidate:')) return { ok: true, value: { candidate: line } }
+    return { ok: false, reason: 'charge utile non objet' }
+  }
   if (!isRecord(value)) return { ok: false, reason: 'charge utile non objet' }
 
   const line = value['candidate']
