@@ -43,7 +43,12 @@ describe('isLanCandidate — la porte des candidats, sur lignes réelles', () =>
     // (VPN, lien-local mal formé, adresse publique sur une interface « LAN »), le pair ne
     // reçoit RIEN — et « Pas de flux audio » après 5 s est le SEUL indice visible. Cet invariant
     // verrouille le diagnostic : refus total local == noFlow distant.
+    // 2026-11-03 : le contrat a changé (banc deux postes) — un `host` sur 100.64/10 provient
+    // d'une interface que CETTE machine héberge (Tailscale), jamais routable depuis Internet :
+    // il passe. Le « lien muet » se mesure désormais sur une adresse publique en host.
     const vpnOnly = 'candidate:1 1 udp 2113937151 100.64.0.5 40012 typ host generation 0'
-    assert.equal(isLanCandidate(vpnOnly), false, '100.64/10 (VPN CGNAT) : hors LAN par contrat');
+    assert.equal(isLanCandidate(vpnOnly), true, '100.64/10 (VPN maillé) : interface locale, proximité réelle');
+    const publicOnly = 'candidate:1 1 udp 2113937151 198.51.100.5 40012 typ host generation 0'
+    assert.equal(isLanCandidate(publicOnly), false, 'public en host : jamais un pair de proximité');
   });
 });

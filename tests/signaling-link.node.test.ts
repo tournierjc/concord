@@ -130,9 +130,9 @@ test('deux nœuds sur sockets TCP loopback échangent join, offer, answer et ice
   assert.equal(offer?.kind, 'offer');
   if (offer?.kind === 'offer') {
     assert.equal(offer.from, clientId);
-    // 2026-11-02 (e2e deux-postes) : la charge utile survit au fil en objet à la forme que
-    // l'as émettrice lui donne — ici un « sdp » (le mesh émet des RTCSessionDescriptions).
-    assert.deepEqual(offer.payload, { sdp: 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n' });
+    // 2026-11-02 (e2e deux-postes) : la charge utile repart EMBALLEE { type, sdp } — le maillage
+    // consomme un RTCSessionDescriptionInit, pas une chaîne nue (symétrique à l'émission).
+    assert.deepEqual(offer.payload, { type: 'offer', sdp: 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n' });
   }
 
   // answer : hôte → client.
@@ -146,13 +146,14 @@ test('deux nœuds sur sockets TCP loopback échangent join, offer, answer et ice
   assert.equal(answer?.kind, 'answer');
   if (answer?.kind === 'answer') assert.equal(answer.from, hostId);
 
-  // ice : candidat hôte LAN, relayé tel quel.
+  // ice : candidat hôte LAN, relayé EMBALLE { candidate } (le maillage consomme un
+  // RTCIceCandidateInit — même forme que le JSON ; voir fromWire/decodeCandidatePayload).
   const candidate = 'candidate:1 1 UDP 2122260223 192.168.1.20 54321 typ host';
   client.send({ kind: 'ice', to: String(hostId), payload: candidate });
   await eventually(() => hostMessages.some((m) => m.kind === 'ice'));
   const ice = hostMessages.find((m) => m.kind === 'ice');
   assert.equal(ice?.kind, 'ice');
-  if (ice?.kind === 'ice') assert.equal(ice.payload, candidate);
+  if (ice?.kind === 'ice') assert.deepEqual(ice.payload, { candidate });
 
   // leave : l'hôte voit le départ.
   client.send({ kind: 'leave' });
@@ -314,13 +315,12 @@ test('fromWire filtre aussi à l’entrée et préserve un candidat JSON', () =>
   const payload = { candidate: 'candidate:1 1 UDP 1 192.168.0.9 4000 typ host', sdpMid: 'audio' };
   const decoded = fromWire({ type: 'ice', from: 'p1', to: 'p2', candidate: JSON.stringify(payload) });
   assert.ok(decoded && decoded.kind === 'ice');
-  // Le câble est textuel : le candidat JSON arrive décodé en chaîne (le mesh appelle
-  // decodeCandidatePayload avant addRemoteCandidate — même valeur, même sdpMid).
-  assert.equal(decoded.payload, JSON.stringify(payload));
-  assert.equal(
-    decodeCandidatePayload('candidate:1 1 UDP 1 192.168.0.9 4000 typ host'),
-    'candidate:1 1 UDP 1 192.168.0.9 4000 typ host',
-  );
+  assert.deepEqual(decoded, { kind: 'ice', from: 'p1', payload });
+  // Une ligne SDP nue (hors JSON) repart EMBALLEE { candidate } : le maillage consomme un
+  // RTCIceCandidateInit, pas une chaîne — même emballage que pour le JSON.
+  assert.deepEqual(decodeCandidatePayload('candidate:1 1 UDP 1 192.168.0.9 4000 typ host'), {
+    candidate: 'candidate:1 1 UDP 1 192.168.0.9 4000 typ host',
+  });
   assert.equal(fromWire({ type: 'hello', peerId: 'p1', name: 'Ada', maxParticipants: 8, peers: [] }), null);
 });
 

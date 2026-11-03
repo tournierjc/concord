@@ -70,7 +70,8 @@ const REJECTED: Array<[string, string]> = [
   ['172.32.0.1 — juste hors de 172.16.0.0/12', sdpCandidate('172.32.0.1')],
   ['192.169.0.1 — juste hors de 192.168.0.0/16', sdpCandidate('192.169.0.1')],
   ['11.0.0.1 — juste hors de 10.0.0.0/8', sdpCandidate('11.0.0.1')],
-  ['100.64.0.1 — CGNAT, pas RFC1918 (lecture stricte)', sdpCandidate('100.64.0.1')],
+  // 2026-11-03 : 100.64/10 en host = interface locale (Tailscale), accepté — voir ice-filter.ts.
+  // Les voisins publics (100.128, 100.63) restent refusés (test dédié ci-dessous, bornes).
   ['ligne vide', ''],
   ['ligne tronquée sans adresse (bruit)', 'a=candidate:1 1 udp 2122260223 ']
 ]
@@ -194,15 +195,24 @@ describe('ice-filter — lecture stricte des bornes RFC1918', () => {
 
 describe('ice-filter — CGNAT 100.64.0.0/10 rejeté (lecture stricte)', () => {
   it('rejette les quatre bords du bloc 100.64/10 et ses voisins publics', () => {
-    for (const ip of ['100.63.255.255', '100.64.0.0', '100.100.100.100', '100.127.255.255', '100.128.0.0']) {
+    // bornes : 100.63 et 100.128 refusés (hors CGNAT), l'intérieur accepté en host.
+    for (const ip of ['100.63.255.255', '100.128.0.0']) {
+      assert.equal(isLanCandidate(sdpCandidate(ip)), false, ip)
+    }
+    for (const ip of ['100.64.0.0', '100.100.100.100', '100.127.255.255']) {
+      assert.equal(isLanCandidate(sdpCandidate(ip)), true, ip)
+    }
+  })
+  it('voisins publics historiques du bloc restent refusés', () => {
+    for (const ip of ['172.32.0.1', '192.169.0.1', '11.0.0.1']) {
       assert.equal(isLanCandidate(sdpCandidate(ip)), false, `${ip} doit être rejeté`)
     }
   })
 
-  it('rejette un 100.64/10 même annoncé typ host (pas de CGNAT en LAN only)', () => {
+  it('accepte un 100.64/10 annoncé typ host (interface locale, maillé Tailscale)', () => {
     assert.equal(
       isLanCandidate('a=' + sdpCandidate('100.72.8.1', { typ: 'host', transport: 'tcp' })),
-      false
+      true
     )
   })
 })
