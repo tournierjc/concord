@@ -105,8 +105,19 @@ export interface VoiceChainHostHandle {
  */
 export function createVoiceChainHost(host: VoiceChainHost): VoiceChainHostHandle {
   let chain: VoiceChainLike | null = null
+  // Bug « deux clics pour activer un filtre » (rapporte par JC, 2026-11-04) : un clic qui tombe
+  // AVANT l'ouverture de la chaine (le micro est en cours — `startMicrophone` est asynchrone,
+  // le clic arrive pendant l'entree en salon) etait PERDU : `apply` rendait `null`, la chaine
+  // s'ouvrait ensuite avec la voix d'ouverture, et il fallait re-cliquer. La demande est
+  // MEMORISEE et appliquee a l'ouverture.
+  let pending: VoiceFilterId | null = null
 
   function open(id: VoiceFilterId): MediaStreamTrack {
+    // Clic avant ouverture : la demande memorisee primer sur la voix d'ouverture (le geste le
+    // plus recent gagne). La reinitialiser ici (et pas seulement dans le try) garantit qu'une
+    // PANNE de filtre ne rejoue pas la demande sur la piste brute au prochain open().
+    const wanted: VoiceFilterId = pending ?? id
+    pending = null
     // Une chaîne ouverte est FERMÉE avant la suivante : deux graphes sur le même flux
     // superposeraient deux voix aux pairs (le défaut jumeau du double analyseur).
     if (chain !== null) {
@@ -122,8 +133,11 @@ export function createVoiceChainHost(host: VoiceChainHost): VoiceChainHostHandle
       return host.track
     }
     try {
-      const built = host.buildChain(host.context, host.stream, id)
+      const built = host.buildChain(host.context, host.stream, wanted)
       chain = built
+      // Si le constructeur a rendu une autre voix que la demande (garde interne), on applique
+      // la demande explicite pour rester fidele au clic.
+      if (built.current !== wanted) built.applyFilter(wanted)
       return built.track
     } catch (error) {
       // La panne du FILTRE n'éteint pas la session : micro brut + trace explicite.
@@ -138,7 +152,13 @@ export function createVoiceChainHost(host: VoiceChainHost): VoiceChainHostHandle
   return {
     open,
     apply(id: VoiceFilterId): MediaStreamTrack | null {
-      if (chain === null) return null
+      if (chain === null) {
+        // Chaine pas encore ouverte (micro en cours) : la demande est memorisee, pas perdue —
+        // `open()` l'appliquera. Un seul clic suffit, dans tous les cas.
+        pending = id
+        return null
+      }
+      pending = null
       try {
         return chain.applyFilter(id)
       } catch (error) {

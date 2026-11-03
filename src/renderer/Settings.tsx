@@ -370,8 +370,13 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
                     // Le test du micro porte la MÊME voix que la session : si une écoute tourne,
                     // elle est relancée sur la nouvelle voix (entendre une voix périmée après ce
                     // clic serait un mensonge de confort — cf. la règle du second « Tester »).
+                    // `applied === false` n'est PAS un refus (bug « deux clics », 2026-11-04) :
+                    // sans session ouverte le geste est DIFFÉRÉ (l'intention partira à l'entrée).
+                    // Le test doit donc suivre la voix RELLE (relu du plan) ou l'intention cliquee
+                    // si le plan n'a pas encore de chaine — jamais le registre qui peut etre peime.
                     if (micCheck.status === 'listening' || micCheck.status === 'starting') {
-                      void startMicCheck(settings, undefined, applied ? id : currentVoiceFilter() ?? undefined)
+                      const relle = currentVoiceFilter()
+                      void startMicCheck(settings, undefined, applied ? id : relle ?? id)
                     }
                   }}
                 >

@@ -893,7 +893,13 @@ export function setVoiceFilter(id: VoiceFilterId): boolean {
   const current = session;
   if (current === null) return false;
   current.wire.plane.setVoiceFilter(id);
-  return current.wire.plane.voiceFilter() === id;
+  // Bug « deux clics » (2026-11-04) : si la chaine n'est pas encore ouverte (micro en cours),
+  // le plan memorise la demande (`pending`) et l'appliquera a l'ouverture. `voiceFilter()`
+  // rend alors `null` : ce n'est PAS un refus — la demande est prise en compte. Le refus
+  // veritable est une chaine ouverte qui rend une AUTRE voix que celle demandee.
+  const relle = current.wire.plane.voiceFilter();
+  if (relle === null) return true;
+  return relle === id;
 }
 
 /**

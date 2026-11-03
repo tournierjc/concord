@@ -400,6 +400,9 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
   const meters = new Map<string, Meter[]>()
   let localStream: MediaStream | null = null
   let localTrack: MediaStreamTrack | null = null
+  // Voix demandée alors que le micro n'est pas encore ouvert (le châssis n'existe pas encore) :
+  // appliquée à l'ouverture plutôt que perdue (bug « deux clics », 2026-11-04).
+  let pendingVoiceFilter: VoiceFilterId | null = null
   let audioContext: AudioContext | null = null
   /**
    * Le châssis des filtres vocaux (2026-11-03) : ouvert par `startMicrophone`, consulté par
@@ -739,7 +742,10 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     // nœud — vérifié en test — et un échec de fabrication reste tracé). Le contexte audio de la
     // page est créé ICI et partagé avec les vumètres : une horloge par page (le double
     // `AudioContext` est le piège RMS du repo), et `resume()` est posé avant fabrication.
-    const initialVoice = o.voiceFilter ?? 'none'
+    // Le geste le plus récent prime : une demande mémorisée avant ouverture passe avant le
+    // réglage d'ouverture (bug « deux clics », 2026-11-04).
+    const initialVoice = pendingVoiceFilter ?? o.voiceFilter ?? 'none'
+    pendingVoiceFilter = null
     let buildChain: VoiceChainFactory | undefined
     let chainContext: FilterAudioContextLike | undefined
     if (o.voiceChainFactory !== undefined) {
@@ -856,6 +862,9 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     if (voiceHost === null) {
       // Micro non démarré : le réglage est une intention (o.voiceFilter est lu à l'ouverture),
       // jamais un succès prétendu. La coquille n'a rien à renégocier.
+      // Bug « deux clics » (2026-11-04) : l'intention est MEMORISEE — un clic qui tombe pendant
+      // l'entrée en salon (getUserMedia en cours) était perdu et exigeait un second clic.
+      pendingVoiceFilter = id
       return null
     }
     return voiceHost.apply(id)
