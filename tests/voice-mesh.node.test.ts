@@ -518,11 +518,27 @@ describe('T17 / AD-16 — T7 : un seul émetteur dans la coquille, et c’est le
   });
 
   it('DÉFAUT-C reste fermé-en-source : `<audio` = 5 occurrences mesurées dans src/renderer', () => {
-    const total = sources.reduce(
-      (count, source) => count + source.text.split('<audio').length - 1,
-      0,
-    );
+    // L'invariant porte sur l'ÉCOUTE DES PAIRS (`<audio>` JSX : un élément par voix distante).
+    // `mic-check.ts` fabrique un élément de MONITORING LOCAL par `document.createElement('audio')`
+    // (le bouton « Tester le micro », 2026-11-03) : ce n'est pas une porte d'entrée de flux distant
+    // — la chaîne `ontrack → <audio>` des pairs reste la seule. Son comptage est exclu par la même
+    // distinction qui rend DÉFAUT-C falsifiable : ce qui écoute les pairs, pas ce qui joue son propre test.
+    const total = sources
+      .filter((source) => source.name !== 'mic-check.ts')
+      .reduce((count, source) => count + source.text.split('<audio').length - 1, 0);
     assert.equal(total, 5, 'un <audio> par pair distant : 3 dans voice.ts, 2 dans audio-sink.ts');
+    const selfMonitor = sources.find((source) => source.name === 'mic-check.ts');
+    assert.ok(selfMonitor !== undefined);
+    assert.equal(
+      selfMonitor.text.split("createElement('audio')").length - 1,
+      1,
+      'le test du micro ne crée QUUN élément de monitoring local',
+    )
+    assert.equal(
+      selfMonitor.text.includes('ontrack'),
+      false,
+      'mic-check ne sest jamais branché sur un flux distant',
+    );
   });
 
   it('une seule porte de sortie : `options.send(` une fois dans le câblage', () => {

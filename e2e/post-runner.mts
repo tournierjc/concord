@@ -146,6 +146,9 @@ async function launchPost(label: string) {
   }
   // Banc: trace toutes les RTCPeerConnection creees par le bundle (hook sans toucher src/).
   // Code passe en CHAINE pour echapper a l'annotation __name d'esbuild dans le bundle runner.
+  if (process.env['ICE_ONLY_LAN'] === '1') {
+    await page.evaluate(`(() => { (globalThis).__ICE_ONLY_LAN = true; })()`);
+  }
   await page.evaluate(`(() => {
     const g = globalThis;
     g.__allPcs = [];
@@ -160,14 +163,52 @@ async function launchPost(label: string) {
       const note = (what, extra) => g.__timeline.push({ t: stamp(), what, ...extra });
       pc.addEventListener('iceconnectionstatechange', () => note('ice', { v: pc.iceConnectionState }));
       pc.addEventListener('connectionstatechange', () => note('conn', { v: pc.connectionState }));
+      const onlyLanPre = g.__ICE_ONLY_LAN === true;
+      const stripSdp = (desc) => {
+        if (!onlyLanPre || !desc || typeof desc.sdp !== 'string') return desc;
+        const kept = desc.sdp.split('\r\n').filter((l) => !l.startsWith('a=candidate:') || / 192\.168\.1\./.test(l));
+        const removed = desc.sdp.split('\r\n').length - kept.length;
+        if (removed > 0) note('sdp_candidats_retires', { v: String(removed) });
+        return { type: desc.type, sdp: kept.join('\r\n') };
+      };
       const wrap = (name) => {
         const orig = pc[name].bind(pc);
         pc[name] = (...a) => { note(name, { v: (a[0] && a[0].type) || '' }); return orig(...a); };
       };
-      wrap('setLocalDescription'); wrap('setRemoteDescription');
+      {
+        const origLocal = pc.setLocalDescription.bind(pc);
+        pc.setLocalDescription = (d) => { note('setLocalDescription', { v: d && d.type }); return origLocal(stripSdp(d)); };
+        const origRemote = pc.setRemoteDescription.bind(pc);
+        pc.setRemoteDescription = (d) => { note('setRemoteDescription', { v: d && d.type }); return origRemote(stripSdp(d)); };
+      }
       if (pc.restartIce) wrap('restartIce');
       const origClose = pc.close.bind(pc);
       pc.close = () => { note('close', {}); return origClose(); };
+      // Filtre candidats du banc (flag ICE_ONLY_LAN): ne publier que 192.168.1.x — isole le cas
+      // multi-interfaces (tailscale fd7a::/100.101., docker 172.17.) SANS toucher src/.
+      const onlyLan = g.__ICE_ONLY_LAN === true;
+      if (onlyLan) {
+        const origAdd = pc.addIceCandidate.bind(pc);
+        pc.addIceCandidate = (c, ...rest) => {
+          const line = (c && (typeof c === 'string' ? c : c.candidate)) || '';
+          note('remote_add', { v: (line || 'null').slice(0, 60) });
+          if (line && !/ 192\.168\.1\./.test(line)) { note('remote_filtre', { v: line.slice(0, 60) }); return Promise.resolve(); }
+          return origAdd(c, ...rest);
+        };
+        let handler = null;
+        Object.defineProperty(pc, 'onicecandidate', {
+          configurable: true,
+          get() { return handler; },
+          set(fn) {
+            handler = fn;
+            pc.addEventListener('icecandidate', (ev) => {
+              const c = ev.candidate && (ev.candidate.candidate || '');
+              if (c && !/ 192\.168\.1\./.test(c)) { note('candidat_filtre', { v: c.slice(0, 60) }); return; }
+              try { fn.call(pc, ev); } catch (e) { /* handler en chute */ }
+            }, true);
+          },
+        });
+      }
       g.__pairInfo = async () => {
         const rep = await pc.getStats();
         let sel = null;
