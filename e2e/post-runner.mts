@@ -55,12 +55,27 @@ const PAGE_JS = `
     for (const p of g.__mesh.peers()) out[p] = await g.__plane.stats(p);
     return { peers: out, states: g.__states, flows: g.__flows };
   };
+  g.__rawStats = async () => {
+    const dump = [];
+    for (const pc of (g.__allPcs ?? [])) {
+      try {
+        const rep = await pc.getStats();
+        const rows = [];
+        rep.forEach(function (e) { rows.push([e.type, e.kind ?? '', e.bytesReceived ?? 0, e.bytesSent ?? 0, e.state ?? '', e.transportId ?? '', e.ssrc ?? '', e.packetsReceived ?? 0].join('|')); });
+        dump.push({ ice: pc.iceConnectionState, conn: pc.connectionState, signaling: pc.signalingState, rows: rows });
+      } catch (e) { dump.push({ error: String(e) }); }
+    }
+    return dump;
+  };
   g.__linkStats = async () => {
     const out = {};
     const pcs = g.__plane.pcs;
+    const allPcs = g.__allPcs ?? [];
     for (const p of g.__mesh.peers()) {
       const get = g.__plane.peerConnection;
-      const pc = (pcs && pcs[p]) || (typeof get === 'function' ? get(p) : null);
+      const known = (pcs && pcs[p]) || (typeof get === 'function' ? get(p) : null);
+      // Banc: sans exposition src/, la seule pc du maillage est celle creee par le hook.
+      const pc = known ?? (allPcs.length === 1 ? allPcs[0] : null);
       if (!pc) { out[p] = { error: 'pc introuvable' }; continue; }
       const report = await pc.getStats();
       let pairRx = 0;
@@ -96,7 +111,7 @@ const PAGE_JS = `
         if (e.type === 'outbound-rtp') rtx['out:' + (e.kind || '?') + ':' + (e.paused ? 'paused' : 'active')] = (e.bytesSent || 0);
         if (e.type === 'inbound-rtp') rtx['in:' + (e.kind || '?')] = (e.bytesReceived || 0);
       });
-      out[p] = { pairRx: pairRx, pairTx: pairTx, inbound: inbound, outbound: outbound, pairState: pairState, cands: cands.slice(0, 12), trs: trs, rtx: rtx };
+      out[p] = { pairRx: pairRx, pairTx: pairTx, inbound: inbound, outbound: outbound, pairState: pairState, conn: pc.connectionState, ice: pc.iceConnectionState, cands: cands.slice(0, 12), trs: trs, rtx: rtx };
     }
     return { peers: out, states: g.__states };
   };
@@ -129,6 +144,20 @@ async function launchPost(label: string) {
   if (process.env['CONCORD_E2E_DEBUG'] === '1') {
     await page.evaluate(() => { (globalThis as Record<string, unknown>)['__CONCORD_DEBUG__'] = true; });
   }
+  // Banc: trace toutes les RTCPeerConnection creees par le bundle (hook sans toucher src/).
+  // Code passe en CHAINE pour echapper a l'annotation __name d'esbuild dans le bundle runner.
+  await page.evaluate(`(() => {
+    const g = globalThis;
+    g.__allPcs = [];
+    const Real = g.RTCPeerConnection;
+    const Patched = function (cfg) {
+      const pc = new Real(cfg);
+      g.__allPcs.push(pc);
+      return pc;
+    };
+    Patched.prototype = Real.prototype;
+    g.RTCPeerConnection = Patched;
+  })()`);
   await page.addScriptTag({ content: bundle });
   await page.evaluate(PAGE_JS);
   return { label, proc, browser, page, srv };
@@ -170,6 +199,9 @@ async function main() {
   await me.page.evaluate((a) => (globalThis as any).__openPost(a.id, a.sid), { id: localId, sid: link.selfId });
   const t0 = Date.now();
   let fluxT = -1;
+  let prevInb = -1;
+  let peerOkPrev = false;
+  let peerStable = 0;
 
   const drain = setInterval(() => {
     void me.page.evaluate(() => {
@@ -213,39 +245,68 @@ async function main() {
     const link = await me.page.evaluate(() => (globalThis as any).__linkStats()).catch(() => null);
     let lrx = 0;
     let lin = 0;
-    for (const v of Object.values(link?.peers ?? {})) { lrx += (v as { pairRx?: number }).pairRx ?? 0; lin += (v as { inbound?: number }).inbound ?? 0; }
-    const inb = totalInbound(rep) > 0 ? totalInbound(rep) : Math.max(lrx, lin);
-    last = `octets entrants ${inb} (pair ICE rx=${lrx}, inbound-rtp=${lin}) · états ${JSON.stringify(rep?.states ?? {})}`;
+    let linkOk = false;
+    for (const v of Object.values(link?.peers ?? {})) {
+      const w = v as { pairRx?: number; inbound?: number; pairState?: string; conn?: string };
+      lrx += w.pairRx ?? 0; lin += w.inbound ?? 0;
+      // Critere 2026-11-03 (JC) : le lien compte si la pc est CONNECTEE (ou la paire ICE
+      // succeeded/nominated). 'connecting(ice)' + quelques centaines d'octets = DTLS monte,
+      // pas un flux — les sondes précédentes comptaient ces octets de poignee comme du RTP.
+      if (w.conn === 'connected' || w.pairState === 'succeeded') linkOk = true;
+    }
+    const inb = Math.max(lrx, lin, totalInbound(rep));
+    last = `octets entrants ${inb} (pair ICE rx=${lrx}, inbound-rtp=${lin}, lien=${linkOk ? 'connecte' : 'NON'}) · états ${JSON.stringify(rep?.states ?? {})}`;
     console.log(`[${localId}] ${last}`);
     if (process.env['CONCORD_E2E_DEBUG'] === '1') {
+      const raw = await me.page.evaluate(() => (globalThis as any).__rawStats()).catch(() => null);
+      console.log(`[${localId}] RAW ${JSON.stringify(raw)}`);
       for (const [pk, pv] of Object.entries(link?.peers ?? {})) {
         const v = pv as { trs?: unknown; rtx?: unknown; pairState?: string };
         console.log(`[${localId}] lien ${pk}: pair=${v.pairState} trs=${JSON.stringify(v.trs)} rtx=${JSON.stringify(v.rtx)}`);
       }
     }
-    if (inb > 0) {
+    // FLUX_AUDIO_OK = lien connecté ET > 5 000 octets RTP entrants EN HAUSSE sur 2 sondes
+    // consécutives (un pic unique ne suffit pas). Verdict NON collant : chaque sonde re-evalue,
+    // le dernier état écrit est celui qui compte.
+    const fluxOk = linkOk && inb > 5000 && inb > prevInb;
+    if (fluxOk) {
       if (fluxT < 0) { fluxT = Date.now() - t0; console.log(`[${localId}] FLUX_T_MS ${String(fluxT)}`); }
       verdict = 'FLUX_AUDIO_OK';
+    } else {
+      verdict = 'PAS_DE_FLUX';
+      if (fluxT >= 0) console.log(`[${localId}] VERDICT_REVOQUE (chute sous le seuil, dernier état = ${last})`);
+    }
+    prevInb = inb;
+    if (fluxOk) {
       // Mon flux est monté : ne partez pas avant que l'autre poste ait eu sa chance. Le mien est
       // écrit TOUT DE SUITE — l'autre poste ne doit pas attendre sur un verdict qui n'arrive pas.
       try { writeFileSync(myVerdictFile, 'FLUX_AUDIO_OK'); } catch { /* meilleur effort */ }
+      // Le verdict de l'autre poste est lu sur fichier: un snapshot unique peut etre perime
+      // (l'autre a pu revoquer apres son ecriture). On exige DEUX echantillons consecutifs a
+      // concordants avant de partir — le banc ne doit pas tuer un poste qui vient de revoquer.
       let peerOk = false;
       try { peerOk = readFileSync(peerVerdictFile, 'utf8').includes('FLUX_AUDIO_OK'); } catch { peerOk = false; }
-      if (peerOk || Date.now() > deadline - 45000) break;
+      if (peerOk && peerOkPrev) {
+        peerStable += 1;
+      } else {
+        peerStable = 0;
+      }
+      peerOkPrev = peerOk;
+      if (peerStable >= 2 || Date.now() > deadline - 45000) break;
     }
   }
   try { writeFileSync(myVerdictFile, verdict); } catch { /* meilleur effort */ }
-  clearInterval(drain);
-  link.close('fin');
-  await me.browser.close().catch(() => {});
-  me.proc.kill();
-  me.srv.close();
   {
     const lk = await me.page.evaluate(() => (globalThis as any).__linkStats()).catch(() => null);
     for (const [peer, st] of Object.entries(lk?.peers ?? {})) {
       console.log(`  [linkdiag ${localId}] ${peer}: ${JSON.stringify(st)}`);
     }
   }
+  clearInterval(drain);
+  link.close('fin');
+  await me.browser.close().catch(() => {});
+  me.proc.kill();
+  me.srv.close();
   console.log(`RESULTAT ${localId}: ${verdict} — ${last}`);
   process.exit(verdict === 'FLUX_AUDIO_OK' ? 0 : 1);
 }
