@@ -153,11 +153,41 @@ function parseCandidate(line: string): { address: string; type: string } | null 
   return { address, type: type.toLowerCase() }
 }
 
+/** Objet JSON plat (ni `null`, ni tableau). */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Ligne SDP réellement filtrable.
+ *
+ * Le fil de signalisation ne porte qu'une chaîne. Depuis le correctif des
+ * coordonnées ICE, cette chaîne est soit la ligne `candidate:…` historique,
+ * soit un JSON `{ candidate, sdpMid, sdpMLineIndex, usernameFragment }`. Sans
+ * ce déballage, le serveur classait TOUTE enveloppe « hors LAN » (`off-lan`)
+ * et le candidat n'atteignait jamais le pair — le filtre voyait `{` là où il
+ * attend `candidate:`.
+ */
+function candidateSdpLine(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('{')) return value
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch {
+    return value
+  }
+  if (!isPlainRecord(parsed)) return value
+  const inner = parsed['candidate']
+  if (typeof inner !== 'string' || inner.length === 0) return value
+  return inner
+}
+
 /**
  * Vrai si le candidat est un hôte sur le réseau local.
  * Tolérant sur la forme (ligne SDP « candidate:… », ligne préfixée « a= »,
- * objet RTCIceCandidateInit, chaîne vide, null, undefined) : tout ce qui
- * n'est pas un hôte LAN exploitable vaut false.
+ * objet RTCIceCandidateInit, enveloppe JSON du fil, chaîne vide, null,
+ * undefined) : tout ce qui n'est pas un hôte LAN exploitable vaut false.
  */
 export function isLanCandidate(
   candidate: string | IceCandidateLike | null | undefined
@@ -166,7 +196,7 @@ export function isLanCandidate(
 
   let line: string
   if (typeof candidate === 'string') {
-    line = candidate
+    line = candidateSdpLine(candidate)
   } else if (typeof candidate === 'object') {
     const inner = candidate.candidate
     if (typeof inner !== 'string') return false
