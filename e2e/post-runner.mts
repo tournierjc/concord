@@ -35,6 +35,8 @@ const PAGE_JS = `
     const plane = createMediaPlane({
       localId, timers, microOpenOnStart: true,
       onLocalCandidate: (peerId, c) => { g.__outbox.push({ kind: 'ice', to: peerId, payload: c }); },
+      // Fidelite app: voice.ts fournit onRemoteStream AU PLAN (voice-mesh le relaie au mesh).
+      onRemoteStream: (peerId, stream) => { g.__flows.push(peerId); g.__mesh.onRemoteStream(peerId, stream); },
     });
     await plane.startMicrophone();
     const mesh = createMesh({
@@ -43,7 +45,7 @@ const PAGE_JS = `
       serverId: g.__selfServerId ?? null,
       send: (m) => { g.__outbox.push(m); },
       onPeerState: (peerId, s, cause) => { g.__states[peerId] = s + '(' + cause + ')'; },
-      onRemoteStream: (peerId, stream) => { g.__flows.push(peerId); mesh.onRemoteStream(peerId, stream); },
+      // (Le hook d'entree du mesh est cablé au-dessus, cote plan — comme dans l'app.)
     });
     g.__plane = plane;
     g.__mesh = mesh;
@@ -118,6 +120,7 @@ const PAGE_JS = `
 }`;
 
 async function launchPost(label: string) {
+  let iceRejets = 0;
   const dir = mkdtempSync(join(tmpdir(), `concord-e2e2-${label.replace(/[^a-zA-Z0-9]/g, '')}-`));
   const proc = spawn(CHROME, ['--headless=new', '--no-sandbox', '--disable-gpu',
     '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
@@ -136,7 +139,11 @@ async function launchPost(label: string) {
   const { default: puppeteer } = await import('puppeteer-core');
   const browser = await puppeteer.connect({ browserWSEndpoint: ep, protocolTimeout: 60000 });
   const page = await browser.newPage();
-  page.on('console', (m) => console.log(`  [${label}] ${m.text()}`));
+  page.on('console', (m) => {
+    const t = m.text();
+    if (t.includes('addIceCandidate en attente rejet')) iceRejets += 1;
+    console.log(`  [${label}] ${t}`);
+  });
   page.on('pageerror', (e) => console.log(`  [${label}] pageerror ${e.message}`));
   const srv = createServer((_q, r) => { r.writeHead(200, { 'content-type': 'text/html' }); r.end('<title>poste</title>'); });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
@@ -162,14 +169,22 @@ async function launchPost(label: string) {
       // Timeline: etats + appels applicatifs sur la pc, dates depuis la creation du poste.
       const note = (what, extra) => g.__timeline.push({ t: stamp(), what, ...extra });
       pc.addEventListener('iceconnectionstatechange', () => note('ice', { v: pc.iceConnectionState }));
+      pc.addEventListener('track', () => note('track', {}));
+      pc.addEventListener('icecandidate', (ev) => { if (ev.candidate === null) note('gathering_end', {}); });
+      const _osd = pc.setRemoteDescription.bind(pc);
+      pc.setRemoteDescription = (d) => {
+        const m = ((d && d.sdp) || '').split(String.fromCharCode(10)).filter((l) => l.startsWith('m=') || l.indexOf('a=mid:') >= 0 || l.indexOf('a=msid:') >= 0 || l.indexOf('a=inactive') >= 0 || l.indexOf('a=recvonly') >= 0 || l.indexOf('a=sendonly') >= 0 || l.indexOf('a=sendrecv') >= 0);
+        note('remote_sdp_lines', { v: m.join(' | ').slice(0, 200) });
+        return _osd(d);
+      };
       pc.addEventListener('connectionstatechange', () => note('conn', { v: pc.connectionState }));
       const onlyLanPre = g.__ICE_ONLY_LAN === true;
       const stripSdp = (desc) => {
         if (!onlyLanPre || !desc || typeof desc.sdp !== 'string') return desc;
-        const kept = desc.sdp.split('\r\n').filter((l) => !l.startsWith('a=candidate:') || / 192\.168\.1\./.test(l));
-        const removed = desc.sdp.split('\r\n').length - kept.length;
+        const kept = desc.sdp.split(String.fromCharCode(13, 10)).filter((l) => !l.startsWith('a=candidate:') || / 192\.168\.1\./.test(l));
+        const removed = desc.sdp.split(String.fromCharCode(13, 10)).length - kept.length;
         if (removed > 0) note('sdp_candidats_retires', { v: String(removed) });
-        return { type: desc.type, sdp: kept.join('\r\n') };
+        return { type: desc.type, sdp: kept.join(String.fromCharCode(13, 10)) };
       };
       const wrap = (name) => {
         const orig = pc[name].bind(pc);
@@ -232,7 +247,7 @@ async function launchPost(label: string) {
   })()`);
   await page.addScriptTag({ content: bundle });
   await page.evaluate(PAGE_JS);
-  return { label, proc, browser, page, srv };
+  return { label, proc, browser, page, srv, iceRejets };
 }
 
 function totalInbound(rep: { peers?: Record<string, { bytesReceived?: number }> } | null): number {
@@ -311,10 +326,35 @@ async function main() {
   try { unlinkSync(myVerdictFile); unlinkSync(peerVerdictFile); } catch { /* neuf */ }
   let verdict = 'PAS_DE_FLUX'
   let last = '';
+  let lastFenetre = '';
   const sondeMs = Number(process.env['SONDE_MS'] ?? '250');
+  // Critere FINAL (JC 2026-11-03): le verdict est evalue UNIQUEMENT pendant la fenetre de vie
+  // commune — de l'ouverture jusqu'a la sortie du plus tot des postes (le HOLD borne la fenetre).
+  // Apres la fermeture de la fenetre, plus AUCUNE reevaluation: ni revocation (l'artefact du
+  // pair parti qui tue le consent de l'autre), ni 'meilleur état atteint'. La derniere sonde DE
+  // LA FENETRE fait foi.
+  const holdMs = Number(process.env['HOLD_MS'] ?? '0');
+  const windowMs = Number(process.env['WINDOW_MS'] ?? '20000');
+  const windowEnd = t0 + windowMs;
+  let windowClosed = false;
+  let riseStreak = 0;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, sondeMs));
     const rep = await me.page.evaluate(() => (globalThis as any).__peerStats()).catch(() => null);
+    const lvl = await me.page.evaluate(() => {
+      try {
+        const g2 = globalThis as any;
+        const ps = g2.__mesh.peers();
+        const out: any = { global: g2.__plane.level(), pair: null };
+        // Fidelite app: le battement de voice.ts (readPeerLevel) — un nombre = preuve de flux.
+        for (const p of ps) {
+          const v = g2.__plane.level(p);
+          if (typeof v === 'number' && Number.isFinite(v)) { g2.__mesh.reportFlow(p); out.pair = v; }
+        }
+        if (ps.length > 0 && out.pair === null) out.pair = g2.__plane.level(ps[0]);
+        return JSON.stringify(out);
+      } catch (e) { return 'ERR ' + String(e); }
+    }).catch(() => 'ERR');
     const link = await me.page.evaluate(() => (globalThis as any).__linkStats()).catch(() => null);
     let lrx = 0;
     let lin = 0;
@@ -328,7 +368,8 @@ async function main() {
       if (w.conn === 'connected' || w.pairState === 'succeeded') linkOk = true;
     }
     const inb = Math.max(lrx, lin, totalInbound(rep));
-    last = `octets entrants ${inb} (pair ICE rx=${lrx}, inbound-rtp=${lin}, lien=${linkOk ? 'connecte' : 'NON'}) · états ${JSON.stringify(rep?.states ?? {})}`;
+    if (inb > prevInb) riseStreak += 1; else riseStreak = 0;
+    last = `octets entrants ${inb} (pair ICE rx=${lrx}, inbound-rtp=${lin}, lien=${linkOk ? 'connecte' : 'NON'}) · états ${JSON.stringify(rep?.states ?? {})} · flows ${JSON.stringify(rep?.flows ?? [])} · level ${String(lvl)}`;
     console.log(`[${localId}] ${last}`);
     for (const mark of [5000, 15000]) {
       if (!pointMarked.includes(mark) && Date.now() - t0 >= mark) {
@@ -344,25 +385,41 @@ async function main() {
         console.log(`[${localId}] lien ${pk}: pair=${v.pairState} trs=${JSON.stringify(v.trs)} rtx=${JSON.stringify(v.rtx)}`);
       }
     }
-    // FLUX_AUDIO_OK = lien connecté ET > 5 000 octets RTP entrants EN HAUSSE sur 2 sondes
-    // consécutives (un pic unique ne suffit pas). Verdict NON collant : chaque sonde re-evalue,
-    // le dernier état écrit est celui qui compte.
-    const fluxOk = linkOk && inb > 5000 && inb > prevInb;
-    if (fluxOk) {
+    // FLUX_AUDIO_OK (critere FINAL, fenetre fermee): lien connecté ET > 5 000 octets RTP
+    // entrants EN HAUSSE sur >= 2 sondes consecutives ET encore en hausse a la DERNIERE sonde de
+    // la fenetre. Evalue uniquement tant que la fenetre est ouverte (les deux postes vivants).
+    const inWindow = !windowClosed;
+    // Le CRITEREM 2026-11-04 (JC) ajoute deux preuves d'etat: l'etat Concord du pair doit etre
+    // 'connected' PENDANT le flux, et AUCUN rejet addIceCandidate ne doit avoir ete trace.
+    const etatConnected = Object.values((rep?.states ?? {}) as Record<string, string>).some((st) => st.startsWith('connected'));
+    const rejets = me.iceRejets;
+    const fluxOk = linkOk && inb > 5000 && riseStreak >= 2 && etatConnected && rejets === 0;
+    if (fluxOk && inWindow) {
       if (fluxT < 0) { fluxT = Date.now() - t0; console.log(`[${localId}] FLUX_T_MS ${String(fluxT)}`); }
       verdict = 'FLUX_AUDIO_OK';
-    } else {
+    } else if (inWindow) {
       verdict = 'PAS_DE_FLUX';
-      if (fluxT >= 0) console.log(`[${localId}] VERDICT_REVOQUE (chute sous le seuil, dernier état = ${last})`);
+    }
+    // Fermeture de la fenetre: au HOLD ecoule apres le flux (fenetre de mesure finie) ou a
+    // windowMs (aucun flux merite d'attendre plus). Le verdict fige est celui de CETTE sonde.
+    if (!windowClosed && (Date.now() >= windowEnd || (fluxT >= 0 && Date.now() - (t0 + fluxT) >= holdMs))) {
+      windowClosed = true;
+      // Regle 'encore en hausse a la derniere sonde': si la hausse s'est arretee pile a cette
+      // derniere sonde (riseStreak < 2), le OK est refuse.
+      if (verdict === 'FLUX_AUDIO_OK' && !(linkOk && inb > 5000 && riseStreak >= 2)) {
+        verdict = 'PAS_DE_FLUX';
+        console.log(`[${localId}] FENETRE_FERMEE: OK refuse (hausse interrompue a la derniere sonde)`);
+      } else {
+        console.log(`[${localId}] FENETRE_FERMEE verdict=${verdict} (plus de reevaluation apres le depart du pair)`);
+      }
+      try { writeFileSync(myVerdictFile, verdict); } catch { /* meilleur effort */ }
     }
     prevInb = inb;
+    // 'lastFenetre' fige le diagnostic a la DERNIERE sonde de la fenetre (le RESULTAT ne doit
+    // jamais afficher l'etat d'apres le depart du pair — rx=0 y est trompeur).
+    if (!windowClosed) lastFenetre = last;
     if (fluxOk) {
-      // Mon flux est monté : ne partez pas avant que l'autre poste ait eu sa chance. Le mien est
-      // écrit TOUT DE SUITE — l'autre poste ne doit pas attendre sur un verdict qui n'arrive pas.
-      try { writeFileSync(myVerdictFile, 'FLUX_AUDIO_OK'); } catch { /* meilleur effort */ }
-      // Le verdict de l'autre poste est lu sur fichier: un snapshot unique peut etre perime
-      // (l'autre a pu revoquer apres son ecriture). On exige DEUX echantillons consecutifs a
-      // concordants avant de partir — le banc ne doit pas tuer un poste qui vient de revoquer.
+      // Mon flux est monté : ne partez pas avant que l'autre poste ait eu sa chance.
       let peerOk = false;
       try { peerOk = readFileSync(peerVerdictFile, 'utf8').includes('FLUX_AUDIO_OK'); } catch { peerOk = false; }
       if (peerOk && peerOkPrev) {
@@ -371,10 +428,11 @@ async function main() {
         peerStable = 0;
       }
       peerOkPrev = peerOk;
-      const holdMs = Number(process.env['HOLD_MS'] ?? '0');
-      if (holdMs > 0 && fluxT >= 0 && Date.now() - (t0 + fluxT) < holdMs) {
-        // fenetre de mesure: on reste sonder (t+5s, t+15s) meme si les deux postes sont bons.
-      } else if (peerStable >= 2 || Date.now() > deadline - 45000) break;
+      if (windowClosed && (peerStable >= 2 || Date.now() > deadline - 45000)) break;
+    } else if (windowClosed) {
+      // Pas de flux chez moi: ma fenetre est fermee, j'attends la sortie de l'autre (verdict
+      // fige) ou l'horloge du run.
+      if (Date.now() > deadline - 45000) break;
     }
   }
   try { writeFileSync(myVerdictFile, verdict); } catch { /* meilleur effort */ }
@@ -395,7 +453,7 @@ async function main() {
   await me.browser.close().catch(() => {});
   me.proc.kill();
   me.srv.close();
-  console.log(`RESULTAT ${localId}: ${verdict} — ${last}`);
+  console.log(`RESULTAT ${localId}: ${verdict} — ${lastFenetre !== '' ? lastFenetre : last}`);
   process.exit(verdict === 'FLUX_AUDIO_OK' ? 0 : 1);
 }
 

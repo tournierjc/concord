@@ -3,7 +3,7 @@
 # Usage: RUN_TAG=$i bash e2e/run-postes.sh   (logs: <dir>/host-$RUN_TAG.log, join-$RUN_TAG.log)
 # Sans RUN_TAG : host.log / join.log (compat smoke).
 set -u
-cd /opt/data/cache/scratch/concord-audit
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.."
 export HOME=/opt/data/profiles/martin/home
 DIR=/opt/data/profiles/banctol/cache/scratch
 TAG="${RUN_TAG:-}"
