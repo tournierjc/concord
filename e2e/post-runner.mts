@@ -149,10 +149,41 @@ async function launchPost(label: string) {
   await page.evaluate(`(() => {
     const g = globalThis;
     g.__allPcs = [];
+    g.__timeline = [];
+    const T0 = Date.now();
+    const stamp = () => Date.now() - T0;
     const Real = g.RTCPeerConnection;
     const Patched = function (cfg) {
       const pc = new Real(cfg);
       g.__allPcs.push(pc);
+      // Timeline: etats + appels applicatifs sur la pc, dates depuis la creation du poste.
+      const note = (what, extra) => g.__timeline.push({ t: stamp(), what, ...extra });
+      pc.addEventListener('iceconnectionstatechange', () => note('ice', { v: pc.iceConnectionState }));
+      pc.addEventListener('connectionstatechange', () => note('conn', { v: pc.connectionState }));
+      const wrap = (name) => {
+        const orig = pc[name].bind(pc);
+        pc[name] = (...a) => { note(name, { v: (a[0] && a[0].type) || '' }); return orig(...a); };
+      };
+      wrap('setLocalDescription'); wrap('setRemoteDescription');
+      if (pc.restartIce) wrap('restartIce');
+      const origClose = pc.close.bind(pc);
+      pc.close = () => { note('close', {}); return origClose(); };
+      g.__pairInfo = async () => {
+        const rep = await pc.getStats();
+        let sel = null;
+        const byId = {};
+        rep.forEach((e) => { byId[e.id] = e; });
+        rep.forEach((e) => {
+          if (e.type === 'candidate-pair' && (e.selected === true || e.nominated === true)) {
+            const l = byId[e.localCandidateId] || {};
+            const r = byId[e.remoteCandidateId] || {};
+            sel = { state: e.state, bytesRxBig: e.bytesReceived || 0,
+              local: (l.ip || l.address || '?') + ':' + (l.port || '?') + '/' + (l.candidateType || '?'),
+              remote: (r.ip || r.address || '?') + ':' + (r.port || '?') + '/' + (r.candidateType || '?') };
+          }
+        });
+        return sel;
+      };
       return pc;
     };
     Patched.prototype = Real.prototype;
@@ -200,6 +231,7 @@ async function main() {
   const t0 = Date.now();
   let fluxT = -1;
   let prevInb = -1;
+  const pointMarked: number[] = [];
   let peerOkPrev = false;
   let peerStable = 0;
 
@@ -257,6 +289,12 @@ async function main() {
     const inb = Math.max(lrx, lin, totalInbound(rep));
     last = `octets entrants ${inb} (pair ICE rx=${lrx}, inbound-rtp=${lin}, lien=${linkOk ? 'connecte' : 'NON'}) · états ${JSON.stringify(rep?.states ?? {})}`;
     console.log(`[${localId}] ${last}`);
+    for (const mark of [5000, 15000]) {
+      if (!pointMarked.includes(mark) && Date.now() - t0 >= mark) {
+        pointMarked.push(mark);
+        console.log(`[${localId}] POINT t+${String(mark / 1000)}s pairRx=${lrx} inbound-rtp=${lin} lien=${linkOk ? 'connecte' : 'NON'}`);
+      }
+    }
     if (process.env['CONCORD_E2E_DEBUG'] === '1') {
       const raw = await me.page.evaluate(() => (globalThis as any).__rawStats()).catch(() => null);
       console.log(`[${localId}] RAW ${JSON.stringify(raw)}`);
@@ -292,10 +330,19 @@ async function main() {
         peerStable = 0;
       }
       peerOkPrev = peerOk;
-      if (peerStable >= 2 || Date.now() > deadline - 45000) break;
+      const holdMs = Number(process.env['HOLD_MS'] ?? '0');
+      if (holdMs > 0 && fluxT >= 0 && Date.now() - (t0 + fluxT) < holdMs) {
+        // fenetre de mesure: on reste sonder (t+5s, t+15s) meme si les deux postes sont bons.
+      } else if (peerStable >= 2 || Date.now() > deadline - 45000) break;
     }
   }
   try { writeFileSync(myVerdictFile, verdict); } catch { /* meilleur effort */ }
+  {
+    const tl = await me.page.evaluate(() => (globalThis as any).__timeline ?? []).catch(() => []);
+    const sel = await me.page.evaluate(() => (globalThis as any).__pairInfo ? (globalThis as any).__pairInfo() : null).catch(() => null);
+    console.log(`[timeline ${localId}] ${JSON.stringify(tl)}`);
+    console.log(`[paire ${localId}] ${JSON.stringify(sel)}`);
+  }
   {
     const lk = await me.page.evaluate(() => (globalThis as any).__linkStats()).catch(() => null);
     for (const [peer, st] of Object.entries(lk?.peers ?? {})) {
