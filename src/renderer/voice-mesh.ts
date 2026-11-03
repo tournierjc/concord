@@ -40,6 +40,8 @@
 
 import { browserTimers } from './browser-timers.ts';
 import { createMediaPlane, type MediaPlane } from '../engine/rtc/media-plane.ts';
+import type { VoiceChainFactory } from '../engine/rtc/voice-chain.ts';
+import type { VoiceFilterId } from '../engine/rtc/voice-filters.ts';
 import type { MicrophoneConstraints } from '../engine/rtc/media-config.ts';
 import { createMesh, type Mesh, type SignalIn, type SignalOut } from '../engine/net/mesh.ts';
 import type { MeshPeerState, PeerStateCause } from '../engine/net/mesh.ts';
@@ -101,6 +103,13 @@ export interface VoiceWiringOptions {
   readonly microConstraints?: MicrophoneConstraints;
   /** Piste micro ouverte dès l'ouverture du micro (mode VAD) ; défaut : push-to-talk. */
   readonly microOpenOnStart?: boolean;
+  /**
+   * Voix appliquée au micro (filtres vocaux, 2026-11-03) + son constructeur de chaîne injecté.
+   * Les deux viennent de la coquille (`reglages.audio.voiceFilter`, `createVoiceFilterChain`
+   * du renderer) ; `undefined` = la voix historique, piste brute (non-régression).
+   */
+  readonly voiceFilter?: VoiceFilterId;
+  readonly voiceChainFactory?: VoiceChainFactory;
 }
 
 export interface VoiceWiring {
@@ -153,6 +162,13 @@ export function createVoiceWiring(options: VoiceWiringOptions): VoiceWiring {
     ...(options.microOpenOnStart === undefined
       ? {}
       : { microOpenOnStart: options.microOpenOnStart }),
+    // Filtres vocaux (2026-11-03) : la voix demandée et son constructeur de chaîne passent
+    // tels quels — la coquille les lit, le plan média les reçoit prêts (même patron que
+    // `microConstraints`).
+    ...(options.voiceFilter === undefined ? {} : { voiceFilter: options.voiceFilter }),
+    ...(options.voiceChainFactory === undefined
+      ? {}
+      : { voiceChainFactory: options.voiceChainFactory }),
     onLocalCandidate: (peerId, candidate) => {
       const current = mesh;
       if (current === null) {

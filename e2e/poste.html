@@ -1,0 +1,70 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>concord-e2e-poste</title></head>
+<body><script type="module">
+// Le VRAI câblage de voix de l'app (media-plane + mesh + tampon), importé tel quel.
+// Le seul écart avec Electron : send/onSignal sont posés par le pilote Node sous la page.
+import { createVoiceWiring } from '../src/renderer/voice-mesh.ts';
+
+const log = [];
+function trace(line) { log.push(line); console.log('[e2e-poste] ' + line); }
+
+window.__posts = { outbox: [], wiring: null, states: new Map(), streams: 0, flows: [] };
+window.__nodeSend = (message) => { window.__posts.outbox.push(message); };
+window.__pushSignal = (message) => {
+  if (window.__posts.wiring === null) {
+    window.__posts.early = window.__posts.early ?? [];
+    window.__posts.early.push(message);
+    return;
+  }
+  window.__posts.wiring.onSignal(message);
+};
+
+window.__open = async (localId) => {
+  const wiring = createVoiceWiring({
+    localId,
+    send: (m) => window.__nodeSend(m),
+    // Abonnement au tuyau entrant : en e2e, le pilote Node pousse par __pushSignal.
+    subscribe: () => null,
+    onMessage: (m) => trace('in:' + m.kind),
+    onPeerState: (peerId, state, cause) => {
+      window.__posts.states.set(peerId, state);
+      trace('peer:' + peerId + '=' + state + (cause ? '(' + cause + ')' : ''));
+    },
+    onRemoteStream: (peerId) => {
+      window.__posts.streams += 1;
+      window.__posts.flows.push(peerId);
+      // preuve de flux par la mesure, comme la coquille (SPEC-008 §1 défaut (c))
+      window.__posts.wiring.reportFlow(peerId);
+    },
+    onStateChange: (s) => trace('pc:' + s),
+    onPeerConnectionState: (peerId, s) => trace('pcpeer:' + peerId + '=' + s),
+    onError: (e) => trace('error:' + String(e)),
+    onLive: () => trace('live'),
+    // Piste ouverte dès le départ (mode VAD) : le test prouve le trajet des paquets,
+    // pas la porte push-to-talk (qui a ses tests unitaires).
+    microOpenOnStart: true,
+  });
+  window.__posts.wiring = wiring;
+  const early = window.__posts.early ?? [];
+  window.__posts.early = [];
+  const ok = await wiring.start();
+  for (const m of early) wiring.onSignal(m);
+  return ok;
+};
+
+window.__peerStats = async () => {
+  // Octets ENTRANTS mesurés par le vrai getStats() de chaque RTCPeerConnection du plan.
+  const wiring = window.__posts.wiring;
+  if (!wiring) return { error: 'pas de câblage' };
+  const out = {};
+  for (const peerId of wiring.peers()) {
+    out[peerId] = await wiring.plane.stats(peerId);
+  }
+  return {
+    peers: out,
+    states: Object.fromEntries(window.__posts.states),
+    flows: window.__posts.flows,
+    log: log.slice(-40),
+  };
+};
+</script></body></html>

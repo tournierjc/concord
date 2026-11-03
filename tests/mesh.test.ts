@@ -35,6 +35,7 @@ import {
   type SignalOut,
 } from '../src/engine/net/mesh.ts'
 import { createMediaPlane, type MediaPlane, type PeerStats } from '../src/engine/rtc/media-plane.ts'
+import type { VoiceFilterId } from '../src/engine/rtc/voice-filters.ts'
 // AD-18 / D3 : `timers` est REQUIS ; ces sites ne mesurent pas le plafond de ramassage.
 import { NO_TIMERS } from '../src/engine/timers.ts'
 import { manualTimers, type ManualTimers } from './manual-timers.ts'
@@ -140,6 +141,20 @@ class FakePlane implements MediaPlane {
 
   public setTransmitting(on: boolean): void {
     this.transmitting = on
+  }
+
+  /**
+   * Doublure des filtres vocaux (2026-11-03) : la voix est RETENUE (un test peut exiger
+   * qu'elle ait changé), mais aucun graphe n'est monté — le maillage ne regarde jamais la
+   * piste, seule la chaîne réelle (`voice-chain`/`voice-filter`) est testée sur le graphe.
+   */
+  public voice: VoiceFilterId | null = null
+  public setVoiceFilter(id: VoiceFilterId): MediaStreamTrack | null {
+    this.voice = id
+    return null
+  }
+  public voiceFilter(): VoiceFilterId | null {
+    return this.voice
   }
 
   /**
@@ -444,7 +459,10 @@ describe('mesh — §4.2 : offreur déterministe, idempotence, borne, fermeture'
     assert.deepEqual(h.mesh.peers(), [], 'aucun lien créé par une answer orpheline')
   })
 
-  it('deux offreurs simultanés : mon offre gagne, l’offre entrante n’est pas acceptée', async () => {
+  it('deux offreurs : MON offre est DÉJÀ PARTIE chez le pair — elle gagne, l’entrante est refusée', async () => {
+    // Arbitrage 2026-11-02 (e2e deux-postes) : ce n'est plus la comparaison d'ids qui tranche
+    // (inefficace entre ids de serveur `p1`/`p2`), c'est le fait que l'offre a QUITTÉ la machine.
+    // Ici `a` est offreur désigné ET son offre est partie (harness synchrone : send exécuté).
     const h = harness('a')
     await h.mesh.onSignal({ kind: 'peer-joined', peerId: 'b', name: 'Bob' })
     await h.mesh.onSignal({ kind: 'offer', from: 'b', payload: { type: 'offer', sdp: 'offre-concurrente' } })
@@ -452,7 +470,7 @@ describe('mesh — §4.2 : offreur déterministe, idempotence, borne, fermeture'
     assert.deepEqual(h.plane.accepts, [], 'jamais deux SDP pour un même lien')
     assert.equal(h.plane.attaches.length, 1, 'et pas de seconde offre de ma part non plus')
     assert.equal(h.sent.length, 1)
-    assert.ok(meshWarnings.some((line) => line.includes('offreur désigné')), meshWarnings.join(' | '))
+    assert.ok(meshWarnings.some((line) => line.includes('déjà émise')), meshWarnings.join(' | '))
   })
 
   it('offre malformée : refus tracé, aucun accept, aucun pair fantôme', async () => {

@@ -67,6 +67,16 @@ export interface AudioSettings {
   /** Gain d'entrée, 0..2 (1 = neutre). */
   inputGain: number;
   /**
+   * Filtre vocal (2026-11-03, demande JC) : une voix appliquée au MICRO LOCAL avant l'envoi
+   * aux pairs (robot, talkie, timbres homme/femme/enfant…). `'none'` par défaut : la voix
+   * historique, aucun nœud dans le graphe (non-régression mesurée par test). Les valeurs sont
+   * le vocabulaire de `VOICE_FILTER_IDS` (`engine/rtc/voice-filters.ts`) — le schéma les
+   * énumère ici SANS importer le moteur (le shell est un contrat, pas un consommateur).
+   * Absent d'un fichier écrit avant ce changement ⇒ `'none'` (rétro-compat, même patron que
+   * `duckOthers`).
+   */
+  voiceFilter: 'none' | 'robot' | 'radio' | 'deep' | 'man' | 'woman' | 'child';
+  /**
    * Ducking (2026-11-01) : pendant qu'un PAIR parle, les AUTRES applications du système sont
    * baissées (jamais Concord — la voix des pairs reste à volume plein). `true` par défaut :
    * zéro réglage requis pour un utilisateur non technique. Absent d'un fichier écrit avant ce
@@ -203,6 +213,8 @@ export function defaultSettings(): Settings {
       noiseSuppression: false,
       echoCancellation: true,
       inputGain: 1,
+      // Voix historique : AUCUN filtre, AUCUN nœud dans le graphe micro (non-régression).
+      voiceFilter: 'none',
       // Zéro réglage requis : le ducking est actif dès le premier lancement.
       duckOthers: true,
     },
@@ -451,6 +463,28 @@ function readEnum<T extends string>(
   return value as T;
 }
 
+/**
+ * Comme `readEnum`, mais ABSENT est licite et vaut le repli (rétro-compat des fichiers écrits
+ * avant l'arrivée du champ — même patron que `readBooleanWithDefault` pour `duckOthers`).
+ * Une valeur PRÉSENTE et hors vocabulaire reste une faute (jamais un silencieux repli).
+ */
+function readEnumWithDefault<T extends string>(
+  ctx: Ctx,
+  source: Dict,
+  key: string,
+  path: string,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  const value = source[key];
+  if (value === undefined) return fallback;
+  if (typeof value !== 'string' || !allowed.includes(value as T)) {
+    fail(ctx, `${path}.${key}`, 'enum', `${path}.${key} doit valoir ${allowed.join(' | ')}`);
+    return fallback;
+  }
+  return value as T;
+}
+
 // --- Raccourci push-to-talk ------------------------------------------------------------------
 
 const MODIFIER_ALIASES: Readonly<Record<string, string>> = {
@@ -545,8 +579,16 @@ const AUDIO_KEYS = [
   'noiseSuppression',
   'echoCancellation',
   'inputGain',
+  'voiceFilter',
   'duckOthers',
 ] as const;
+/**
+ * Le vocabulaire des filtres vocaux (2026-11-03). Copie ASSUMÉE de `VOICE_FILTER_IDS`
+ * (`engine/rtc/voice-filters.ts`) : le shell est un contrat sérialisé, il n'importe pas le
+ * moteur. `tests/contract-parity.node.test.ts` est le garde-fou qui casse si les deux listes
+ * dérivent — la duplication est surveillée, pas silencieuse.
+ */
+const VOICE_FILTER_VALUES = ['none', 'robot', 'radio', 'deep', 'man', 'woman', 'child'] as const;
 const TALK_KEYS = ['mode', 'pttAccelerator', 'vadThresholdDb'] as const;
 const OVERLAY_KEYS = ['enabled', 'opacity', 'scale', 'screenId', 'position'] as const;
 const NETWORK_KEYS = ['signalingPort', 'discovery'] as const;
@@ -764,6 +806,8 @@ function validateV1(source: Dict): SettingsResult {
     noiseSuppression: readBoolean(ctx, audioSource, 'noiseSuppression', 'audio'),
     echoCancellation: readBoolean(ctx, audioSource, 'echoCancellation', 'audio'),
     inputGain: readNumber(ctx, audioSource, 'inputGain', 'audio', { min: 0, max: 2 }),
+    // Rétro-compat assumée : absent ⇒ 'none' (la voix historique, avant 2026-11-03).
+    voiceFilter: readEnumWithDefault(ctx, audioSource, 'voiceFilter', 'audio', VOICE_FILTER_VALUES, 'none'),
     // Rétro-compat assumée : absent ⇒ ON (le ducking est le comportement par défaut voulu).
     duckOthers: readBooleanWithDefault(ctx, audioSource, 'duckOthers', 'audio', true),
   };

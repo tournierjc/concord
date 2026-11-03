@@ -182,6 +182,14 @@ export function pickListenHost(
 
 function asText(payload: unknown): string | null {
   if (typeof payload === 'string') return payload.length > 0 ? payload : null;
+  // Le maillage (« contrat gelé », src/engine/net/mesh.ts) émet l'objet complet :
+  // `{ type: 'offer' | 'answer', sdp }`. `RTCSessionDescriptionInit` n'est PAS une chaîne : le
+  // tuyau doit déballer le SDP comme il déballerait un JSON de candidat. Le refuser tuait
+  // silencieusement toute négociation (le vrai « pas de flux audio », 2026-11-02).
+  if (payload !== null && typeof payload === 'object') {
+    const inner = (payload as { sdp?: unknown }).sdp;
+    if (typeof inner === 'string' && inner.length > 0) return inner;
+  }
   return null;
 }
 
@@ -203,17 +211,37 @@ function asCandidate(payload: unknown): string | null {
 export function toWire(message: SignalOut): ClientMessage | null {
   if (message.kind === 'leave') return { type: 'leave' };
   const to = typeof message.to === 'string' ? message.to : '';
-  if (to.length === 0) return null;
+  if (to.length === 0) {
+    if (process.env.CONCORD_SIGNAL_DEBUG) console.error(`[signal] >x to invalide (${message.kind})`);
+    return null;
+  }
   if (message.kind === 'offer' || message.kind === 'answer') {
     const sdp = asText(message.payload);
-    if (sdp === null) return null;
+    if (sdp === null) {
+      // « charge utile inexploitable » n'est jamais un abandon silencieux : le contrat
+      // (SPEC-007 §4.3 règle 4) veut qu'un rejet ait une raison lisible, pas qu'il s'évapore.
+      if (process.env.CONCORD_SIGNAL_DEBUG) console.error(`[signal] >x ${message.kind} vers ${to} : charge utile SDP inexploitable`);
+      return null;
+    }
     return { type: message.kind, to, sdp };
   }
-  const candidate = asCandidate(message.payload);
-  if (candidate === null) return null;
-  // Filtre LAN AVANT l'émission : un srflx/relay/d'adresse publique ne sort jamais.
-  if (!isLanCandidate(candidate)) return null;
-  return { type: 'ice', to, candidate };
+  if (message.kind === 'ice') {
+    const candidate = asCandidate(message.payload);
+    if (candidate === null) {
+      if (process.env.CONCORD_SIGNAL_DEBUG) console.error(`[signal] >x ice vers ${to} : charge utile sans ligne de candidat`);
+      return null;
+    }
+    // Filtre LAN AVANT l'émission : un srflx/relay/d'adresse publique ne sort jamais.
+    if (!isLanCandidate(candidate)) {
+      if (process.env.CONCORD_SIGNAL_DEBUG) console.error(`[signal] >x ice vers ${to} : candidat hors LAN filtré à l'émission`);
+      return null;
+    }
+    return { type: 'ice', to, candidate };
+  }
+  // Kind inconnu du contrat (un type ajouté sans branche ici) : rien ne sort, tracé —
+  // jamais un `undefined` que l'expéditeur relèverait comme un message valide.
+  if (process.env.CONCORD_SIGNAL_DEBUG) console.error(`[signal] >x kind inconnu (${String(message.kind)}) — non émis`);
+  return null;
 }
 
 /** Rend la charge utile d'un candidat relayé : la chaîne, ou l'objet JSON si elle en est un. */
@@ -224,9 +252,14 @@ export function decodeCandidatePayload(candidate: string): unknown {
       const parsed: unknown = JSON.parse(trimmed);
       if (parsed !== null && typeof parsed === 'object') return parsed;
     } catch {
-      // Pas du JSON : la chaîne de candidat repart telle quelle.
+      // Pas du JSON : la cha\u00eene de candidat repart telle quelle.
     }
   }
+  // Forme native du maillage (mesh.ts onLocalCandidate \u2192 payload RTCIceCandidateInit) : le fil ne
+  // porte qu'une cha\u00eene, donc la ligne SDP doit repartir EMBALLEE. Rendue telle quelle, elle
+  // arrivait chez le pair comme une cha\u00eene nue et `parseCandidate` la refusait
+  // (\u00ab charge utile non objet \u00bb) \u2014 le bug du 2026-11-02 qui tuait tout ICE hors boucle locale.
+  if (trimmed.startsWith('candidate:')) return { candidate };
   return candidate;
 }
 
@@ -256,7 +289,10 @@ export function fromWire(message: ServerMessage): SignalIn | null {
     case 'offer':
     case 'answer': {
       if (typeof message.from !== 'string' || typeof message.sdp !== 'string') return null;
-      return { kind: message.type, from: message.from, payload: message.sdp };
+      // Le maillage consomme un RTCSessionDescriptionInit, pas une chaîne nue : le SDP relu
+      // depuis le fil repart EMBALLÉ ({ type, sdp }). Rendu nu, `descriptionOf` (mesh) le
+      // refusait « sans type 'offer' ni SDP » — symétrique à l'emballage côté émission.
+      return { kind: message.type, from: message.from, payload: { type: message.type, sdp: message.sdp } };
     }
     case 'ice': {
       if (typeof message.from !== 'string' || typeof message.candidate !== 'string') return null;
@@ -535,6 +571,10 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
 
   function handleServerMessage(raw: string): void {
     stats.lines += 1;
+    // Diagnostic e2e 2026-11-02 (bug « pas de flux audio » LAN) : chaque ligne reçue du serveur est
+    // tracee sur stderr en mode debug. Sans lui, un `answer` perdu entre le serveur et le lien
+    // était inviséable — seul le `noFlow` final remontait.
+    if (process.env.CONCORD_SIGNAL_DEBUG) console.error(`[signal:${role}] <= ${raw.slice(0, 160)}`);
     const message = parseServerLine(raw);
     if (message === null) {
       stats.malformed += 1;

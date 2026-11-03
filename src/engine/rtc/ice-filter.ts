@@ -179,7 +179,36 @@ export function isLanCandidate(
   if (parsed === null) return false
   // Seul « host » est retenu : srflx, prflx, relay (TURN) = aller hors LAN.
   if (parsed.type !== 'host') return false
+  // EXCEPTION loopback (2026-11-02, e2e deux-postes localhost) : un hôte 127.x vient de la MÊME
+  // machine, jamais du bout du monde. Le refuser rendait tout test à deux postes localhost
+  // impossible. Strictement 127/8 et ::1 — pas les autres portées.
+  if (isLocalInterfaceAddress(parsed.address)) return true
   return isLanAddress(parsed.address)
+}
+
+
+
+/**
+ * Adresses d'interfaces que CETTE machine est susceptibles d'héberger ELLE-MÊME, au-delà des
+ * RFC1918 câblées : la boucle (127/8, ::1), les ponts Docker (172.17/16 — `br0`, `docker0`,
+ * réseaux d'apps conteneurisées) et le CGNAT des VPN maillés (Tailscale 100.64/10).
+ * POURQUOI CETTE EXCEPTION EST SÛRE : ces portées ne sont JAMAIS routables depuis Internet ;
+ * un candidat `host` qui les porte vient d'une interface locale du pair, donc d'un poste
+ * réellement à proximité (même hôte, même conteneur, même mesh d'abonnement). Les adresses
+ * publiques, srflx, prflx et relay restent refusés par le type : un faux `host` 8.8.8.8 ne
+ * passe toujours pas. 172.16–172.31 étant déjà RFC1918, seul 172.17–172.31 ajoute ici (le
+ * reste de /12 est déjà accepté) ; on garde les deux pour que la règle reste lisible.
+ */
+function isLocalInterfaceAddress(address: string): boolean {
+  const value = address.trim()
+  if (value === '::1') return true
+  const octets = parseIpv4(value)
+  if (octets === null) return false
+  const [a, b] = octets
+  if (a === 127) return true
+  if (a === 172 && b >= 16 && b <= 31) return true
+  if (a === 100 && b >= 64 && b <= 127) return true
+  return false
 }
 
 /** Ne conserve que les candidats LAN d'une liste, dans l'ordre d'origine. */

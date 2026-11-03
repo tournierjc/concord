@@ -323,3 +323,33 @@ test('resolveDisplayName : borne à 32 points de code, sans casser une paire de 
   assert.equal(bounded, '\u{1F600}'.repeat(32));
   assert.equal(bounded.includes('\uFFFD'), false);
 });
+
+// --- voiceFilter (filtres vocaux, 2026-11-03, demande JC) --------------------------------------
+
+test('voiceFilter : absent d’un fichier antérieur ⇒ « none » (la voix historique, rétro-compat)', () => {
+  // Un settings.json écrit avant le 2026-11-03 n’a pas la clé : parseSettings ne doit ni
+  // refuser le fichier ni inventer une voix — `none` = aucun nœud de filtre (non-régression).
+  // Le fichier d'avant : la CLÉ est retirée d'un objet sinon valide (construire un objet
+  // champ par champ recréerait les mêmes faux négatifs que la garde scripts-coverage punit
+  // ailleurs — ici c'est le test qui mentrait sur la rétro-compat).
+  const sans = JSON.parse(JSON.stringify(defaultSettings())) as Record<string, unknown>
+  ;(sans['audio'] as Record<string, unknown>)['voiceFilter'] = undefined
+  delete (sans['audio'] as Record<string, unknown>)['voiceFilter']
+  const parsed = parseSettings(sans);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.equal(parsed.value.audio.voiceFilter, 'none');
+});
+
+test('voiceFilter : les sept voix du vocabulaire sont acceptées, rien d’autre', () => {
+  const base = defaultSettings();
+  for (const voice of ['none', 'robot', 'radio', 'deep', 'man', 'woman', 'child'] as const) {
+    const parsed = parseSettings({ ...base, audio: { ...base.audio, voiceFilter: voice } });
+    assert.equal(parsed.ok, true, `la voix « ${voice} » doit être licite`);
+    if (parsed.ok) assert.equal(parsed.value.audio.voiceFilter, voice);
+  }
+  // Une valeur hors vocabulaire est une FAUTE tracée, jamais un repli silencieux :
+  // « chipmunk » n’est pas une voix (le pitch-up seul est un défaut, pas une option).
+  const hostile = parseSettings({ ...base, audio: { ...base.audio, voiceFilter: 'chipmunk' } });
+  assert.equal(hostile.ok, false, 'une voix inventée est refusée');
+});

@@ -87,6 +87,8 @@ export const CANDIDATE_PRFLX = 'candidate:8 1 udp 1685987071 198.51.100.7 54321 
 
 /** Piste audio doublure : `enabled` est LE levier du push-to-talk (A2). */
 export class FakeTrack {
+  /** Identité de piste (le DOM l'exige — et `stop()`/`enabled` sont déjà là, cf. A2). */
+  public readonly id: string = `piste-doublure-${Math.floor(Math.random() * 1e9)}`
   public readonly kind = 'audio'
   /** Étiquette du porteur de la mesure : c'est la CLÉ du RMS fixé par le test. */
   public readonly label: string
@@ -123,10 +125,54 @@ export class FakeTrack {
   public end(): void {
     this.readyState = 'ended'
   }
+
+  /*
+   * Les facettes que le type `MediaStreamTrack` exige et qu'AUCUN test n'exerce : elles sont
+   * portées pour que la doublure satisfasse le contrat de la fabrique de filtres (qui reçoit
+   * une vraie piste du navigateur), jamais pour être lues. Un test qui en exerçait une devrait
+   * la faire vivre ici, pas la contourner par un cast.
+   */
+  public readonly contentHint = ''
+  public readonly muted = false
+  public readonly onended: ((this: MediaStreamTrack, ev: Event) => unknown) | null = null
+  public readonly onmute: ((this: MediaStreamTrack, ev: Event) => unknown) | null = null
+  public readonly onunmute: ((this: MediaStreamTrack, ev: Event) => unknown) | null = null
+  public isolated = false
+  public readonly readonly = true
+  public clone(): FakeTrack {
+    return new FakeTrack(this.label)
+  }
+  public addEventListener(): void {
+    // Aucune écoute n'est posée sur une piste par le produit.
+  }
+  public removeEventListener(): void {
+    // Idem.
+  }
+  public dispatchEvent(): boolean {
+    return false
+  }
+  public getCapabilities(): Record<string, unknown> {
+    return {}
+  }
+  public getConstraints(): Record<string, unknown> {
+    return {}
+  }
+  public getSettings(): Record<string, unknown> {
+    return {}
+  }
+  public applyConstraints(): Promise<void> {
+    return Promise.resolve()
+  }
 }
 
 /** Flux doublure : `getAudioTracks` / `getTracks` sont les seules méthodes lues. */
 export class FakeMediaStream {
+  /**
+   * Le `id` du DOM est requis par le type `MediaStream` : une doublure qui ne le porte pas
+   * ne peut pas être passée là où le contrat du produit dit `MediaStream` (la fabrique de
+   * filtres, notamment) — c'est la doublure qui s'adapte au contrat, jamais l'inverse.
+   */
+  public readonly id = 'flux-doublure'
   public readonly tracks: FakeTrack[]
   public constructor(tracks: FakeTrack[] = []) {
     this.tracks = tracks
@@ -136,6 +182,22 @@ export class FakeMediaStream {
   }
   public getTracks(): FakeTrack[] {
     return this.tracks
+  }
+  /**
+   * Poser une piste, comme le DOM. C'est le chemin de la fabrique de filtres : elle reçoit le
+   * flux micro et y ÉCRIT la piste qu'elle filtre (jamais `new MediaStream(...)`, un global
+   * de navigateur absent de Node). Le registre est la preuve pour les tests.
+   */
+  public readonly addedTracks: FakeTrack[] = []
+  public addTrack(track: MediaStreamTrack | FakeTrack): void {
+    const fake = track as FakeTrack
+    this.addedTracks.push(fake)
+    if (!this.tracks.includes(fake)) this.tracks.push(fake)
+  }
+  public removeTrack(track: MediaStreamTrack | FakeTrack): void {
+    const fake = track as FakeTrack
+    const index = this.tracks.indexOf(fake)
+    if (index >= 0) this.tracks.splice(index, 1)
   }
 }
 
@@ -332,20 +394,181 @@ export function resetFakeAnalyserLevels(): void {
 }
 
 /** Le RMS qu'un analyseur de CE flux rendra : défaut 0,25, clé posée ⇒ sa valeur. */
-function analyserSampleFor(stream: FakeMediaStream): number {
-  const first = stream.getAudioTracks()[0]
+function analyserSampleFor(stream: FakeMediaStream | MediaStream): number {
+  const first = stream.getAudioTracks()[0] as FakeTrack | MediaStreamTrack | undefined
   if (first === undefined) return 0.25
-  if (ANALYSER_LEVELS.has(first.label)) {
-    const level = ANALYSER_LEVELS.get(first.label)
+  // `label` est porté par la doublure (le porteur de la mesure, cf. `FakeTrack`) et par la
+  // vraie piste du navigateur ; une piste sans label lit le RMS par défaut.
+  const label = 'label' in first ? first.label : 'audio'
+  if (ANALYSER_LEVELS.has(label)) {
+    const level = ANALYSER_LEVELS.get(label)
     return level === null || level === undefined ? 0 : level
   }
   return 0.25
 }
 
-/** `AudioContext` doublure : de quoi créer un vumètre, rien de plus. */
+/**
+ * Nœud doublure : il ENREGISTRE ses connexions sortantes. Sans registre, un graphe de
+ * filtres se câblerait à l'envers (un formant en série au lieu de parallèle, un oscillateur
+ * laissé dans la chaîne) sans qu'aucun test ne puisse le voir — l'auditeur est un humain.
+ * `connect(node|param)` est surchargé comme le DOM : la cible est un nœud OU un `AudioParam`
+ * (c'est exactement ainsi que le ring module une voix : oscillateur → gain → `gain` d'un gain).
+ */
+/** Ce qu'un `connect` de doublure accepte : nœud, paramètre, ou l'analyseur du vumètre. */
+export type FakeConnectTarget = FakeAudioNode | FakeAudioParam | FakeAnalyser
+
+export class FakeAudioNode {
+  public readonly outgoing: FakeConnectTarget[] = []
+  public disconnectCalls = 0
+  public connect(target: FakeConnectTarget | unknown): void {
+    // Les deux contrats du produit (nœud ET paramètre) tombent ici ; l'analyseur du vumètre
+    // est aussi une cible licite (le chemin `meterSource` historique). Une cible hors doublure
+    // est IGNOREE : c'est un oubli de harnais, pas un câblage du produit.
+    if (target instanceof FakeAudioNode || target instanceof FakeAudioParam || target instanceof FakeAnalyser) {
+      this.outgoing.push(target)
+    }
+  }
+  public disconnect(): void {
+    this.disconnectCalls += 1
+    this.outgoing.length = 0
+  }
+}
+
+/** `AudioParam` doublure : un récepteur de modulation, et une valeur posable/lisible. */
+export class FakeAudioParam {
+  public value = 1
+  public readonly incoming: FakeAudioNode[] = []
+  /** Un `AudioParam` se branche par `connect` : la doublure le note, comme le DOM. */
+  public connect(source: FakeAudioNode): void {
+    this.incoming.push(source)
+  }
+}
+
+/** Oscillateur doublure : `start`/`stop` comptés (un oscillateur non arrêté est une fuite). */
+export class FakeOscillator extends FakeAudioNode {
+  public type = 'sine'
+  public readonly frequency = new FakeAudioParam()
+  public startCalls = 0
+  public stopCalls = 0
+  public start(): void {
+    this.startCalls += 1
+  }
+  public stop(): void {
+    this.stopCalls += 1
+  }
+}
+
+/** Biquad doublure : son type, sa fréquence et son Q (les valeurs que la recette promet). */
+export class FakeBiquadFilter extends FakeAudioNode {
+  public type = 'lowpass'
+  public readonly frequency = new FakeAudioParam()
+  public readonly Q = new FakeAudioParam()
+  /**
+   * Le poids du résonateur, retenu quand la fabrique pose le `gain` d'un `bandpass` de formant.
+   * Le vrai `BiquadFilterNode` n'a PAS de `gain` pour un bandpass — seul le `peaking` en a un —
+   * donc la fabrique ne peut pas l'écrire sur le filtre : elle le porte sur un gain dédié
+   * (cf. `buildNode`). Cette facette est le témoin pour les tests, rien de plus.
+   */
+  public weight: number | null = null
+}
+
+/** WaveShaper doublure : la courbe posée, et l'échantillonnage retenu (`oversample`). */
+export class FakeWaveShaper extends FakeAudioNode {
+  public curve: Float32Array | null = null
+  public oversample = 'none'
+}
+
+/** Gain doublure : son `gain` est un paramètre (le point d'injection du ring). */
+export class FakeGain extends FakeAudioNode {
+  public readonly gain = new FakeAudioParam()
+}
+
+/**
+ * Source doublure : le flux mesuré est RETENU (un test doit pouvoir exiger « la fabrique a
+ * bien branché LA piste micro, pas une autre »), et le RMS du flux est appliqué à l'analyseur
+ * qu'on lui branche (défaut (a) historique du vumètre).
+ */
+export class FakeMediaStreamSourceNode extends FakeAudioNode {
+  public readonly stream: FakeMediaStream | MediaStream
+  public constructor(stream: FakeMediaStream | MediaStream, private readonly sample: number) {
+    super()
+    this.stream = stream
+  }
+  public override connect(target: FakeConnectTarget | unknown): void {
+    if (target instanceof FakeAnalyser) target.sample = this.sample
+    super.connect(target)
+  }
+}
+
+/**
+ * Destination doublure : elle porte un flux, comme le DOM. C'est LUI qui rend la piste aux
+ * pairs — donc c'est lui qu'un test doit pouvoir inspecter (`stream.getAudioTracks()[0]`).
+ */
+export class FakeMediaStreamDestination extends FakeAudioNode {
+  public readonly stream: FakeMediaStream & MediaStream
+  public constructor() {
+    super()
+    this.stream = new FakeMediaStream([new FakeTrack('filtre vocal')]) as FakeMediaStream & MediaStream
+  }
+}
+
+/**
+ * `AudioContext` doublure : de quoi créer un vumètre ET un graphe de filtres. Les fabriques
+ * de nœuds sont RÉELLES (des doubles complets, pas des espions vides) : un test peut donc
+ * exiger « la recette robot a bien monté un oscillateur hors chaîne, branché sur le gain de
+ * modulation, qui pilote le `gain` d'un gain de la chaîne ».
+ */
 export class FakeAudioContext {
+  public readonly created: {
+    gains: FakeGain[]
+    biquads: FakeBiquadFilter[]
+    shapers: FakeWaveShaper[]
+    oscillators: FakeOscillator[]
+    destinations: FakeMediaStreamDestination[]
+    sources: FakeMediaStreamSourceNode[]
+  } = { gains: [], biquads: [], shapers: [], oscillators: [], destinations: [], sources: [] }
+  /** Vrai si `resume()` a été appelé (le contrat du vumètre : une source sans horloge ment). */
+  public resumeCalls = 0
+  /** Fréquence de la page (la géométrie du pitch s'y cale). */
+  public readonly sampleRate = 48000
+  /**
+   * `AudioWorklet` doublure : `addModule` résout (le chemin worklet est testable), et le
+   * NOEUD est fabriqué par la fabrique du test — jamais par un global du navigateur absent ici.
+   */
+  public readonly audioWorklet = {
+    addModule: async (_url: string): Promise<void> => {
+      this.workletModuleLoads += 1
+    },
+  }
+  public workletModuleLoads = 0
+
   public createAnalyser(): FakeAnalyser {
     return new FakeAnalyser()
+  }
+  public createGain(): FakeGain {
+    const node = new FakeGain()
+    this.created.gains.push(node)
+    return node
+  }
+  public createBiquadFilter(): FakeBiquadFilter {
+    const node = new FakeBiquadFilter()
+    this.created.biquads.push(node)
+    return node
+  }
+  public createWaveShaper(): FakeWaveShaper {
+    const node = new FakeWaveShaper()
+    this.created.shapers.push(node)
+    return node
+  }
+  public createOscillator(): FakeOscillator {
+    const node = new FakeOscillator()
+    this.created.oscillators.push(node)
+    return node
+  }
+  public createMediaStreamDestination(): FakeMediaStreamDestination {
+    const node = new FakeMediaStreamDestination()
+    this.created.destinations.push(node)
+    return node
   }
   /**
    * Défaut (a) : la source porte sa clé de RMS. `createMediaStreamSource` reçoit le
@@ -353,16 +576,14 @@ export class FakeAudioContext {
    * (défaut 0,25, posé par `setFakeAnalyserLevel`), ce qui rend la chaîne
    * `ontrack → analyseur → level(peerId)` mesurable sans Chromium.
    */
-  public createMediaStreamSource(stream: FakeMediaStream): { connect: (node: unknown) => void } {
+  public createMediaStreamSource(stream: MediaStream | FakeMediaStream): FakeMediaStreamSourceNode {
     const sample = analyserSampleFor(stream)
-    return {
-      connect: (node: unknown): void => {
-        const analyser = node as FakeAnalyser
-        if (analyser instanceof FakeAnalyser) analyser.sample = sample
-      },
-    }
+    const node = new FakeMediaStreamSourceNode(stream, sample)
+    this.created.sources.push(node)
+    return node
   }
   public resume(): Promise<void> {
+    this.resumeCalls += 1
     return Promise.resolve()
   }
   public close(): Promise<void> {

@@ -61,8 +61,10 @@ import {
 import { PEER_LEVELS, peerSpeaking } from './participant-state.ts';
 import { createSpeakingRelay, type SpeakingRelay } from './speaking-relay.ts';
 import { buildMicrophoneConstraints } from '../engine/rtc/media-config.ts';
+import { createVoiceFilterChain, type FilterAudioContext } from './voice-filter.ts';
 import { DEFAULT_VAD_CONFIG } from '../engine/vad.ts';
 import type { Settings } from '../shell/settings-schema';
+import { VOICE_FILTER_IDS, type VoiceFilterId } from '../engine/rtc/voice-filters.ts';
 
 /** Où en est la voix locale. `unavailable` est un état de première classe, pas une erreur muette. */
 export type VoiceStatus = 'idle' | 'starting' | 'live' | 'unavailable';
@@ -771,6 +773,16 @@ export function openVoice(
         ? {}
         : { microConstraints: buildMicrophoneConstraints(settings.audio) }),
       ...(settings?.talk?.mode === 'vad' ? { microOpenOnStart: true } : {}),
+      // Filtres vocaux (2026-11-03, demande JC) : la voix du réglage et la fabrique du graphe
+      // (renderer/voice-filter.ts) passent au câblage, qui les donne au plan média. Le contexte
+      // audio est porté OPAQUE par le plan média (le sien, partagé avec les vumètres) ; ici on
+      // lui rend sa nature de fabrique. `'none'` est transmis comme les autres : la chaîne
+      // saine ne pose aucun nœud (non-régression vérifiée en test).
+      ...(settings?.audio?.voiceFilter === undefined
+        ? {}
+        : { voiceFilter: settings.audio.voiceFilter }),
+      voiceChainFactory: (context, stream, voice) =>
+        createVoiceFilterChain(context as FilterAudioContext, stream, voice),
       send: (message) => {
         emitSignal(message);
       },
@@ -862,6 +874,26 @@ export function setTransmitting(active: boolean): void {
   }
   const applied = applyTransmit(current, active);
   publish({ transmitting: applied ? active : snapshot.transmitting });
+}
+
+/**
+ * Change la VOIX du micro en vol (filtres vocaux, 2026-11-03, demande JC).
+ *
+ * Le réglage est écrit par l'UI (`audioPatch({ voiceFilter })`) et la session ouverte est
+ * prévenue ICI : le plan média remplace le graphe de filtrage sur la MÊME destination —
+ * aucun `replaceTrack`, aucune renégociation, les pairs n'entendent qu'une voix qui change.
+ * Sans session (hors salon), le réglage reste l'intention que `openVoice` appliquera à
+ * l'entrée en salon — le geste n'échoue pas, il est différé, et c'est dit par le `false`.
+ *
+ * Rend `true` si la voix est réellement appliquée au micro ouvert (`plane.voiceFilter()`
+ * relit la chaîne, jamais l'intention) : un réglage qui n'a pas pris reste visible mais le
+ * calling-code le sait.
+ */
+export function setVoiceFilter(id: VoiceFilterId): boolean {
+  const current = session;
+  if (current === null) return false;
+  current.wire.plane.setVoiceFilter(id);
+  return current.wire.plane.voiceFilter() === id;
 }
 
 /** Lecture directe, hors React (diagnostic, tests de fumée). */

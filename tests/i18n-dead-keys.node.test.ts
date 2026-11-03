@@ -62,6 +62,19 @@ const JUSTIFIED_EXCEPTIONS: Readonly<Record<string, string>> = {
   // `IdentityRow` les rend — la famille `app.nickname.error.*` est nommée dans `src/shell/nickname.ts`.
   'app.nickname.error.empty': 'src/shell/nickname.ts (nicknameErrorKey)',
   'app.nickname.error.tooLong': 'src/shell/nickname.ts (nicknameErrorKey)',
+  //
+  // Famille des voix (2026-11-03, filtres vocaux) : `Settings.tsx` construit la clé par
+  // `` t(`settings.audio.voiceFilter.${id}`) `` en itérant `VOICE_FILTER_IDS` — le moteur est la
+  // source du vocabulaire, l'UI ne peut pas citer sept littéraux sans le dupliquer (la copie de
+  // vocabulaire est précisément ce que `contract-parity` interdit). Le couple label/help
+  // (`settings.audio.voiceFilter`, `.help`) est cité en littéral et n'est donc PAS ici.
+  'settings.audio.voiceFilter.none': 'src/renderer/Settings.tsx (VOICE_FILTER_IDS × t(`…${id}`))',
+  'settings.audio.voiceFilter.robot': 'src/renderer/Settings.tsx (VOICE_FILTER_IDS × t(`…${id}`))',
+  'settings.audio.voiceFilter.radio': 'src/renderer/Settings.tsx (VOICE_FILTER_IDS × t(`…${id}`))',
+  'settings.audio.voiceFilter.deep': 'src/renderer/Settings.tsx (VOICE_FILTER_IDS × t(`…${id}`))',
+  'settings.audio.voiceFilter.man': 'src/renderer/Settings.tsx (VOICE_FILTER_IDS × t(`…${id}`))',
+  'settings.audio.voiceFilter.woman': 'src/renderer/Settings.tsx (VOICE_FILTER_IDS × t(`…${id}`))',
+  'settings.audio.voiceFilter.child': 'src/renderer/Settings.tsx (VOICE_FILTER_IDS × t(`…${id}`))',
   // Consommées par design/check-i18n.mjs (liste BUTTON_KEYS, contrôle des largeurs de bouton) :
   // ces libellés sont rendus par le code sous un AUTRE libellé contextuel ; le contrôle de
   // largeur, lui, les nomme et les lit. Ils ne sont donc pas morts : ils sont mesurés.
@@ -77,7 +90,11 @@ const JUSTIFIED_EXCEPTIONS: Readonly<Record<string, string>> = {
   'control.ptt.hold': 'tests/i18n-interpolation.node.test.ts (dictionnaire fabriqué)',
 };
 
-const MAX_EXCEPTIONS = 12;
+// 2026-11-03 : la famille `settings.audio.voiceFilter.*` (7 clés) est construite par
+// `VOICE_FILTER_IDS × t(…)` dans Settings.tsx — la borne passe de 12 à 19 pour cette seule
+// famille justifiée ligne à ligne ci-dessus ; une clé morte de plus passe toujours par une
+// justification, jamais par cette borne.
+const MAX_EXCEPTIONS = 19;
 
 function catalogKeys(): string[] {
   const fr = JSON.parse(readFileSync(join(ROOT, 'design/i18n/fr.json'), 'utf8')) as Record<string, string>;

@@ -194,7 +194,13 @@ type LinkPhase = 'waiting' | 'offered' | 'answered' | 'failed'
 
 interface Link {
   readonly peerId: string
-  readonly role: LinkRole
+  /**
+   * Muable (2026-11-02) : l'arbitrage des offres simultanées peut RETIRER le rôle d'offreur
+   * au local (l'offre entrante gagne) — cf. le commentaire du gestionnaire d'offre. Un
+   * `readonly` ici rendrait l'arbitrage impossible et ferait reposer la résolution sur un
+   * cast, ce que la convention du repo interdit.
+   */
+  role: LinkRole
   phase: LinkPhase
   /** SDP de la dernière offre distante acceptée (répondeur) — clé d'idempotence. */
   remoteOfferSdp: string
@@ -210,6 +216,12 @@ interface Link {
    * ramener le lien à `connected` une fois, puis se taire.
    */
   connectedAnnounced: boolean
+  /**
+   * L'offre locale a-t-elle QUITTÉ la machine (`send` exécuté) ? Seule une offre
+   * réellement partie ancre le lien : une offre encore en attente du ramassage ICE
+   * peut céder la place à une offre entrante (course des deux offreurs, 2026-11-02).
+   */
+  offerSent: boolean
 }
 
 /** Trace d'un refus : jamais une exception, toujours une ligne lisible. */
@@ -414,6 +426,10 @@ export function createMesh(o: MeshOptions): Mesh {
     link.phase = 'offered'
     try {
       const offer = await plane.attach(link.peerId)
+      // L'attach peut être long (ramassage ICE plafonné) : une offre entrante arrivant PENDANT
+      // cette attente est la vraie voie du lien — on ne l'émet que si le rôle n'a pas basculé.
+      if (link.role !== 'offerer') return
+      link.offerSent = true
       send({ kind: 'offer', to: link.peerId, payload: offer })
     } catch (error: unknown) {
       fail(link, 'attach/offer', error)
@@ -461,6 +477,9 @@ export function createMesh(o: MeshOptions): Mesh {
       remoteOfferSdp: '',
       flow: null,
       connectedAnnounced: false,
+      // L'offre a-t-elle QUITTé la machine ? C'est ce distinguo (et non la comparaison d'ids,
+      // inefficace entre ids de serveur) qui tranche le cas des deux offreurs en course.
+      offerSent: false,
     }
     links.set(peerId, link)
     notify(peerId, 'connecting', 'ice')
@@ -488,12 +507,29 @@ export function createMesh(o: MeshOptions): Mesh {
     const link = openLink(from, 'offer')
     if (link === null) return
     if (link.role === 'offerer') {
-      // Deux offreurs simultanés : je suis l'offreur désigné (`localId < from`),
-      // donc MON offre gagne et l'offre entrante est ignorée. Jamais deux SDP
-      // pour un même lien.
-      warn(`offre de ${from} ignorée : je suis l'offreur désigné de ce lien`)
-      await offerTo(link)
-      return
+      // Deux offreurs simultanés (2026-11-02, démontré par l'e2e deux-postes) : la règle
+      // `localId < peerId` NE RÉSOUD RIEN quand les deux ids sont ceux que le SERVEUR a
+      // attribués (`p1`/`p2` — cf. join du main qui passe `state.selfId`). Les deux côtés se
+      // déclarent offreur, aucun n'accepte, et le lien meurt en `noFlow` après 5 s. Cas testé
+      // unitairement avec des ids différents, jamais avec des ids de serveur — d'où des semaines
+      // d'unitaires verts sur un LAN muet.
+      // Arbitrage : le rôle appartient au SERVEUR, pas à une comparaison. Si j'ai DÉJÀ émis une
+      // offre sur ce lien, mon offre gagne (elle est déjà chez le pair) — sinon l'offre entrante
+      // gagne et je réponds. Jamais deux accept, jamais deux offres émises après ce point.
+      if (link.phase === 'waiting') {
+        // Rien émis de mon côté : l'offre entrante gagne, je réponds.
+        link.role = 'answerer'
+      } else if (link.phase === 'offered' && !link.offerSent) {
+        // Course entre MON offreTo() (en attente du ramassage ICE) et l'offre entrante : ni l'une
+        // ni l'autre n'a encore quitté la machine. L'entrante gagne — deux offres émises
+        // signeraient deux descriptions locales incompatibles.
+        warn(`offre de ${from} : mon offre n'était pas encore émise, je cède et je réponds`)
+        link.role = 'answerer'
+      } else {
+        // Mon offre est PARTIE chez le pair : elle est l'ancrage du lien, elle gagne.
+        warn(`offre de ${from} ignorée : mon offre est déjà émise sur ce lien`)
+        return
+      }
     }
     const sdp = offer.sdp ?? ''
     if (link.phase === 'answered' && link.remoteOfferSdp === sdp) {
@@ -517,6 +553,13 @@ export function createMesh(o: MeshOptions): Mesh {
       return
     }
     if (link.role !== 'offerer') {
+      // Cas 2026-11-02 (e2e) : j'étais offreur désigné mais l'arbitrage des offres m'a fait
+      // céder (rôle « answerer », phase « answered ») — cette `answer` n'est PAS la mienne,
+      // elle vient du pair à qui j'ai cédé : elle ne concerne personne, on la trace et on passe.
+      if (link.phase === 'answered') {
+        warn(`answer de ${from} ignorée : j'ai cédé ce lien à son offre à lui`)
+        return
+      }
       warn(`answer de ${from} ignorée : je suis le répondeur de ce lien`)
       return
     }

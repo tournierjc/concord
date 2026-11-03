@@ -26,6 +26,8 @@ import {
   type Theme,
 } from '../shell/settings-schema';
 import { isValidAccelerator, normalizeAccelerator } from '../shell/settings-schema';
+import { VOICE_FILTER_IDS } from '../engine/rtc/voice-filters.ts';
+import { setVoiceFilter } from './voice.ts';
 import type { LobbyStatusDto, RoomStateDto, UpdateStateDto } from '../shell/ipc-contract';
 import { createTranslator, type Locale } from './i18n';
 import { lanApi } from './api';
@@ -143,6 +145,10 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
   // Message d'annonce (S3.6 : la séquence finale enregistrée s'annonce). Il vit dans la région
   // `aria-live` du pied du lobby — le panneau ne rend que l'annonce, l'appelant tient la région.
   const [announcement, setAnnouncement] = useState<string | null>(null);
+  // Filtres vocaux (2026-11-03) : `null` = aucun geste récent, `false` = la voix demandée n'a
+  // PAS été appliquée au micro ouvert (fabrication impossible — le réglage reste écrit comme
+  // intention, la voix brute part aux pairs, et l'aide le dit). Jamais une alerte bloquante.
+  const [voiceFilterRefused, setVoiceFilterRefused] = useState<boolean | null>(null);
   // Mises à jour (avenant SPEC-006b, 2026-11-01) : la dernière publication du main, rendue
   // honnêtement — `null` tant que rien n'a été publié, jamais un état inventé au montage.
   const [updateState, setUpdateState] = useState<UpdateStateDto | null>(null);
@@ -325,6 +331,40 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
             <span className="field__label">{t('settings.audio.duck.others')}</span>
             <span className="field__help">{t('settings.audio.duck.help')}</span>
           </label>
+
+          {/*
+            Filtres vocaux (2026-11-03, demande JC) : une voix appliquée au MICRO LOCAL avant
+            l'envoi aux pairs. La liste vient de `VOICE_FILTER_IDS` (le moteur est la source du
+            vocabulaire, jamais une copie de l'UI). Le changement est EN VOL : `setVoiceFilter`
+            remplace le graphe du plan média sans renégociation — en salon, les pairs entendent
+            la nouvelle voix immédiatement. Hors salon, le réglage est l'intention appliquée à
+            l'entrée (`openVoice`), et le geste reste licite.
+          */}
+          <div className="field">
+            <span className="field__label">{t('settings.audio.voiceFilter')}</span>
+            <div className="segmented" role="group" aria-label={t('settings.audio.voiceFilter')}>
+              {VOICE_FILTER_IDS.map((id) => (
+                <button
+                  key={id}
+                  type="button"
+                  className={`button button--toggle${settings.audio.voiceFilter === id ? ' button--toggle-on' : ''}`}
+                  aria-pressed={settings.audio.voiceFilter === id}
+                  onClick={() => {
+                    audioPatch({ voiceFilter: id })
+                    // Le retour du plan média est RELU, pas supposé : `false` = la page n'a pas
+                    // pu fabriquer la voix (la voix brute part, le réglage reste l'intention).
+                    setVoiceFilterRefused(setVoiceFilter(id))
+                  }}
+                >
+                  {t(`settings.audio.voiceFilter.${id}`)}
+                </button>
+              ))}
+            </div>
+            <span className="field__help">
+              {t('settings.audio.voiceFilter.help')}
+              {voiceFilterRefused === false ? ` — ${t('settings.audio.voiceFilter.unavailable')}` : ''}
+            </span>
+          </div>
 
           <label className="field">
             <span className="field__label">

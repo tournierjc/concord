@@ -78,7 +78,10 @@ const REJECTED: Array<[string, string]> = [
   ['172.32.0.1 — juste hors de 172.16.0.0/12', sdpCandidate('172.32.0.1')],
   ['192.169.0.1 — juste hors de 192.168.0.0/16', sdpCandidate('192.169.0.1')],
   ['11.0.0.1 — juste hors de 10.0.0.0/8', sdpCandidate('11.0.0.1')],
-  ['100.64.0.1 — CGNAT, pas RFC1918 (lecture stricte)', sdpCandidate('100.64.0.1')],
+  // 2026-11-02 (e2e deux-postes) : les ponts que la machine héberge elle-même (Docker 172.17,
+  // CGNAT Tailscale 100.64/10) sont acceptés EN HOST : jamais routables depuis Internet, donc
+  // preuve de proximité réelle. Les adresses publiques en `host` restent rejetées plus bas.
+  // Le srflx/prflx/relay vers ces portées reste refusé par le TYPE (vérifié ci-dessous).
   ['ligne vide', ''],
   ['ligne sans adresse (bruit)', 'a=candidate:1 1 udp 2122260223 '],
 ]
@@ -155,7 +158,10 @@ describe('ice-filter — RFC1918 et voisinage, lus à travers le contrat public 
     assert.equal(verdict('172.32.0.0'), false)
     assert.equal(verdict('192.168.1.1'), true)
     assert.equal(verdict('192.167.1.1'), false)
-    assert.equal(verdict('100.64.0.1'), false)
+    // ponts locaux acceptés en host (voir le commentaire du bloc REJECTED) ; hors de ces
+    // portées, la lecture RFC1918 stricte demeure : 100.63.255.255 (juste sous le CGNAT) refuse.
+    assert.equal(verdict('100.64.0.1'), true)
+    assert.equal(verdict('100.63.255.255'), false)
   })
 
   it('reconnaît loopback et link-local', () => {

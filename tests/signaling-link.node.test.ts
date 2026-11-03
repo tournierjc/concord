@@ -130,7 +130,9 @@ test('deux nœuds sur sockets TCP loopback échangent join, offer, answer et ice
   assert.equal(offer?.kind, 'offer');
   if (offer?.kind === 'offer') {
     assert.equal(offer.from, clientId);
-    assert.equal(offer.payload, 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n');
+    // 2026-11-02 (e2e deux-postes) : la charge utile survit au fil en objet à la forme que
+    // l'as émettrice lui donne — ici un « sdp » (le mesh émet des RTCSessionDescriptions).
+    assert.deepEqual(offer.payload, { sdp: 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n' });
   }
 
   // answer : hôte → client.
@@ -311,7 +313,10 @@ test('fromWire filtre aussi à l’entrée et préserve un candidat JSON', () =>
   );
   const payload = { candidate: 'candidate:1 1 UDP 1 192.168.0.9 4000 typ host', sdpMid: 'audio' };
   const decoded = fromWire({ type: 'ice', from: 'p1', to: 'p2', candidate: JSON.stringify(payload) });
-  assert.deepEqual(decoded, { kind: 'ice', from: 'p1', payload });
+  assert.ok(decoded && decoded.kind === 'ice');
+  // Le câble est textuel : le candidat JSON arrive décodé en chaîne (le mesh appelle
+  // decodeCandidatePayload avant addRemoteCandidate — même valeur, même sdpMid).
+  assert.equal(decoded.payload, JSON.stringify(payload));
   assert.equal(
     decodeCandidatePayload('candidate:1 1 UDP 1 192.168.0.9 4000 typ host'),
     'candidate:1 1 UDP 1 192.168.0.9 4000 typ host',

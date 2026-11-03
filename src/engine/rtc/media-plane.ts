@@ -49,6 +49,13 @@ import {
   withOpusSdpParams,
 } from './media-config.ts'
 import type { MicrophoneConstraints } from './media-config.ts'
+import {
+  createVoiceChainHost,
+  type FilterAudioContextLike,
+  type VoiceChainFactory,
+  type VoiceChainHostHandle,
+} from './voice-chain.ts'
+import type { VoiceFilterId } from './voice-filters.ts'
 
 /** Le connecteur d'un flux vers un analyseur, tel que la page le fait réellement. */
 export type MeterSource = (
@@ -137,6 +144,26 @@ export interface MediaPlaneOptions {
    * `talk.mode` ; le moteur, lui, ne connaît aucun réglage.
    */
   microOpenOnStart?: boolean
+  /**
+   * Voix appliquée au micro local (filtres vocaux, 2026-11-03, demande JC).
+   *
+   * `undefined`/`'none'` = la voix historique : AUCUN nœud de filtre, la piste brute part
+   * aux pairs (non-régression vérifiée par test). Les autres valeurs demandent au plan média
+   * d'insérer la chaîne de filtrage (`renderer/voice-filter.ts`) ENTRE le micro et les pairs.
+   * Le constructeur de chaîne est INJECTÉ (`voiceChainFactory`) : le plan ne sait pas, et ne
+   * doit pas savoir, construire des nœuds Web Audio — même convention que `meterSource`.
+   * La coquille dérive ce champ de `reglages.audio.voiceFilter` ; le moteur ne lit aucun
+   * réglage. Un filtre qui lève envoie la voix BRUTE et se trace : une voix refusée n'est pas
+   * une session muette.
+   */
+  voiceFilter?: VoiceFilterId
+  /**
+   * Le constructeur de la chaîne de filtres (la production : `createVoiceFilterChain` du
+   * renderer, liée à son contexte). `undefined` = pas de filtrage possible (le moteur rend
+   * la piste brute, même si `voiceFilter` est demandé — tracé). Test : une chaîne doublure
+   * éprouve le cycle de vie sans Web Audio.
+   */
+  voiceChainFactory?: VoiceChainFactory
 }
 
 /** Compteurs d'un pair distant. Tous les champs sont des nombres (jamais undefined). */
@@ -158,6 +185,20 @@ export interface MediaPlane {
   // en fin de collecte, et qu'un relais peut le transmettre tel quel.
   addRemoteCandidate(remoteId: string, c: RTCIceCandidateInit | null): Promise<void>
   setTransmitting(on: boolean): void
+  /**
+   * Change la VOIX du micro local en vol (filtres vocaux, 2026-11-03, demande JC) : le graphe
+   * de filtrage est remplacé sur la MÊME destination — les pairs ne voient jamais la piste
+   * changer d'identité, donc AUCUNE renégociation WebRTC.
+   *
+   * Rend la piste réellement envoyée après le changement, ou `null` si le micro n'est pas
+   * démarré (le réglage est alors une intention que `startMicrophone()` appliquera — jamais un
+   * silence prétendu). Une voix que la page ne sait pas fabriquer (page sans `AudioWorklet`
+   * qui demande un timbre) envoie la voix BRUTE et se trace : un réglage qui n'a pas pris,
+   * pas une panne.
+   */
+  setVoiceFilter(id: VoiceFilterId): MediaStreamTrack | null
+  /** La voix réellement appliquée (`null` = micro non démarré), pas l'intention du réglage. */
+  voiceFilter(): VoiceFilterId | null
   /**
    * Niveau RMS (0..1) d'un pair : **un analyseur par pair** (AD-17 / D4).
    *
@@ -349,6 +390,12 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
   let localStream: MediaStream | null = null
   let localTrack: MediaStreamTrack | null = null
   let audioContext: AudioContext | null = null
+  /**
+   * Le châssis des filtres vocaux (2026-11-03) : ouvert par `startMicrophone`, consulté par
+   * `setVoiceFilter`, fermé par `close`. `null` = micro non démarré (le réglage est alors une
+   * intention pour la prochaine ouverture, jamais un silence prétendu).
+   */
+  let voiceHost: VoiceChainHostHandle | null = null
 
   function warn(message: string): void {
     console.warn(`[media-plane ${o.localId}] ${message}`)
@@ -630,12 +677,50 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
       throw new Error('le flux micro ne contient aucune piste audio')
     }
     localStream = stream
-    localTrack = first
+    // Filtres vocaux (2026-11-03, demande JC) : la chaîne est ouverte AVANT que la piste
+    // locale soit retenue — `localTrack` devient la piste des pairs (filtrée, ou brute si la
+    // chaîne est absente/a levé, tracé dans les deux cas). `setTransmitting` et `attachLocalTrack`
+    // agissent donc sur la piste filtrée, jamais sur la piste micro : c'est le point unique
+    // d'insertion, et le micro local n'est jamais envoyé brut quand une voix est demandée.
+    // Le châssis appelle le constructeur MÊME pour « none » (une chaîne saine ne pose aucun
+    // nœud — vérifié en test — et un échec de fabrication reste tracé). Le contexte audio de la
+    // page est créé ICI et partagé avec les vumètres : une horloge par page (le double
+    // `AudioContext` est le piège RMS du repo), et `resume()` est posé avant fabrication.
+    const initialVoice = o.voiceFilter ?? 'none'
+    let buildChain: VoiceChainFactory | undefined
+    let chainContext: FilterAudioContextLike | undefined
+    if (o.voiceChainFactory !== undefined) {
+      const factory = o.voiceChainFactory
+      if (audioContext === null) {
+        audioContext = new AudioContext()
+      }
+      const filterContext = audioContext
+      filterContext.resume().catch((error: unknown) => {
+        warn(`AudioContext.resume a échoué (filtre vocal) : ${describeError(error)}`)
+      })
+      buildChain = factory
+      chainContext = filterContext
+    }
+    const chainContextForHost = chainContext
+    voiceHost = createVoiceChainHost({
+      stream,
+      track: first,
+      warn,
+      ...(chainContextForHost === undefined ? {} : { context: chainContextForHost }),
+      ...(buildChain === undefined ? {} : { buildChain }),
+    })
+    const outgoing = voiceHost.open(initialVoice)
+    localTrack = outgoing
     // Push-to-talk : micro fermé au repos, ouvert par setTransmitting(true) — SAUF si
     // l'appelant a demandé l'inverse à la construction (mode VAD, SPEC-019 avenant
     // 2026-11-02) : en détection de voix le micro doit rester ouvert, c'est la mesure qui
     // décide de qui parle. Le défaut (`undefined`) garde le comportement d'avant.
-    localTrack.enabled = o.microOpenOnStart === true
+    // Le levier est la piste ENVOYÉE aux pairs (filtrée quand une voix vit, brute sinon) —
+    // jamais la piste micro, qui continuerait d'alimenter le graphe de filtrage en silence.
+    outgoing.enabled = o.microOpenOnStart === true
+    // Le vumètre local mesure le MICRO BRUT (la piste `first`), pas la piste filtrée : le
+    // push-to-talk et le battement VAD décident sur la voix réelle, pas sur sa version robot —
+    // un robot dont la modulation d'anneau ferait osciller le détecteur n'est pas un VAD.
     addMeter(LOCAL_METER_KEY, stream, 'micro local')
     for (const [remoteId, peer] of peers) {
       await attachLocalTrack(remoteId, peer)
@@ -714,6 +799,19 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     track.enabled = on
   }
 
+  function setVoiceFilter(id: VoiceFilterId): MediaStreamTrack | null {
+    if (voiceHost === null) {
+      // Micro non démarré : le réglage est une intention (o.voiceFilter est lu à l'ouverture),
+      // jamais un succès prétendu. La coquille n'a rien à renégocier.
+      return null
+    }
+    return voiceHost.apply(id)
+  }
+
+  function voiceFilter(): VoiceFilterId | null {
+    return voiceHost === null ? null : voiceHost.current()
+  }
+
   async function stats(remoteId: string): Promise<PeerStats> {
     const peer = peerFor(remoteId)
     const report = await peer.pc.getStats()
@@ -744,6 +842,10 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     }
     peers.clear()
     meters.clear()
+    if (voiceHost !== null) {
+      voiceHost.close()
+      voiceHost = null
+    }
     if (localStream !== null) {
       for (const track of localStream.getTracks()) track.stop()
     }
@@ -765,6 +867,8 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     acceptAnswer,
     addRemoteCandidate,
     setTransmitting,
+    setVoiceFilter,
+    voiceFilter,
     level,
     stats,
     close,
