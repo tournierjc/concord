@@ -24,6 +24,7 @@ import {
   defaultSettings,
   isValidAccelerator,
   normalizeAccelerator,
+  interpretSettings,
   parseSettings,
   serializeSettings,
   resolveDisplayName,
@@ -333,6 +334,39 @@ test('noiseGate : absent d’un fichier antérieur ⇒ true (la porte est le dé
   assert.equal(parsed.ok, true)
   if (!parsed.ok) return
   assert.equal(parsed.value.audio.noiseGate, true)
+})
+
+test('interpretSettings : noiseGate et noiseSuppression absents ⇒ leur défaut, le reste du fichier reste', () => {
+  const base = defaultSettings()
+  const audio = { ...base.audio } as Record<string, unknown>
+  delete audio['noiseGate']
+  delete audio['noiseSuppression']
+  audio['voiceFilter'] = 'radio'
+  const parsed = interpretSettings({ ...base, nickname: 'bulma', audio })
+  assert.equal(parsed.ok, true)
+  if (!parsed.ok) return
+  assert.equal(parsed.value.nickname, 'bulma')
+  assert.equal(parsed.value.audio.voiceFilter, 'radio')
+  assert.equal(parsed.value.audio.noiseGate, true)
+  assert.equal(parsed.value.audio.noiseSuppression, true)
+  assert.equal(parsed.repaired.length, 0)
+})
+
+test('interpretSettings : noiseGate false est gardé, une valeur invalide ne répare que ce champ', () => {
+  const base = defaultSettings()
+  const kept = interpretSettings({ ...base, audio: { ...base.audio, noiseGate: false, voiceFilter: 'child' } })
+  assert.equal(kept.ok, true)
+  if (!kept.ok) return
+  assert.equal(kept.value.audio.noiseGate, false)
+  assert.equal(kept.value.audio.voiceFilter, 'child')
+  assert.equal(kept.repaired.length, 0)
+
+  const bad = interpretSettings({ ...base, audio: { ...base.audio, noiseGate: 'oui', voiceFilter: 'man' } })
+  assert.equal(bad.ok, true)
+  if (!bad.ok) return
+  assert.equal(bad.value.audio.noiseGate, true)
+  assert.equal(bad.value.audio.voiceFilter, 'man')
+  assert.ok(bad.repaired.some((error) => error.path === 'audio.noiseGate'))
 })
 
 test('voiceFilter : absent d’un fichier antérieur ⇒ « none » (la voix historique, rétro-compat)', () => {

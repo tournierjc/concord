@@ -1300,6 +1300,7 @@ function interpretCurrent(source: Dict, defaults: Settings, repaired: SettingsEr
       outputDeviceId: takeNullableString(audioKnown['outputDeviceId'], defaults.audio.outputDeviceId, 'audio.outputDeviceId', repaired, 128),
       noiseSuppression: takeBoolean(audioKnown['noiseSuppression'], defaults.audio.noiseSuppression, 'audio.noiseSuppression', repaired),
       echoCancellation: takeBoolean(audioKnown['echoCancellation'], defaults.audio.echoCancellation, 'audio.echoCancellation', repaired),
+      noiseGate: takeBoolean(audioKnown['noiseGate'], defaults.audio.noiseGate, 'audio.noiseGate', repaired),
       inputGain: takeNumber(audioKnown['inputGain'], defaults.audio.inputGain, 'audio.inputGain', repaired, 0, 2, false),
       voiceFilter: takeEnum(audioKnown['voiceFilter'], defaults.audio.voiceFilter, 'audio.voiceFilter', repaired, VOICE_FILTER_VALUES),
       duckOthers: takeBoolean(audioKnown['duckOthers'], defaults.audio.duckOthers, 'audio.duckOthers', repaired),
