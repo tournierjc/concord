@@ -13,7 +13,11 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
-import { voiceFilterCharacter } from '../src/engine/rtc/voice-filters.ts'
+import { VOICE_FILTER_IDS, voiceFilterCharacter } from '../src/engine/rtc/voice-filters.ts'
+import type { VoiceFilterId } from '../src/engine/rtc/voice-filters.ts'
+import { noiseGateWorkletSource, processNoiseGate, createNoiseGateState } from '../src/renderer/noise-gate.ts'
+import { createVoiceFilterChain } from '../src/renderer/voice-filter.ts'
+import { FakeMediaStream, FakeTrack } from './fake-rtc.ts'
 import {
   VOICE_WORKLET_INLINE_MARK,
   createVoiceCharacterNode,
@@ -281,14 +285,24 @@ describe('voice-character — le worklet chargé est le corps inliné, et l’é
       const node = createVoiceCharacterNode(live, spec)
       await flush()
       assert.equal(loads, 1)
-      assert.equal(voiceProcessorPhase().phase, 'live')
-      const processor = node.input instanceof FakeAudioNode ? node.input.outgoing[0] : undefined
-      assert.ok(processor instanceof RecordingWorklet, 'le processeur est entre l’entrée et la sortie')
+      assert.ok(node.input instanceof FakeAudioNode)
+      const processor = node.input.outgoing.find((entry) => entry instanceof RecordingWorklet)
+      assert.ok(processor instanceof RecordingWorklet, 'le processeur est branché sur l’entrée')
       assert.equal(processor.name, 'concord-voice-character')
+      assert.deepEqual(processor.options.outputChannelCount, [1])
       const options = processor.options.processorOptions as { pitchRatio: number; formantScale: number }
       assert.equal(options.pitchRatio, spec.pitchRatio)
       assert.equal(options.formantScale, spec.formantScale)
-      assert.ok(processor.outgoing.includes(node.output as FakeAudioNode))
+      const dry = node.input.outgoing.find((entry): entry is FakeAudioNode => entry instanceof FakeAudioNode && !(entry instanceof RecordingWorklet))
+      assert.ok(dry instanceof FakeAudioNode)
+      assert.equal((dry as { gain?: { value: number } }).gain?.value, 1, 'le sec reste ouvert tant que le processeur n’a pas de signal')
+      assert.ok(dry.outgoing.includes(node.output as FakeAudioNode))
+      const wet = processor.outgoing.find((entry): entry is FakeAudioNode => entry instanceof FakeAudioNode)
+      assert.ok(wet instanceof FakeAudioNode)
+      assert.equal((wet as { gain?: { value: number } }).gain?.value, 0)
+      processor.port.onmessage?.({ data: { type: 'ready' } } as MessageEvent)
+      assert.equal((wet as { gain?: { value: number } }).gain?.value, 1)
+      assert.equal((dry as { gain?: { value: number } }).gain?.value, 0)
       createVoiceCharacterNode(live, spec)
       await flush()
       assert.equal(loads, 1, 'le module n’est enregistré qu’une fois par contexte')
@@ -304,14 +318,252 @@ describe('voice-character — le worklet chargé est le corps inliné, et l’é
       assert.match(voiceProcessorPhase().detail, /CSP/)
       assert.ok(errors.some((line) => line.includes('AudioWorklet refusé') && line.includes('CSP')))
       assert.ok(bridge.input instanceof FakeAudioNode)
-      assert.equal(bridge.input.disconnectCalls, 0, 'le pont entrée→sortie reste : seul l’égaliseur est entendu')
-      assert.ok(bridge.input.outgoing.includes(bridge.output as FakeAudioNode))
+      const stillDry = bridge.input.outgoing.find((entry): entry is FakeAudioNode => entry instanceof FakeAudioNode)
+      assert.ok(stillDry instanceof FakeAudioNode)
+      assert.equal((stillDry as { gain?: { value: number } }).gain?.value, 1)
+      assert.ok(stillDry.outgoing.includes(bridge.output as FakeAudioNode), 'le sec reste branché si le module est refusé')
+      assert.equal(
+        bridge.input.outgoing.some((entry) => entry instanceof RecordingWorklet),
+        false,
+        'un module refusé ne remplace pas la voix par un nœud mort',
+      )
       bridge.close()
     } finally {
       globalThis.AudioWorkletNode = previousNode
       URL.createObjectURL = previousCreate
       URL.revokeObjectURL = previousRevoke
       console.error = previousError
+    }
+  })
+})
+
+interface WorkletProcessor {
+  process(inputs: Float32Array[][], outputs: Float32Array[][]): boolean
+  port: { onmessage: ((event: { data: unknown }) => void) | null; postMessage(data: unknown): void }
+}
+
+function loadWorklet(source: string, sampleRate = SAMPLE_RATE): Map<string, new (options: unknown) => WorkletProcessor> {
+  const processors = new Map<string, new (options: unknown) => WorkletProcessor>()
+  class AudioWorkletProcessor {
+    port: WorkletProcessor['port']
+    constructor() {
+      const port: WorkletProcessor['port'] = {
+        onmessage: null,
+        postMessage(data: unknown) {
+          port.onmessage?.({ data })
+        },
+      }
+      this.port = port
+    }
+  }
+  const registerProcessor = (name: string, ctor: new (options: unknown) => WorkletProcessor): void => {
+    processors.set(name, ctor)
+  }
+  new Function('AudioWorkletProcessor', 'registerProcessor', 'sampleRate', source)(
+    AudioWorkletProcessor,
+    registerProcessor,
+    sampleRate,
+  )
+  return processors
+}
+
+function loudSine(block: number): Float32Array {
+  const input = new Float32Array(128)
+  for (let i = 0; i < input.length; i += 1) {
+    const t = block * 128 + i
+    input[i] = 0.25 * Math.sin((2 * Math.PI * 180 * t) / SAMPLE_RATE)
+  }
+  return input
+}
+
+function rmsOf(samples: Float32Array): number {
+  let energy = 0
+  for (let i = 0; i < samples.length; i += 1) energy += (samples[i] ?? 0) * (samples[i] ?? 0)
+  return Math.sqrt(energy / samples.length)
+}
+
+describe('voice-worklet — le processeur évalué écrit vraiment, pour chaque voix', () => {
+  it('la porte construite depuis la chaîne ne jette plus et laisse passer une voix forte', () => {
+    const processors = loadWorklet(noiseGateWorkletSource())
+    const Ctor = processors.get('concord-noise-gate')
+    assert.ok(Ctor !== undefined)
+    const live = new Ctor({ processorOptions: { thresholdDb: -40 } })
+    const reference = createNoiseGateState(SAMPLE_RATE, -40)
+    let energy = 0
+    let nans = 0
+    for (let block = 0; block < 80; block += 1) {
+      const input = loudSine(block)
+      const output = new Float32Array(128)
+      const copy = new Float32Array(input)
+      const expected = new Float32Array(128)
+      assert.equal(live.process([[input]], [[output]]), true)
+      processNoiseGate(reference, copy, expected)
+      for (let i = 0; i < 128; i += 1) {
+        assert.equal(output[i], expected[i], `porte bloc ${block} échantillon ${i}`)
+        if (output[i] !== output[i]) nans += 1
+        if (block > 20) energy += (output[i] ?? 0) * (output[i] ?? 0)
+      }
+    }
+    assert.equal(nans, 0)
+    assert.ok(Math.sqrt(energy / (59 * 128)) > 0.05, 'une voix au-dessus du seuil traverse la porte')
+  })
+
+  it('un processeur muet pendant 500 ms repasse la voix sèche et le signale', () => {
+    const processors = loadWorklet(noiseGateWorkletSource())
+    const Ctor = processors.get('concord-noise-gate')
+    assert.ok(Ctor !== undefined)
+    const messages: Array<{ type?: string }> = []
+    const proc = new Ctor({ processorOptions: { thresholdDb: -40, forceSilence: true } })
+    proc.port.onmessage = (event) => {
+      messages.push(event.data as { type?: string })
+    }
+    const blocks = Math.ceil((SAMPLE_RATE * 0.5) / 128) + 2
+    let last = new Float32Array(128)
+    let early = new Float32Array(128)
+    for (let block = 0; block < blocks; block += 1) {
+      const input = loudSine(block)
+      const output = new Float32Array(128)
+      proc.process([[input]], [[output]])
+      for (let i = 0; i < output.length; i += 1) assert.equal(output[i] === output[i], true)
+      if (block === 8) early = output.slice()
+      last = output
+    }
+    assert.equal(rmsOf(early), 0, 'avant 500 ms le processeur forcé au silence écrit des zéros')
+    const input = loudSine(blocks - 1)
+    for (let i = 0; i < last.length; i += 1) assert.equal(last[i], input[i])
+    assert.ok(messages.some((message) => message.type === 'fallback'))
+  })
+
+  for (const id of ['deep', 'man', 'woman', 'child'] as const) {
+    it(`${id} : process() du worklet réel est non silencieux et sans NaN`, () => {
+      const spec = voiceFilterCharacter(id)
+      assert.ok(spec !== null)
+      const processors = loadWorklet(voiceCharacterWorkletSource())
+      const Ctor = processors.get('concord-voice-character')
+      assert.ok(Ctor !== undefined)
+      const proc = new Ctor({ processorOptions: spec })
+      let energy = 0
+      let count = 0
+      for (let block = 0; block < 400; block += 1) {
+        const input = loudSine(block)
+        const output = new Float32Array(128)
+        assert.equal(proc.process([[input]], [[output]]), true)
+        if (block < 40) continue
+        for (let i = 0; i < output.length; i += 1) {
+          assert.equal(output[i] === output[i], true, `${id} NaN bloc ${block}`)
+          energy += (output[i] ?? 0) * (output[i] ?? 0)
+          count += 1
+        }
+      }
+      assert.ok(Math.sqrt(energy / count) > 0.02, `${id} rms trop faible`)
+    })
+  }
+})
+
+describe('voice-worklet — chaque voix du graphe, porte comprise, sort du son', () => {
+  it('none, robot, radio et les timbres passent un signal réel par les worklets câblés', async () => {
+    const saved = Object.getOwnPropertyDescriptor(globalThis, 'MediaStream')
+    const previousNode = globalThis.AudioWorkletNode
+    const previousCreate = URL.createObjectURL
+    const previousRevoke = URL.revokeObjectURL
+    const processors = new Map<string, new (options: unknown) => WorkletProcessor>()
+    class LiveWorklet extends FakeAudioNode {
+      readonly name: string
+      readonly options: AudioWorkletNodeOptions
+      readonly processor: WorkletProcessor
+      readonly port: WorkletProcessor['port']
+      constructor(_context: unknown, name: string, options: AudioWorkletNodeOptions) {
+        super()
+        const Ctor = processors.get(name)
+        if (Ctor === undefined) throw new Error(`processeur absent : ${name}`)
+        this.name = name
+        this.options = options
+        this.processor = new Ctor(options)
+        this.port = this.processor.port
+      }
+    }
+    const blobs: Blob[] = []
+    Object.defineProperty(globalThis, 'MediaStream', { value: FakeMediaStream, configurable: true, writable: true })
+    globalThis.AudioWorkletNode = LiveWorklet as unknown as typeof AudioWorkletNode
+    URL.createObjectURL = (blob: Blob) => {
+      const id = blobs.push(blob) - 1
+      return `blob:${id}`
+    }
+    URL.revokeObjectURL = () => undefined
+    const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+    try {
+      for (const id of VOICE_FILTER_IDS) {
+        processors.clear()
+        const context = new FakeAudioContext()
+        context.audioWorklet.addModule = async (url: string) => {
+          const source = await blobs[Number(url.slice('blob:'.length))]?.text()
+          if (source === undefined) throw new Error('blob vide')
+          const found = loadWorklet(source)
+          for (const [name, ctor] of found) processors.set(name, ctor)
+        }
+        const chain = createVoiceFilterChain(
+          context as never,
+          new FakeMediaStream([new FakeTrack('micro')]),
+          id as VoiceFilterId,
+          { noiseGate: true, noiseGateThresholdDb: -40 },
+        )
+        await flush()
+        await flush()
+        const source = context.created.sources[0]
+        const destination = context.created.destinations[0]
+        assert.ok(source !== undefined && destination !== undefined, id)
+        const seen = new Set<FakeAudioNode>()
+        const worklets: LiveWorklet[] = []
+        const visit = (node: FakeAudioNode): void => {
+          if (seen.has(node)) return
+          seen.add(node)
+          if (node instanceof LiveWorklet) worklets.push(node)
+          for (const next of node.outgoing) {
+            if (next instanceof FakeAudioNode) visit(next)
+          }
+        }
+        visit(source)
+        assert.ok(worklets.some((node) => node.name === 'concord-noise-gate'), `${id} : la porte est dans le graphe`)
+        for (const node of worklets) assert.deepEqual(node.options.outputChannelCount, [1], node.name)
+        if (id === 'deep' || id === 'man' || id === 'woman' || id === 'child') {
+          assert.ok(worklets.some((node) => node.name === 'concord-voice-character'), `${id} : le timbre est câblé`)
+        }
+        const reaches = (node: FakeAudioNode, target: FakeAudioNode, walk = new Set<FakeAudioNode>()): boolean => {
+          if (node === target) return true
+          if (walk.has(node)) return false
+          walk.add(node)
+          return node.outgoing.some((next) => next instanceof FakeAudioNode && reaches(next, target, walk))
+        }
+        assert.equal(reaches(source, destination), true, `${id} : la source atteint la destination`)
+        const ordered = [
+          ...worklets.filter((node) => node.name === 'concord-noise-gate'),
+          ...worklets.filter((node) => node.name === 'concord-voice-character'),
+        ]
+        let energy = 0
+        let count = 0
+        for (let block = 0; block < 400; block += 1) {
+          let buffer = loudSine(block)
+          for (const node of ordered) {
+            const output = new Float32Array(buffer.length)
+            assert.equal(node.processor.process([[buffer]], [[output]]), true, id)
+            buffer = output
+          }
+          if (block < 40) continue
+          for (let i = 0; i < buffer.length; i += 1) {
+            assert.equal(buffer[i] === buffer[i], true, `${id} NaN`)
+            energy += (buffer[i] ?? 0) * (buffer[i] ?? 0)
+            count += 1
+          }
+        }
+        assert.ok(Math.sqrt(energy / count) > 0.02, `${id} : le graphe traité est silencieux`)
+        chain.close()
+      }
+    } finally {
+      globalThis.AudioWorkletNode = previousNode
+      URL.createObjectURL = previousCreate
+      URL.revokeObjectURL = previousRevoke
+      if (saved === undefined) Reflect.deleteProperty(globalThis, 'MediaStream')
+      else Object.defineProperty(globalThis, 'MediaStream', saved)
     }
   })
 })
