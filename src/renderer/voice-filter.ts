@@ -67,6 +67,10 @@ export interface FilterAudioContext {
    * Le flux à filtrer, fourni par l'appelant (jamais construit par la fabrique — cf.
    * `FilterStreamLike`).
    */
+  /**
+   * Chromium n'accepte qu'un vrai `MediaStream` (`instanceof`). Un objet qui se contente
+   * de `getAudioTracks` lève `parameter 1 is not of type 'MediaStream'`.
+   */
   createMediaStreamSource(stream: FilterStreamLike): FilterNodeLike
   createMediaStreamDestination(): FilterDestinationLike
   createGain(): GainLike
@@ -262,21 +266,14 @@ function buildSpec(context: FilterAudioContext, spec: FilterNodeSpec): BuiltSpec
 }
 
 /**
- * Le flux MONOPISTE présenté à `createMediaStreamSource` : un objet lecture-seule dont la seule
- * méthode est `getAudioTracks` (la facette `FilterStreamLike`). La fabrique ne construit jamais
- * `new MediaStream(...)` (global navigateur, absent de Node) et n'écrit jamais dans le flux
- * capté (cf. le commentaire de `headOf` — le bug du double clic).
+ * Flux monopiste NATIF pour `createMediaStreamSource`.
+ *
+ * Chromium refuse un objet maison (`getAudioTracks` seul) : le paramètre doit être un
+ * `MediaStream` réel. Un flux NEUF qui ne porte que cette piste ne touche pas le flux
+ * capté — `addTrack` sur celui-ci dédoublait l'entrée du nœud source (bug du double clic).
  */
-function wrapTrackAsStream(track: MediaStreamTrack): FilterStreamLike {
-  return {
-    getAudioTracks: () => [track],
-    // Le flux présenté à la source n'est JAMAIS un réceptacle : `addTrack` n'y va pas (la
-    // fabrique ne l'appelle plus), et un appel qui reviendrait par accident lèverait au lieu
-    // de stocker en silence un doublon que les doubles ne verraient pas.
-    addTrack: () => {
-      throw new Error('[voice-filter] addTrack sur le flux de la source : la fabrique ne doit pas écrire dans le flux (bug du double clic, 2026-11-03)')
-    },
-  }
+export function singleTrackMediaStream(track: MediaStreamTrack): MediaStream {
+  return new MediaStream([track])
 }
 
 /**
@@ -347,9 +344,8 @@ export function createVoiceFilterChain(
    * modulerait une porteuse déjà décalée — un robot dont le vrombissement monterait avec la
    * voix, ce que la recette ne promet pas).
    *
-   * La source est créée sur un flux mono-piste en lecture seule (`wrapTrackAsStream`) : jamais
-   * sur un flux qu'elle construirait (`new MediaStream` = global navigateur, absent de Node),
-   * et jamais en écrivant dans le flux capté (le bug du double clic, cf. `headOf`).
+   * La source est créée sur un `MediaStream` natif neuf, une seule piste (`singleTrackMediaStream`).
+   * On n'écrit jamais dans le flux capté (le bug du double clic, cf. `headOf`).
    */
   function headOf(id: VoiceFilterId): FilterNodeLike {
     let entry = sourceNode
@@ -363,10 +359,9 @@ export function createVoiceFilterChain(
       // navigateur, la source d'un flux dont la piste a été re-posée en double ses entrées ;
       // au premier clic sur une voix, les deux copies traversaient le filtre en parallèle et
       // se neutralisaient — la voix ne changeait qu'au SECOND clic (débranchage/remontage).
-      // Les doubles le laient passer : `FakeMediaStream.addTrack` stocke en liste, le doublon
-      // était invisible. La facette ne demande que `getAudioTracks` : c'est un flux FAUX que la
-      // fabrique présente à `createMediaStreamSource`, construit par le port injecté.)
-      entry = context.createMediaStreamSource(wrapTrackAsStream(source))
+      // Un objet maison à la place d'un MediaStream passait les doubles et levait dans Chromium :
+      // createMediaStreamSource exige un vrai MediaStream. Un flux neuf, une piste, les deux.)
+      entry = context.createMediaStreamSource(singleTrackMediaStream(source))
       sourceNode = entry
     }
     // Gain d'entrée : le SEUL contrôle de niveau. L'AGC du navigateur est coupé

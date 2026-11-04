@@ -19,7 +19,7 @@
  *   node --test tests/mic-check.node.test.ts
  */
 
-import { describe, it } from 'node:test'
+import { after, before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
@@ -40,7 +40,20 @@ import {
 } from './fake-rtc.ts'
 import { defaultSettings } from '../src/shell/settings-schema.ts'
 import type { VoiceFilterId } from '../src/engine/rtc/voice-filters.ts'
-import type { FilterStreamLike, VoiceFilterChain } from '../src/renderer/voice-filter.ts'
+import { createVoiceFilterChain, type FilterStreamLike, type VoiceFilterChain } from '../src/renderer/voice-filter.ts'
+
+const savedMediaStream = Object.getOwnPropertyDescriptor(globalThis, 'MediaStream')
+before(() => {
+  Object.defineProperty(globalThis, 'MediaStream', {
+    value: FakeMediaStream,
+    configurable: true,
+    writable: true,
+  })
+})
+after(() => {
+  if (savedMediaStream === undefined) Reflect.deleteProperty(globalThis, 'MediaStream')
+  else Object.defineProperty(globalThis, 'MediaStream', savedMediaStream)
+})
 
 /* ------------------------------------------------------------------ */
 /* Doubles                                                              */
@@ -285,6 +298,52 @@ describe('mic-check — la panne ne laisse rien ouvert', () => {
     assert.equal(r.chains.length, 2)
     assert.equal(r.chains[0]?.closeCalls, 1, 'la première écoute est démontée')
     assert.equal(micCheckSnapshot().applied?.voiceFilter, 'robot', 'la seconde voix est celle affichée')
+    stopMicCheck()
+  })
+})
+
+describe('mic-check — createMediaStreamSource exige un MediaStream natif', () => {
+  it('le test du micro et la chaîne passent un flux neuf, un objet maison est refusé', async () => {
+    stopMicCheck()
+    const context = new FakeAudioContext()
+    assert.throws(
+      () =>
+        context.createMediaStreamSource({
+          getAudioTracks: () => [],
+          addTrack: () => undefined,
+        } as unknown as MediaStream),
+      /not of type 'MediaStream'/,
+    )
+    const track = new FakeTrack('micro')
+    const captured = new FakeMediaStream([track])
+    let addTrackCalls = 0
+    const original = captured.addTrack.bind(captured)
+    captured.addTrack = (next: FakeTrack) => {
+      addTrackCalls += 1
+      original(next)
+    }
+    const port: MicCheckPort = {
+      getUserMedia: async () => captured as unknown as MediaStream,
+      createAudioContext: () => context as unknown as import('../src/renderer/voice-filter.ts').FilterAudioContext,
+      buildChain: createVoiceFilterChain,
+      speakers: { play: () => undefined, silence: () => undefined },
+      makeBeat: () =>
+        ({
+          repeat: () => 0,
+          cancel: () => undefined,
+          now: () => 0,
+        }) as unknown as import('../src/renderer/browser-beat.ts').RendererBeat,
+    }
+    await startMicCheck(settingsLike(), port)
+    assert.ok(context.created.sources.length >= 2, 'chaîne d’appel et barre RMS créent chacune une source')
+    for (const source of context.created.sources) {
+      assert.ok(source.stream instanceof MediaStream, 'chaque source reçoit un MediaStream')
+      assert.notEqual(source.stream, captured, 'le flux passé au contexte est neuf')
+      assert.equal(source.stream.getAudioTracks().length, 1)
+      assert.equal(source.stream.getAudioTracks()[0], track)
+    }
+    assert.equal(addTrackCalls, 0, 'le flux capté n’est pas écrit')
+    assert.equal(micCheckSnapshot().status, 'listening')
     stopMicCheck()
   })
 })

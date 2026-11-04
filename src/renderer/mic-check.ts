@@ -30,7 +30,7 @@
 
 import { browserBeat, type RendererBeat } from './browser-beat.ts';
 import { buildMicrophoneConstraints, toMediaTrackConstraints } from '../engine/rtc/media-config.ts';
-import { createVoiceFilterChain } from './voice-filter.ts';
+import { createVoiceFilterChain, singleTrackMediaStream } from './voice-filter.ts';
 import type { AnalyserLike, FilterAudioContext, FilterStreamLike, VoiceFilterChain, VoiceProcessOptions } from './voice-filter.ts';
 import type { VoiceFilterId } from '../engine/rtc/voice-filters.ts';
 import type { Settings } from '../shell/settings-schema';
@@ -110,7 +110,10 @@ export function createAnalyserMeter(
   const analyser = context.createAnalyser();
   analyser.fftSize = METER_FFT_SIZE;
   analyser.smoothingTimeConstant = 0;
-  const source = context.createMediaStreamSource(stream);
+  const track = stream.getAudioTracks()[0];
+  if (track === undefined) return null;
+  // Même contrat que la chaîne d'appel : un MediaStream natif monopiste, pas le flux capté.
+  const source = context.createMediaStreamSource(singleTrackMediaStream(track));
   source.connect(analyser as unknown as Parameters<typeof source.connect>[0]);
   const buffer = new Float32Array(METER_FFT_SIZE);
   return () => {
