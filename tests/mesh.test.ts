@@ -159,6 +159,9 @@ class FakePlane implements MediaPlane {
   public async applyCaptureConstraints(): Promise<void> {
     return undefined
   }
+  public async replaceMicrophone(): Promise<void> {
+    return undefined
+  }
 
   /**
    * Doublure d'`ontrack` : le plan média réel appelle `onRemoteStream(peerId, stream)`

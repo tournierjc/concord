@@ -177,10 +177,13 @@ export interface VoiceFilterChain {
    */
   applyFilter(id: VoiceFilterId): MediaStreamTrack
   /**
-   * Ouvre ou ferme l'envoi par le gain du pont. La piste de destination reste
-   * `enabled` : la couper relancerait le tampon de gigue du pair.
+   * Ouvre ou ferme l'envoi par le gain du pont COURANT. La piste de destination
+   * reste `enabled` : la couper relancerait le tampon de gigue du pair.
+   * L'auditeur VAD ne retient pas le nœud : chaque appel relit le pont vivant.
    */
   setSendOpen(open: boolean): void
+  /** Change le micro d'entrée. La destination (et donc la piste des pairs) ne bouge pas. */
+  replaceInput(stream: FilterStreamLike): void
   /** Débranche tout (oscillateurs arrêtés, nœuds coupés). Idempotent. */
   close(): void
 }
@@ -299,14 +302,13 @@ export function createVoiceFilterChain(
   // taire la piste MediaStream dans Chromium : elle se mute ou renaît coupée, et
   // le VAD déjà ouvert ne réémet pas d'événement pour la rallumer. Le graphe du
   // filtre se branche sur CE gain, jamais directement sur la destination.
+  // `setSendOpen` relit CE pont à chaque appel. L'auditeur VAD ne reçoit pas le
+  // nœud : quand la chaîne est remplacée, c'est le châssis qui vise la nouvelle.
   const bridge = context.createGain()
   if (bridge.gain !== undefined) bridge.gain.value = 1
   bridge.connect(destination)
-  /**
-   * La piste micro, lue UNE fois sur le flux entrant : c'est elle qui entre dans le graphe,
-   * et c'est elle que le repli rend si la destination est vide (contexte fermé).
-   */
-  const source = stream.getAudioTracks()[0]
+  /** Flux micro courant. Un changement de périphérique le remplace, pas la destination. */
+  let inputStream: FilterStreamLike = stream
   /** La source micro, créée UNE fois (le changement de voix ne recrée pas l'entrée). */
   let sourceNode: FilterNodeLike | null = null
   /** Le graphe de l'application courante, à débrancher avant la suivante. */
@@ -318,8 +320,15 @@ export function createVoiceFilterChain(
   /** true = le pont laisse passer. false = silence, piste toujours enabled. */
   let sendOpen = true
 
+  /** Piste du micro courant (le flux peut avoir été remplacé). */
+  function captureTrack(): MediaStreamTrack | undefined {
+    return inputStream.getAudioTracks()[0]
+  }
+
   function paintSendGate(): void {
-    if (bridge.gain !== undefined) bridge.gain.value = sendOpen ? 1 : 0
+    // Toujours le pont vivant, jamais une référence prise avant une reconstruction.
+    const live = bridge
+    if (live.gain !== undefined) live.gain.value = sendOpen ? 1 : 0
   }
 
   /** Débranche le graphe courant : oscillateurs d'abord (un oscillateur non arrêté dure). */
@@ -367,6 +376,7 @@ export function createVoiceFilterChain(
   function headOf(id: VoiceFilterId): FilterNodeLike {
     let entry = sourceNode
     if (entry === null) {
+      const source = captureTrack()
       if (source === undefined) {
         throw new Error('[voice-filter] flux micro sans piste audio : rien à filtrer (bug de flux, pas un réglage)')
       }
@@ -536,6 +546,19 @@ export function createVoiceFilterChain(
     setSendOpen(open: boolean): void {
       sendOpen = open === true
       paintSendGate()
+    },
+    replaceInput(next: FilterStreamLike): void {
+      inputStream = next
+      if (sourceNode !== null) {
+        try {
+          sourceNode.disconnect()
+        } catch {
+          // Déjà coupée : on la recrée dans apply().
+        }
+        sourceNode = null
+      }
+      // Même destination, même `sendOpen` : apply() repeint le pont courant.
+      apply(applied)
     },
     close(): void {
       unplug()

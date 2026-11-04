@@ -259,6 +259,9 @@ async function bootstrap(): Promise<void> {
   const loaded = store.load();
   settings = loaded.settings;
   settingsDiskBlocked = loaded.blocked;
+  // Le pont naît en push-to-talk. Le mode persisté doit être le sien dès le
+  // démarrage, sinon l'écran et le gain d'émission ne voient pas la même VAD.
+  syncBridgeTalkMode(settings, null);
   if (loaded.blocked) {
     console.warn('[réglages] fichier illisible, laissé tel quel (copie .bak). Défauts en mémoire seulement.', loaded.errors);
   } else if (loaded.recovered) {
@@ -1002,9 +1005,21 @@ function forwardBridgeEvent(event: BridgeEvent): void {
   }
 }
 
+/**
+ * Aligne le pont sur `talk.mode`. Sans ça, le sélecteur du salon reste
+ * « Appuyer pour parler » après un redémarrage alors que les réglages sont
+ * en détection de voix — et le gain d'émission suit le pont, pas le réglage.
+ * Un mode inchangé ne republie rien.
+ */
+function syncBridgeTalkMode(next: Settings, previous: Settings | null): void {
+  if (previous !== null && previous.talk.mode === next.talk.mode) return;
+  bridge.setMode(next.talk.mode);
+}
+
 function persist(next: Settings): void {
   const previousSettings = settings;
   settings = next;
+  syncBridgeTalkMode(next, previousSettings);
   if (settingsDiskBlocked) {
     // Le fichier n'a pas pu être lu : l'écrire maintenant remplacerait le document
     // (éventuellement plus récent, ou simplement corrompu mais récupérable) par les défauts.

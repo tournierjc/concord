@@ -39,10 +39,16 @@ export interface VoiceChainLike {
   /** Applique une voix (détruit l'ancien graphe, monte le nouveau). Rend la piste des pairs. */
   applyFilter(id: VoiceFilterId): MediaStreamTrack
   /**
-   * Ouvre ou ferme l'émission par un GAIN, sans toucher `track.enabled`.
+   * Ouvre ou ferme l'émission par le gain COURANT, sans toucher `track.enabled`.
    * Absent = la chaîne ne sait pas (repli : le plan coupe la piste).
+   * L'écriture vise le pont vivant, jamais un nœud retenu par un auditeur.
    */
   setSendOpen?(open: boolean): void
+  /**
+   * Remplace le micro d'entrée sans changer la piste de destination.
+   * Absent = la chaîne ne sait pas (le plan enverra la piste brute).
+   */
+  replaceInput?(stream: MediaStream): void
   /** Débranche tout. Idempotent. */
   close(): void
 }
@@ -100,10 +106,15 @@ export interface VoiceChainHostHandle {
   /** La voix réellement appliquée (`null` = aucune chaîne ouverte). */
   current(): VoiceFilterId | null
   /**
-   * Demande au gain d'émission d'ouvrir ou de fermer. `false` = la chaîne n'a
-   * pas de gain (le plan doit couper `track.enabled`, repli historique).
+   * Demande au gain d'émission COURANT d'ouvrir ou de fermer. `false` = la
+   * chaîne n'a pas de gain (le plan doit couper `track.enabled`, repli historique).
    */
   setSendOpen(open: boolean): boolean
+  /**
+   * Change le micro qui alimente la chaîne. `true` = la piste de destination
+   * est toujours la même. `false` = pas de chaîne, le plan doit envoyer la piste brute.
+   */
+  replaceInput(stream: MediaStream): boolean
   /** Ferme la chaîne (aucune piste n'est arrêtée : le flux appartient au plan média). */
   close(): void
 }
@@ -183,8 +194,17 @@ export function createVoiceChainHost(host: VoiceChainHost): VoiceChainHostHandle
       return chain === null ? null : chain.current
     },
     setSendOpen(open: boolean): boolean {
-      if (chain === null || typeof chain.setSendOpen !== 'function') return false
-      chain.setSendOpen(open)
+      // Relit `chain` à l'appel : un graphe reconstruit (filtre, micro, contexte)
+      // a remplacé la chaîne, et l'ancien gain ne doit plus recevoir l'intention.
+      const current = chain
+      if (current === null || typeof current.setSendOpen !== 'function') return false
+      current.setSendOpen(open)
+      return true
+    },
+    replaceInput(stream: MediaStream): boolean {
+      const current = chain
+      if (current === null || typeof current.replaceInput !== 'function') return false
+      current.replaceInput(stream)
       return true
     },
     close(): void {

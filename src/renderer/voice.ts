@@ -160,6 +160,14 @@ interface VoiceSession {
   live: boolean;
   want: boolean;
   /**
+   * Mode de prise de parole de CETTE session. Vient des réglages à l'ouverture.
+   * Un relâchement push-to-talk ne le referme pas : seul `setVoiceTalkMode`
+   * change la vérité, puis `applyTransmitState` l'écrit sur le gain courant.
+   */
+  talkMode: 'vad' | 'ptt';
+  /** Touche tenue. Ignorée en détection de voix. */
+  pttHeld: boolean;
+  /**
    * Producteur des échantillons de parole distante (AD-17 D4). Il vit et meurt avec la session :
    * son hystérésis par pair ne survit ni à un départ de salon ni à une reconnexion.
    */
@@ -650,20 +658,47 @@ function stopMeter(current: VoiceSession): void {
   current.speech.reset();
 }
 
-/** Applique l'intention de transmission au plan média. Retourne l'état réellement atteint. */
-function applyTransmit(current: VoiceSession, active: boolean): boolean {
-  if (!current.live) {
-    current.want = active;
-    return false;
-  }
+/** Vrai quand la session doit émettre : VAD ouverte, ou push-to-talk tenu. */
+function transmitOpen(current: VoiceSession): boolean {
+  return current.talkMode === 'vad' ? true : current.pttHeld;
+}
+
+/**
+ * Seule intention d'émission de la session. Elle mémorise l'état voulu et,
+ * dès que le plan est vivant, le fait écrire sur le gain COURANT
+ * (`plane.setTransmitting` → `applyTransmitState` du plan). Un graphe
+ * reconstruit ne garde pas un ancien nœud : le plan relit la chaîne.
+ *
+ * Retourne vrai si l'écriture a atteint le plan.
+ */
+function writeTransmit(current: VoiceSession): boolean {
+  const active = transmitOpen(current);
+  current.want = active;
+  if (!current.live) return false;
   try {
     current.wire.plane.setTransmitting(active);
-    current.want = active;
     return true;
   } catch (error) {
     publish({ status: 'unavailable', error: describeError(error), transmitting: false, level: 0 });
     return false;
   }
+}
+
+/**
+ * Réécrit l'intention sur le gain courant. Appelé au join (session vivante),
+ * après un changement de mode, et après un geste qui ne doit pas laisser
+ * l'ancienne valeur en place (relâchement du bouton en détection de voix).
+ */
+export function applyTransmitState(): boolean {
+  const current = session;
+  if (current === null) {
+    publish({ transmitting: false });
+    return false;
+  }
+  const applied = writeTransmit(current);
+  const open = transmitOpen(current);
+  publish({ transmitting: applied ? open : snapshot.transmitting });
+  return applied && open;
 }
 
 /** Ferme la session vivante, s'il y en a une. Idempotent. */
@@ -894,7 +929,11 @@ export function openVoice(
         if (current === null || session !== current) return;
         current.live = true;
         publish({ status: 'live', error: null });
-        if (current.want) applyTransmit(current, true);
+        // Toujours, pas seulement si `want` était déjà vrai : la VAD ouverte
+        // avant le graphe n'a pas de second front, et un `false` mémorisé par
+        // le bouton ne doit pas laisser le gain fermé.
+        const open = writeTransmit(current);
+        publish({ transmitting: open ? transmitOpen(current) : false });
         startMeter(current);
       },
       onError: (error: unknown) => {
@@ -941,6 +980,8 @@ export function openVoice(
     stopAudioDebug: null,
     live: false,
     want: false,
+    talkMode: settings?.talk?.mode === 'vad' ? 'vad' : 'ptt',
+    pttHeld: false,
     speech: createPeerSpeechTracker(),
     selfId: localId,
     relay: createSpeakingRelay(),
@@ -955,15 +996,32 @@ export function openVoice(
   void wire.start();
 }
 
-/** Push-to-talk réel : ouvre/ferme la piste. Sans plan média, rien n'est prétendu. */
+/**
+ * Push-to-talk réel. En détection de voix, le relâchement ne ferme pas le
+ * gain : le mode reste la vérité, et `applyTransmitState` la réécrit sur le
+ * pont courant. Sans cela, un `pointerup` / `pointerleave` coupait l'envoi
+ * alors que le vumètre (micro brut) continuait de bouger, jusqu'au basculement
+ * de mode qui recréait un front.
+ */
 export function setTransmitting(active: boolean): void {
   const current = session;
   if (current === null) {
     publish({ transmitting: false });
     return;
   }
-  const applied = applyTransmit(current, active);
-  publish({ transmitting: applied ? active : snapshot.transmitting });
+  if (current.talkMode !== 'vad') current.pttHeld = active;
+  applyTransmitState();
+}
+
+/**
+ * Change le mode de la session vivante et réécrit le gain. `ptt` au repos
+ * ferme ; `vad` ouvre, sans exiger un aller-retour par l'autre mode.
+ */
+export function setVoiceTalkMode(mode: 'vad' | 'ptt'): void {
+  const current = session;
+  if (current === null) return;
+  current.talkMode = mode;
+  applyTransmitState();
 }
 
 /**
@@ -1027,6 +1085,25 @@ export function reapplyCaptureProcessing(audio: {
   const current = session;
   if (current === null) return;
   void current.wire.plane.applyCaptureConstraints(buildMicrophoneConstraints(audio));
+}
+
+/**
+ * Change le micro en vol. Le graphe est reconstruit sur la même destination
+ * quand la chaîne le sait, puis l'intention (VAD ouverte ou PTT tenu) est
+ * réécrite. Hors salon, le réglage reste celui de la prochaine ouverture.
+ */
+export async function replaceVoiceInput(audio: {
+  echoCancellation?: boolean;
+  noiseSuppression?: boolean;
+  autoGainControl?: boolean;
+  inputGain?: number;
+  inputDeviceId?: string | null;
+}): Promise<void> {
+  const current = session;
+  if (current === null) return;
+  await current.wire.plane.replaceMicrophone(buildMicrophoneConstraints(audio));
+  if (session !== current) return;
+  applyTransmitState();
 }
 
 /** Haut-parleur de lecture des pairs. L'AEC s'aligne sur CE périphérique, pas sur un autre. */

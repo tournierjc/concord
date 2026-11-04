@@ -348,6 +348,18 @@ export function App(): JSX.Element {
       setSettings(loaded);
       applyTheme(document.documentElement, loaded.theme);
     });
+    // Le pont démarre en push-to-talk. Le mode persisté (`talk.mode`) est relu
+    // ici : sinon le sélecteur du salon ment, et un relâchement du bouton ferme
+    // le gain alors que les réglages sont en détection de voix.
+    void api.getTalkMode().then((state) => {
+      if (!active) return;
+      setControl((previous) => {
+        if (previous.mode !== state.mode) setModeEpoch((epoch) => epoch + 1);
+        return state;
+      });
+    }).catch(() => {
+      // Hors application : le contrôle reste celui déjà publié, rien n'est inventé.
+    });
     const unsubscribers = [
       api.onParticipants(setParticipants),
       api.onRoomState((state) => {
