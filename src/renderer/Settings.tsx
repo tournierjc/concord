@@ -427,8 +427,18 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
             <span className="field__help">
               {t('settings.audio.voiceFilter.help')}
               {voiceFilterRefused === false ? ` — ${t('settings.audio.voiceFilter.unavailable')}` : ''}
-              {voiceProcessor.phase === 'fallback' ? ` — ${t('settings.audio.voiceFilter.workletFailed')}` : ''}
-              {voiceProcessor.phase === 'fallback' && voiceProcessor.detail !== '' ? ` (${voiceProcessor.detail})` : ''}
+              {voiceProcessor.phase === 'fallback'
+                ? ` — ${t(
+                    voiceProcessor.detail === 'silence'
+                      ? 'settings.audio.voiceFilter.workletBypassed'
+                      : 'settings.audio.voiceFilter.workletFailed',
+                  )}`
+                : ''}
+              {voiceProcessor.phase === 'fallback' &&
+              voiceProcessor.detail !== '' &&
+              voiceProcessor.detail !== 'silence'
+                ? ` (${voiceProcessor.detail})`
+                : ''}
             </span>
           </div>
 

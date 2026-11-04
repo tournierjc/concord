@@ -302,6 +302,10 @@ class ConcordVoiceCharacter extends AudioWorkletProcessor {
       chorus: typeof o.chorus === 'number' ? o.chorus : 0,
     })
     this.seen = 0
+    this.bad = 0
+    this.tripped = false
+    this.readyPosted = false
+    this.forceSilence = o.forceSilence === true
     this.nextReport = Math.round(sampleRate * 3)
     if (this.trace) {
       this.port.postMessage({
@@ -318,14 +322,65 @@ class ConcordVoiceCharacter extends AudioWorkletProcessor {
       })
     }
   }
+  keepDry(input, output) {
+    const n = input.length < output.length ? input.length : output.length
+    if (this.tripped) {
+      for (let i = 0; i < n; i += 1) {
+        const x = input[i]
+        output[i] = x === x ? x : 0
+      }
+      for (let i = n; i < output.length; i += 1) output[i] = 0
+      return
+    }
+    let inE = 0
+    let outE = 0
+    let nan = false
+    for (let i = 0; i < n; i += 1) {
+      const x = input[i]
+      const xx = x === x ? x : 0
+      let y = output[i]
+      if (y !== y) {
+        nan = true
+        y = 0
+        output[i] = 0
+      }
+      inE += xx * xx
+      outE += y * y
+    }
+    if (inE > n * 0.0001 && (nan || outE < n * 0.000001)) this.bad += n
+    else this.bad = 0
+    if (this.bad < sampleRate * 0.5) return
+    this.tripped = true
+    for (let i = 0; i < n; i += 1) {
+      const x = input[i]
+      output[i] = x === x ? x : 0
+    }
+    this.port.postMessage({ type: 'fallback', reason: 'silence', processor: 'concord-voice-character' })
+  }
   process(inputs, outputs) {
-    const input = inputs[0] && inputs[0][0]
-    const output = outputs[0] && outputs[0][0]
+    const inputChannels = inputs[0] || []
+    const outputChannels = outputs[0] || []
+    const input = inputChannels[0]
+    const output = outputChannels[0]
     if (!input || !output) return true
-    processVoiceCharacter(this.state, input, output)
-    if (!this.trace) return true
+    if (this.tripped) this.keepDry(input, output)
+    else if (this.forceSilence) {
+      for (let i = 0; i < output.length; i += 1) output[i] = 0
+      this.keepDry(input, output)
+    } else {
+      processVoiceCharacter(this.state, input, output)
+      this.keepDry(input, output)
+    }
+    for (let c = 1; c < outputChannels.length; c += 1) {
+      const channel = outputChannels[c]
+      if (channel && channel.set) channel.set(output)
+    }
     this.seen += input.length
-    if (this.seen < this.nextReport) return true
+    if (!this.tripped && !this.readyPosted && this.seen >= sampleRate * 0.04) {
+      this.readyPosted = true
+      this.port.postMessage({ type: 'ready', processor: 'concord-voice-character' })
+    }
+    if (!this.trace || this.seen < this.nextReport) return true
     this.nextReport += Math.round(sampleRate * 3)
     const period = this.state.lastPeriod > 0 ? this.state.lastPeriod : 1
     const hop = this.state.lastHop > 0 ? this.state.lastHop : period
@@ -453,6 +508,11 @@ function publishPhase(next: VoiceProcessorPhase): void {
   for (const listener of phaseListeners) listener()
 }
 
+/** Le filtre a rendu du silence (ou des NaN) : l'UI le dit, la voix sèche est revenue. */
+export function noteVoiceBypass(detail: string): void {
+  publishPhase({ phase: 'fallback', detail })
+}
+
 /** État du dernier chargement du processeur de timbre (lu par le sélecteur de filtre). */
 export function voiceProcessorPhase(): VoiceProcessorPhase {
   return processorPhase
@@ -535,61 +595,90 @@ export function createVoiceCharacterNode(
   if (typeof AudioWorkletNode !== 'function') return passthrough()
   let processor: VoiceCharacterNodeLike | null = null
   let closed = false
-  input.connect(output)
+  let tripped = false
+  // Le sec reste audible tant que le processeur n'a pas prouvé qu'il tourne.
+  // Couper ce pont AVANT `new AudioWorkletNode` laissait un nœud mort (constructeur
+  // qui jette sur le thread audio) à la place de la voix : silence total.
+  const dry = context.createGain()
+  const wet = context.createGain()
+  const setGain = (node: VoiceCharacterNodeLike, value: number): void => {
+    if (node.gain !== undefined) node.gain.value = value
+  }
+  setGain(dry, 1)
+  setGain(wet, 0)
+  input.connect(dry)
+  dry.connect(output)
+  wet.connect(output)
   const trace = audioDebugEnabled()
+  const goWet = (): void => {
+    if (tripped || closed) return
+    setGain(wet, 1)
+    setGain(dry, 0)
+  }
+  const goDry = (detail: string): void => {
+    tripped = true
+    setGain(dry, 1)
+    setGain(wet, 0)
+    if (detail === 'silence') console.warn('[voice-character] sortie muette — voix sèche rétablie')
+    else console.error(`[voice-character] AudioWorklet refusé — timbre inchangé (${detail})`)
+    noteVoiceBypass(detail === 'silence' ? 'silence' : detail)
+  }
   try {
     void loadCharacterWorklet(context, worklet).then(
       () => {
-        if (closed) return
-        const node = defaultWorkletFactory(context, 'concord-voice-character', {
-          numberOfInputs: 1,
-          numberOfOutputs: 1,
-          channelCount: 1,
-          channelCountMode: 'explicit',
-          processorOptions: {
-            pitchRatio: spec.pitchRatio,
-            formantScale: spec.formantScale,
-            highpassHz: spec.highpassHz,
-            tilt: spec.tilt,
-            lowShelf: spec.lowShelf,
-            subharmonic: spec.subharmonic,
-            chorus: spec.chorus,
-            trace,
-          },
-        })
-        const port = (node as { port?: { onmessage: ((event: MessageEvent) => void) | null } }).port
-        if (port !== undefined) {
-          port.onmessage = (event: MessageEvent) => {
-            if (!audioDebugEnabled()) return
-            console.error(`[voice-character] ${JSON.stringify(event.data)}`)
-          }
-        }
+        if (closed || tripped) return
         try {
-          input.disconnect()
-        } catch {
-          // Pont déjà coupé.
-        }
-        input.connect(node)
-        node.connect(output)
-        processor = node
-        publishPhase({ phase: 'live', detail: '' })
-        if (trace) {
-          console.error(
-            `[voice-character] processeur concord-voice-character chargé pitch=${spec.pitchRatio} formant=${spec.formantScale} sr=${context.sampleRate}`,
-          )
+          const node = defaultWorkletFactory(context, 'concord-voice-character', {
+            numberOfInputs: 1,
+            numberOfOutputs: 1,
+            outputChannelCount: [1],
+            channelCount: 1,
+            channelCountMode: 'explicit',
+            processorOptions: {
+              pitchRatio: spec.pitchRatio,
+              formantScale: spec.formantScale,
+              highpassHz: spec.highpassHz,
+              tilt: spec.tilt,
+              lowShelf: spec.lowShelf,
+              subharmonic: spec.subharmonic,
+              chorus: spec.chorus,
+              trace,
+            },
+          })
+          const port = (node as { port?: { onmessage: ((event: MessageEvent) => void) | null } }).port
+          if (port !== undefined) {
+            port.onmessage = (event: MessageEvent) => {
+              const data = event.data as { type?: string } | null
+              if (data?.type === 'ready') {
+                goWet()
+                if (processorPhase.phase !== 'fallback') publishPhase({ phase: 'live', detail: '' })
+                return
+              }
+              if (data?.type === 'fallback') {
+                goDry('silence')
+                return
+              }
+              if (trace) console.error(`[voice-character] ${JSON.stringify(event.data)}`)
+            }
+          }
+          input.connect(node)
+          node.connect(wet)
+          processor = node
+          if (trace) {
+            console.error(
+              `[voice-character] processeur concord-voice-character chargé pitch=${spec.pitchRatio} formant=${spec.formantScale} sr=${context.sampleRate}`,
+            )
+          }
+        } catch (error) {
+          goDry(failureDetail(error))
         }
       },
       (error: unknown) => {
-        const detail = failureDetail(error)
-        console.error(`[voice-character] AudioWorklet refusé — timbre inchangé (${detail})`)
-        if (!closed) publishPhase({ phase: 'fallback', detail })
+        if (!closed) goDry(failureDetail(error))
       },
     )
   } catch (error) {
-    const detail = failureDetail(error)
-    console.error(`[voice-character] AudioWorklet refusé — timbre inchangé (${detail})`)
-    publishPhase({ phase: 'fallback', detail })
-    return passthrough()
+    goDry(failureDetail(error))
   }
   return {
     input,
@@ -604,15 +693,12 @@ export function createVoiceCharacterNode(
         }
         processor = null
       }
-      try {
-        input.disconnect()
-      } catch {
-        // Déjà coupé.
-      }
-      try {
-        output.disconnect()
-      } catch {
-        // Déjà coupé.
+      for (const node of [input, output, dry, wet]) {
+        try {
+          node.disconnect()
+        } catch {
+          // Déjà coupé.
+        }
       }
     },
   }

@@ -8,8 +8,13 @@
  * avec la voix).
  *
  * La décision est une fonction pure (`processNoiseGate`), testée hors navigateur.
- * L'AudioWorklet rejoue CE corps (`toString()`), pas une copie qui dérive.
+ * L'AudioWorklet rejoue une chaîne autonome : `toString()` du bundle appelait
+ * `noiseGateLinear` et `NOISE_GATE_HYSTERESIS_DB`, absents du worklet. Le
+ * constructeur jetait, le nœud mort remplaçait le pont, et toute la voix
+ * (porte allumée par défaut) sortait silence.
  */
+
+import { noteVoiceBypass } from './voice-character.ts'
 
 /** Écart d'hystérésis sous le seuil d'ouverture, en dB. */
 export const NOISE_GATE_HYSTERESIS_DB = 8
@@ -108,40 +113,146 @@ const defaultWorkletFactory: NoiseGateWorkletFactory = (context, name, options) 
 }
 
 /**
- * Nom réellement déclaré par `toString()` après minification. `keepNames` préserve
- * `.name`, pas le texte : la classe doit appeler la liaison (`function Xr`), sinon
- * `addModule` lève ReferenceError et la porte reste un pont silencieux.
+ * Source du worklet. Chaîne littérale : le minificateur n'y entre pas, et aucune
+ * liaison du module (`noiseGateLinear`, la constante d'hystérésis) n'est requise.
  */
-function workletBinding(fn: Function): string {
-  const match = /^function\s+([A-Za-z0-9_$]+)/.exec(fn.toString())
-  if (match?.[1] === undefined) throw new Error('AudioWorklet: fonction sans déclaration')
-  return match[1]
-}
-
-/** Source du worklet : les deux fonctions pures, puis le processeur qui les appelle. */
 export function noiseGateWorkletSource(): string {
-  const create = workletBinding(createNoiseGateState)
-  const process = workletBinding(processNoiseGate)
   return `
-${createNoiseGateState.toString()}
-${processNoiseGate.toString()}
+function noiseGateLinear(thresholdDb) {
+  const db = Number.isFinite(thresholdDb) ? thresholdDb : -40
+  return 10 ** (db / 20)
+}
+function createNoiseGateState(sampleRate, thresholdDb) {
+  const rate = sampleRate > 0 ? sampleRate : 48000
+  const open = noiseGateLinear(thresholdDb)
+  const close = noiseGateLinear(thresholdDb - 8)
+  return {
+    envelope: 0,
+    gain: 0,
+    open: open,
+    close: close,
+    speaking: false,
+    attackEnv: Math.exp(-1 / (rate * 0.005)),
+    releaseEnv: Math.exp(-1 / (rate * 0.06)),
+    attackGain: Math.exp(-1 / (rate * 0.008)),
+    releaseGain: Math.exp(-1 / (rate * 0.12)),
+  }
+}
+function processNoiseGate(state, input, output) {
+  const n = input.length < output.length ? input.length : output.length
+  for (let i = 0; i < n; i += 1) {
+    const x = input[i] ?? 0
+    const power = x * x
+    const envCoeff = power > state.envelope ? state.attackEnv : state.releaseEnv
+    state.envelope = envCoeff * state.envelope + (1 - envCoeff) * power
+    const level = Math.sqrt(state.envelope)
+    if (level >= state.open) state.speaking = true
+    else if (level <= state.close) state.speaking = false
+    const target = state.speaking ? 1 : 0
+    const gCoeff = target > state.gain ? state.attackGain : state.releaseGain
+    state.gain = gCoeff * state.gain + (1 - gCoeff) * target
+    output[i] = x * state.gain
+  }
+  for (let i = n; i < output.length; i += 1) output[i] = 0
+}
 class ConcordNoiseGate extends AudioWorkletProcessor {
   constructor(options) {
     super()
-    const opts = (options && options.processorOptions) || {}
-    const db = typeof opts.thresholdDb === 'number' ? opts.thresholdDb : -40
-    this.state = ${create}(sampleRate, db)
+    const o = (options && options.processorOptions) || {}
+    const db = typeof o.thresholdDb === 'number' ? o.thresholdDb : -40
+    this.state = createNoiseGateState(sampleRate, db)
+    this.bad = 0
+    this.tripped = false
+    this.readyPosted = false
+    this.seen = 0
+    this.forceSilence = o.forceSilence === true
+  }
+  keepDry(input, output) {
+    const n = input.length < output.length ? input.length : output.length
+    if (this.tripped) {
+      for (let i = 0; i < n; i += 1) {
+        const x = input[i]
+        output[i] = x === x ? x : 0
+      }
+      for (let i = n; i < output.length; i += 1) output[i] = 0
+      return
+    }
+    let inE = 0
+    let outE = 0
+    let nan = false
+    for (let i = 0; i < n; i += 1) {
+      const x = input[i]
+      const xx = x === x ? x : 0
+      let y = output[i]
+      if (y !== y) {
+        nan = true
+        y = 0
+        output[i] = 0
+      }
+      inE += xx * xx
+      outE += y * y
+    }
+    if (inE > n * 0.0001 && (nan || outE < n * 0.000001)) this.bad += n
+    else this.bad = 0
+    if (this.bad < sampleRate * 0.5) return
+    this.tripped = true
+    for (let i = 0; i < n; i += 1) {
+      const x = input[i]
+      output[i] = x === x ? x : 0
+    }
+    this.port.postMessage({ type: 'fallback', reason: 'silence', processor: 'concord-noise-gate' })
   }
   process(inputs, outputs) {
-    const input = inputs[0] && inputs[0][0]
-    const output = outputs[0] && outputs[0][0]
+    const inputChannels = inputs[0] || []
+    const outputChannels = outputs[0] || []
+    const input = inputChannels[0]
+    const output = outputChannels[0]
     if (!input || !output) return true
-    ${process}(this.state, input, output)
+    if (this.tripped) this.keepDry(input, output)
+    else if (this.forceSilence) {
+      for (let i = 0; i < output.length; i += 1) output[i] = 0
+      this.keepDry(input, output)
+    } else {
+      processNoiseGate(this.state, input, output)
+      this.keepDry(input, output)
+    }
+    for (let c = 1; c < outputChannels.length; c += 1) {
+      const channel = outputChannels[c]
+      if (channel && channel.set) channel.set(output)
+    }
+    this.seen += input.length
+    if (!this.tripped && !this.readyPosted && this.seen >= sampleRate * 0.04) {
+      this.readyPosted = true
+      this.port.postMessage({ type: 'ready', processor: 'concord-noise-gate' })
+    }
     return true
   }
 }
 registerProcessor('concord-noise-gate', ConcordNoiseGate)
 `
+}
+
+const gateReady = new WeakMap<object, Promise<void>>()
+
+function loadNoiseGateWorklet(
+  context: object,
+  worklet: { addModule(url: string): Promise<void> },
+): Promise<void> {
+  const cached = gateReady.get(context)
+  if (cached !== undefined) return cached
+  const url = URL.createObjectURL(new Blob([noiseGateWorkletSource()], { type: 'application/javascript' }))
+  const pending = worklet.addModule(url).then(
+    () => undefined,
+    (error: unknown) => {
+      gateReady.delete(context)
+      throw error
+    },
+  )
+  gateReady.set(context, pending)
+  void pending.finally(() => {
+    URL.revokeObjectURL(url)
+  }).catch(() => undefined)
+  return pending
 }
 
 export interface NoiseGateOptions {
@@ -187,38 +298,66 @@ export function createNoiseGateNode(
   if (makeNode === defaultWorkletFactory && typeof AudioWorkletNode !== 'function') return passthrough()
   let processor: NoiseGateNodeLike | null = null
   let closed = false
-  input.connect(output)
+  let tripped = false
+  const dry = context.createGain()
+  const wet = context.createGain()
+  const setGain = (node: NoiseGateNodeLike, value: number): void => {
+    if (node.gain !== undefined) node.gain.value = value
+  }
+  setGain(dry, 1)
+  setGain(wet, 0)
+  input.connect(dry)
+  dry.connect(output)
+  wet.connect(output)
+  const goWet = (): void => {
+    if (tripped || closed) return
+    setGain(wet, 1)
+    setGain(dry, 0)
+  }
+  const goDry = (): void => {
+    tripped = true
+    setGain(dry, 1)
+    setGain(wet, 0)
+    console.warn('[noise-gate] sortie muette — voix sèche rétablie')
+    noteVoiceBypass('silence')
+  }
   try {
-    const url = URL.createObjectURL(new Blob([noiseGateWorkletSource()], { type: 'application/javascript' }))
-    void worklet
-      .addModule(url)
-      .then(() => {
-        if (closed) return
-        const node = makeNode(context, 'concord-noise-gate', {
-          numberOfInputs: 1,
-          numberOfOutputs: 1,
-          channelCount: 1,
-          channelCountMode: 'explicit',
-          processorOptions: { thresholdDb },
-        })
+    void loadNoiseGateWorklet(context, worklet).then(
+      () => {
+        if (closed || tripped) return
         try {
-          input.disconnect()
-        } catch {
-          // Pont déjà coupé.
+          const node = makeNode(context, 'concord-noise-gate', {
+            numberOfInputs: 1,
+            numberOfOutputs: 1,
+            outputChannelCount: [1],
+            channelCount: 1,
+            channelCountMode: 'explicit',
+            processorOptions: { thresholdDb },
+          })
+          const port = (node as { port?: { onmessage: ((event: MessageEvent) => void) | null } }).port
+          if (port !== undefined) {
+            port.onmessage = (event: MessageEvent) => {
+              const data = event.data as { type?: string } | null
+              if (data?.type === 'ready') goWet()
+              else if (data?.type === 'fallback') goDry()
+            }
+          }
+          input.connect(node)
+          node.connect(wet)
+          processor = node
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error)
+          console.error(`[noise-gate] AudioWorklet refusé — porte inactive, voix brute conservée (${detail})`)
         }
-        input.connect(node)
-        node.connect(output)
-        processor = node
-      })
-      .catch((error: unknown) => {
+      },
+      (error: unknown) => {
         const detail = error instanceof Error ? error.message : String(error)
         console.error(`[noise-gate] AudioWorklet refusé — porte inactive, voix brute conservée (${detail})`)
-      })
-      .finally(() => {
-        URL.revokeObjectURL(url)
-      })
-  } catch {
-    return passthrough()
+      },
+    )
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    console.error(`[noise-gate] AudioWorklet refusé — porte inactive, voix brute conservée (${detail})`)
   }
   return {
     input,
@@ -233,15 +372,12 @@ export function createNoiseGateNode(
         }
         processor = null
       }
-      try {
-        input.disconnect()
-      } catch {
-        // Déjà coupé.
-      }
-      try {
-        output.disconnect()
-      } catch {
-        // Déjà coupé.
+      for (const node of [input, output, dry, wet]) {
+        try {
+          node.disconnect()
+        } catch {
+          // Déjà coupé.
+        }
       }
     },
   }

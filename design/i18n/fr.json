@@ -141,6 +141,7 @@
   "settings.audio.voiceFilter": "Filtre vocal",
   "settings.audio.voiceFilter.help": "Appliqué à votre micro avant l’envoi aux autres. Changeable en pleine conversation.",
   "settings.audio.voiceFilter.workletFailed": "Le correcteur de voix n’a pas démarré — seul l’égaliseur est audible.",
+  "settings.audio.voiceFilter.workletBypassed": "Le filtre rendait le silence — la voix sèche est rétablie.",
   "settings.audio.voiceFilter.unavailable": "Voix indisponible sur cette machine — votre voix normale est envoyée.",
   "settings.audio.voiceFilter.none": "Aucune",
   "settings.audio.voiceFilter.robot": "Robot",

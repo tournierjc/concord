@@ -141,6 +141,7 @@
   "settings.audio.voiceFilter": "Voice filter",
   "settings.audio.voiceFilter.help": "Applied to your microphone before sending to others. Changeable mid-conversation.",
   "settings.audio.voiceFilter.workletFailed": "The voice processor did not start — only the equalizer is heard.",
+  "settings.audio.voiceFilter.workletBypassed": "The filter went silent — your unprocessed voice is restored.",
   "settings.audio.voiceFilter.unavailable": "Voice unavailable on this machine — your normal voice is sent.",
   "settings.audio.voiceFilter.none": "None",
   "settings.audio.voiceFilter.robot": "Robot",
