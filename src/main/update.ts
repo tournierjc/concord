@@ -34,7 +34,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, rename, rm, chmod } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
-import type { MainTimers } from './timers';
+import { detachProcess, type MainTimers } from './timers';
 
 /* ------------------------------------------------------------------ */
 /* Constantes du contrat d'amendement (liste close)                     */
@@ -361,8 +361,14 @@ export function chooseInstallerStrategy(
  * `oneClick: false` : NSIS accepte `/S` en mode assisté et saute les pages. Aucun autre argument —
  * jamais un chemin saisi par quelqu'un d'autre que notre propre téléchargement.
  */
-export function nsisSpawnArgs(installerPath: string): string[] {
-  return [installerPath, '/S'];
+/**
+ * Arguments de l'installeur NSIS. Le chemin de l'exécutable est `spawnPath`, PAS un argument :
+ * `spawn(setup.exe, [setup.exe, '/S'])` lançait `setup.exe setup.exe /S`, et `/S` n'était plus
+ * le drapeau silencieux que NSIS lit en premier. `/S` seul : installation silencieuse. La
+ * relance n'est PAS un argument NSIS (un installeur assisté en `/S` saute la case « lancer »).
+ */
+export function nsisSpawnArgs(_installerPath: string): string[] {
+  return ['/S'];
 }
 
 /**
@@ -412,19 +418,38 @@ const RELAUNCH_WAIT_BACK_MS = 120;
  * REPARAISSE (la nouvelle version le réécrit au même emplacement per-user), le lancer détaché.
  * Un chemin avec espaces est sûr : la valeur voyage entre guillemets simples PowerShell.
  */
-export function relaunchPlan(installedExe: string): { spawnPath: string; spawnArgs: string[] } {
+export function relaunchPlan(
+  installedExe: string,
+  installerPath: string,
+  parentPid: number,
+): { spawnPath: string; spawnArgs: string[] } {
+  const exe = installedExe.replace(/'/gu, "''");
+  const setup = installerPath.replace(/'/gu, "''");
   const script = [
-    `$exe='${installedExe.replace(/'/gu, "''")}'`,
-    `$n=0; while((Test-Path $exe) -and ($n -lt ${RELAUNCH_WAIT_GONE_MS})) { Start-Sleep 1; $n++ }`,
-    `$n=0; while((-not (Test-Path $exe)) -and ($n -lt ${RELAUNCH_WAIT_BACK_MS})) { Start-Sleep 1; $n++ }`,
-    'if (Test-Path $exe) { Start-Process $exe }',
+    `$exe='${exe}'`,
+    `$setup='${setup}'`,
+    `$appPid=${Number.isInteger(parentPid) && parentPid > 0 ? parentPid : 0}`,
+    // 1. L'application courante doit avoir QUITTÉ (verrou d'instance unique + fichier exe).
+    `$n=0; while(($appPid -gt 0) -and (Get-Process -Id $appPid -ErrorAction SilentlyContinue) -and ($n -lt ${RELAUNCH_WAIT_GONE_MS})) { Start-Sleep 1; $n++ }`,
+    // 2. L'installeur silencieux doit avoir FINI. On n'attend PAS que l'exe disparaisse :
+    //    une mise à jour per-user l'écrase sur place, il ne s'absente jamais, et l'ancienne
+    //    attente lançait une seconde instance pendant que la première tenait encore le verrou.
+    `$name=[IO.Path]::GetFileNameWithoutExtension($setup)`,
+    `$n=0; while((Get-Process -Name $name -ErrorAction SilentlyContinue) -and ($n -lt ${RELAUNCH_WAIT_BACK_MS})) { Start-Sleep 1; $n++ }`,
+    'Start-Sleep 1',
+    'if (Test-Path -LiteralPath $exe) { Start-Process -FilePath $exe }',
   ].join('; ');
-  return { spawnPath: 'powershell.exe', spawnArgs: ['-NoProfile', '-Command', script] };
+  return { spawnPath: 'powershell.exe', spawnArgs: ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', script] };
 }
 
 export function planSpawn(
   strategy: InstallerStrategy,
-  input: { installerPath: string; currentEnv: Record<string, string | undefined>; relaunchExe?: string },
+  input: {
+    installerPath: string;
+    currentEnv: Record<string, string | undefined>;
+    relaunchExe?: string;
+    parentPid?: number;
+  },
 ): SpawnPlan | null {
   if (strategy.kind === 'nsis') {
     return {
@@ -433,7 +458,9 @@ export function planSpawn(
       spawnEnv: undefined,
       // Relance seulement quand l'appelant connaît son propre exécutable (production). Les
       // tests et les contextes sans exécutable installé relancent RIEN : l'installeur seul.
-      ...(input.relaunchExe === undefined ? {} : { relaunch: relaunchPlan(input.relaunchExe) }),
+      ...(input.relaunchExe === undefined
+        ? {}
+        : { relaunch: relaunchPlan(input.relaunchExe, input.installerPath, input.parentPid ?? 0) }),
     };
   }
   if (strategy.kind === 'appimage') {
@@ -527,6 +554,8 @@ export interface UpdateServiceOptions {
    * contexte sans installation connue (tests) — aucune relance n'est planifiée.
    */
   installedExePath: () => string | undefined;
+  /** PID du processus courant, pour que la relance attende qu'il ait vraiment quitté. */
+  processPid?: () => number;
   /** Publication de l'état (événement IPC) à CHAQUE transition, pas seulement à la fin. */
   onStateChange: (state: UpdateState) => void;
 }
@@ -698,6 +727,7 @@ export function createUpdateService(options: UpdateServiceOptions): UpdateServic
       // que la relance attend puis redémarre. `undefined` (contexte de test, portable sans
       // installation) : aucune relance, l'installateur seul — comme avant.
       relaunchExe: options.installedExePath(),
+      parentPid: options.processPid?.() ?? 0,
     });
     if (plan === null) {
       fail('stratégie d’installation inconnue');
@@ -1013,14 +1043,16 @@ export function electronUpdateIo(opts: ElectronUpdateIoOptions): UpdateIo {
       // Import dynamique (motif `ducking.ts`) : `node --test` n'enfante rien en important ce module.
       const childProcess = await import('node:child_process');
       try {
-        childProcess.spawn(path, args, {
+        const child = childProcess.spawn(path, args, {
           detached: true,
           stdio: 'ignore',
+          windowsHide: true,
           ...(spawnEnv === undefined ? {} : { env: spawnEnv }),
         });
-        // `detached: true` separe l'enfant de notre groupe de processus : il finit sans nous.
-        // Pas de `.unref()` ici — la garde SPEC-012 §4 reserve `unref` a `src/main/timers.ts`
-        // (les minuteries) ; `detached` est le mecanisme equivalent pour un processus enfante.
+        // Sans détachement du handle, `app.quit()` attend l'installeur, qui attend que
+        // l'exe lâche son verrou : la mise à jour ne finit pas et la relance démarre
+        // pendant que l'instance unique est encore tenue.
+        detachProcess(child);
         return true;
       } catch {
         return false;

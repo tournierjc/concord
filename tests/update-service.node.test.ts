@@ -480,7 +480,7 @@ describe('installation immediate', () => {
     assert.equal(h.calls.spawn.length, 1);
     const spawned = h.calls.spawn[0];
     assert.equal(spawned?.path, '/fake/downloads/concord-9.9.9-setup-x64.exe');
-    assert.deepEqual(spawned?.args, ['/fake/downloads/concord-9.9.9-setup-x64.exe', '/S']);
+    assert.deepEqual(spawned?.args, ['/S']);
     assert.equal(spawned?.env, undefined, 'NSIS : lenvironnement du processus, pas un env invente');
     assert.equal(h.quits.length, 1);
     // Le .part valide est devenu l'artefact.

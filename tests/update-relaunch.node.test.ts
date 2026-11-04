@@ -23,18 +23,19 @@ import {
 import type { MainTimers } from '../src/main/timers.ts';
 
 describe('relaunchPlan — le détaché d’attente-relance', () => {
-  it('attends-disparu, attends-reparu, Start-Process — dans cet ordre', () => {
-    const plan = relaunchPlan('C:\\Programs\\concord\\concord.exe');
+  it('attend la fin du processus ET de l’installeur, puis Start-Process', () => {
+    const plan = relaunchPlan('C:\\Programs\\concord\\concord.exe', 'C:\\Downloads\\setup.exe', 4242);
     assert.equal(plan.spawnPath, 'powershell.exe');
     const script = plan.spawnArgs[plan.spawnArgs.length - 1] ?? '';
-    assert.match(script, /Test-Path \$exe/);
-    assert.match(script, /Start-Process \$exe/);
-    // Le `Test-Path $exe` de SORTIE de la seconde boucle garantit : on ne lance que le fichié réapparu.
-    assert.match(script, /if \(Test-Path \$exe\) \{ Start-Process/);
+    assert.match(script, /Get-Process -Id \$appPid/);
+    assert.match(script, /Get-Process -Name \$name/);
+    assert.match(script, /\$appPid=4242/);
+    assert.match(script, /Test-Path -LiteralPath \$exe/);
+    assert.match(script, /Start-Process -FilePath \$exe/);
   });
 
   it('un chemin avec guillemets simples PowerShell est doublé, jamais interprété', () => {
-    const plan = relaunchPlan("C:\\O'Brien\\concord.exe");
+    const plan = relaunchPlan("C:\\O'Brien\\concord.exe", 'C:\\Downloads\\setup.exe', 1);
     assert.match(plan.spawnArgs[plan.spawnArgs.length - 1] ?? '', /O''Brien/);
   });
 });
@@ -46,7 +47,7 @@ describe('planSpawn — la relance n’est planifiée que pour NSIS et quand l�
     const strategy = { kind: 'nsis' as const, assetName: asset.name, downloadUrl: asset.downloadUrl };
     const plan = planSpawn(strategy, { installerPath: 'C:\\tmp\\setup.exe', currentEnv: {}, relaunchExe: 'C:\\P\\concord.exe' });
     assert.ok(plan !== null);
-    assert.deepEqual(plan.spawnArgs, ['C:\\tmp\\setup.exe', '/S']);
+    assert.deepEqual(plan.spawnArgs, ['/S']);
     assert.ok(plan.relaunch !== undefined, 'la relance est planifiée');
     assert.equal(plan.relaunch.spawnPath, 'powershell.exe');
   });
