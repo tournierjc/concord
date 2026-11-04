@@ -68,10 +68,14 @@ class FakeChain implements VoiceFilterChain {
     this.current = id
     this.track = track
   }
+  public sendOpen = true
   public applyFilter(id: VoiceFilterId): MediaStreamTrack {
     this.applied.push(id)
     this.current = id
     return this.track
+  }
+  public setSendOpen(open: boolean): void {
+    this.sendOpen = open
   }
   public close(): void {
     this.closeCalls += 1

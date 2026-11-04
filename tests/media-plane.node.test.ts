@@ -348,6 +348,7 @@ describe('media-plane — maillage, Opus 32 kbps, push-to-talk, filtre LAN', () 
       // RNNoise demandé. Le PTT coupe la piste envoyée, pas la capture.
       noiseSuppression: { ideal: true },
       autoGainControl: { ideal: false },
+      latency: { ideal: 0.01 },
     })
     assert.ok(lastTrack !== null, 'une piste doit avoir été ouverte')
     assert.equal(lastTrack?.enabled, false, 'au repos le micro est coupé')

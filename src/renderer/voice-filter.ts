@@ -176,6 +176,11 @@ export interface VoiceFilterChain {
    * et rend la piste (la même que `track` — c'est la destination qui est stable, pas le graphe).
    */
   applyFilter(id: VoiceFilterId): MediaStreamTrack
+  /**
+   * Ouvre ou ferme l'envoi par le gain du pont. La piste de destination reste
+   * `enabled` : la couper relancerait le tampon de gigue du pair.
+   */
+  setSendOpen(open: boolean): void
   /** Débranche tout (oscillateurs arrêtés, nœuds coupés). Idempotent. */
   close(): void
 }
@@ -310,6 +315,12 @@ export function createVoiceFilterChain(
   let character: VoiceCharacterNode | null = null
   let gate: NoiseGateNode | null = null
   let applied: VoiceFilterId = 'none'
+  /** true = le pont laisse passer. false = silence, piste toujours enabled. */
+  let sendOpen = true
+
+  function paintSendGate(): void {
+    if (bridge.gain !== undefined) bridge.gain.value = sendOpen ? 1 : 0
+  }
 
   /** Débranche le graphe courant : oscillateurs d'abord (un oscillateur non arrêté dure). */
   function unplug(): void {
@@ -396,6 +407,9 @@ export function createVoiceFilterChain(
     // Femme / enfant / géant / homme : hauteur ET formants, dans le même processeur.
     // Le granulaire seul déplaçait les deux du même facteur (effet chipmunk) et les
     // passe-bande ajoutés ne bougeaient pas les formants déjà présents.
+    // none / robot / radio : PAS ce processeur. Le pitch-shifter granulaire (file
+    // de 60 ms, ancien chemin) n'est plus branché ici. La porte, si elle est
+    // allumée, traite échantillon par échantillon : aucune file, aucun préremplissage.
     const characterSpec = voiceFilterCharacter(id)
     if (characterSpec === null) return entry
     character = createVoiceCharacterNode(context, characterSpec)
@@ -431,6 +445,7 @@ export function createVoiceFilterChain(
       // Voix neutre : AUCUN nœud de recette. La tête va directement à la destination.
       head.connect(bridge)
       applied = id
+      paintSendGate()
       return trackOf()
     }
 
@@ -502,6 +517,7 @@ export function createVoiceFilterChain(
     if (tail === undefined) throw new Error(`[voice-filter] recette « ${id} » : chaîne vide`)
     tail.output.connect(bridge)
     applied = id
+    paintSendGate()
     return trackOf()
   }
 
@@ -516,6 +532,10 @@ export function createVoiceFilterChain(
     },
     applyFilter(id: VoiceFilterId): MediaStreamTrack {
       return apply(id)
+    },
+    setSendOpen(open: boolean): void {
+      sendOpen = open === true
+      paintSendGate()
     },
     close(): void {
       unplug()

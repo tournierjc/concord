@@ -19,6 +19,16 @@ import { noteVoiceBypass } from './voice-character.ts'
 /** Écart d'hystérésis sous le seuil d'ouverture, en dB. */
 export const NOISE_GATE_HYSTERESIS_DB = 8
 
+/**
+ * Attaque courte : la première syllabe ne doit pas être mangée. 2 ms, pas une
+ * file. La porte n'a pas de tampon : ce n'est pas elle qui peut poser 2 s.
+ */
+export const NOISE_GATE_ATTACK_ENV_SEC = 0.002
+export const NOISE_GATE_RELEASE_ENV_SEC = 0.06
+export const NOISE_GATE_ATTACK_GAIN_SEC = 0.002
+/** Relâche assez longue pour ne pas couper la fin des mots. */
+export const NOISE_GATE_RELEASE_GAIN_SEC = 0.12
+
 export interface NoiseGateState {
   envelope: number
   gain: number
@@ -50,11 +60,12 @@ export function createNoiseGateState(sampleRate: number, thresholdDb: number): N
     close,
     speaking: false,
     // Constantes DANS l'état : `processNoiseGate` ne referme rien du module
-    // (le worklet n'aurait pas ces liaisons).
-    attackEnv: Math.exp(-1 / (rate * 0.005)),
-    releaseEnv: Math.exp(-1 / (rate * 0.06)),
-    attackGain: Math.exp(-1 / (rate * 0.008)),
-    releaseGain: Math.exp(-1 / (rate * 0.12)),
+    // (le worklet n'aurait pas ces liaisons). Les mêmes nombres sont interpolés
+    // dans la chaîne du worklet.
+    attackEnv: Math.exp(-1 / (rate * NOISE_GATE_ATTACK_ENV_SEC)),
+    releaseEnv: Math.exp(-1 / (rate * NOISE_GATE_RELEASE_ENV_SEC)),
+    attackGain: Math.exp(-1 / (rate * NOISE_GATE_ATTACK_GAIN_SEC)),
+    releaseGain: Math.exp(-1 / (rate * NOISE_GATE_RELEASE_GAIN_SEC)),
   }
 }
 
@@ -125,17 +136,17 @@ function noiseGateLinear(thresholdDb) {
 function createNoiseGateState(sampleRate, thresholdDb) {
   const rate = sampleRate > 0 ? sampleRate : 48000
   const open = noiseGateLinear(thresholdDb)
-  const close = noiseGateLinear(thresholdDb - 8)
+  const close = noiseGateLinear(thresholdDb - ${NOISE_GATE_HYSTERESIS_DB})
   return {
     envelope: 0,
     gain: 0,
     open: open,
     close: close,
     speaking: false,
-    attackEnv: Math.exp(-1 / (rate * 0.005)),
-    releaseEnv: Math.exp(-1 / (rate * 0.06)),
-    attackGain: Math.exp(-1 / (rate * 0.008)),
-    releaseGain: Math.exp(-1 / (rate * 0.12)),
+    attackEnv: Math.exp(-1 / (rate * ${NOISE_GATE_ATTACK_ENV_SEC})),
+    releaseEnv: Math.exp(-1 / (rate * ${NOISE_GATE_RELEASE_ENV_SEC})),
+    attackGain: Math.exp(-1 / (rate * ${NOISE_GATE_ATTACK_GAIN_SEC})),
+    releaseGain: Math.exp(-1 / (rate * ${NOISE_GATE_RELEASE_GAIN_SEC})),
   }
 }
 function processNoiseGate(state, input, output) {

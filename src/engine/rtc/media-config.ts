@@ -8,7 +8,7 @@
  *     TOUJOURS, même si l'appelant en fournit : l'étanchéité hors LAN n'est pas
  *     un filtre posé après coup, c'est une absence de configuration (SPEC-005 §1.3) ;
  *   • contraintes micro (mono, EC/NS/AGC) ;
- *   • munging SDP Opus : `maxaveragebitrate=32000;stereo=0;useinbandfec=1` ;
+ *   • munging SDP Opus : `maxaveragebitrate=32000;stereo=0;useinbandfec=1;usedtx=0` ;
  *   • agrégation des `getStats()` en 4 nombres (octets émis/reçus, pertes, RTT).
  *
  * Contraintes (SPEC-004 §3, module pur — vérifié par tests/engine-purity.test.ts) :
@@ -34,15 +34,63 @@ export const OPUS_SAMPLE_RATE = 48000
  *   maxaveragebitrate=32000 → 32 kbps de moyenne ;
  *   stereo=0               → mono (le flux est mono de bout en bout) ;
  *   useinbandfec=1         → FEC dans la bande, seule protection contre la perte.
+ *   usedtx=0               → pas de DTX. Le silence continue d'envoyer des trames :
+ *                            un trou puis une rafale fait partir le tampon de gigue
+ *                            du récepteur à froid (retard constant de plusieurs
+ *                            secondes dès la première syllabe, qui ne redescend pas).
  */
-export const OPUS_SDP_TARGET = 'maxaveragebitrate=32000;stereo=0;useinbandfec=1'
+export const OPUS_SDP_TARGET = 'maxaveragebitrate=32000;stereo=0;useinbandfec=1;usedtx=0'
 
 /** Paires clé/valeur appliquées (dans cet ordre) au fmtp Opus. */
 const OPUS_FMTP_OVERRIDES: ReadonlyArray<readonly [string, string]> = [
   ['maxaveragebitrate', '32000'],
   ['stereo', '0'],
   ['useinbandfec', '1'],
+  ['usedtx', '0'],
 ]
+
+/**
+ * Latence de capture demandée à `getUserMedia`, en secondes. `ideal`, jamais
+ * `exact` : un micro qui refuse 10 ms doit quand même s'ouvrir. Sur Linux,
+ * combiné à `PULSE_LATENCY_MSEC`, ça évite le tampon Pulse par défaut (~2 s).
+ */
+export const CAPTURE_LATENCY_IDEAL_SEC = 0.01
+
+/**
+ * Cible du tampon de gigue sur le LAN, en millisecondes. 50 ms tient dans
+ * 40–60 : assez pour le Wi-Fi, très en dessous des 2–3 s observés quand le
+ * récepteur Windows choisit sa cible tout seul au premier paquet.
+ * `jitterBufferTarget` est en millisecondes ; `playoutDelayHint` est en secondes.
+ */
+export const LAN_JITTER_BUFFER_TARGET_MS = 50
+
+export function lanReceiverLatencyConfig(): {
+  readonly jitterBufferTargetMs: number
+  readonly playoutDelayHintSec: number
+} {
+  return {
+    jitterBufferTargetMs: LAN_JITTER_BUFFER_TARGET_MS,
+    playoutDelayHintSec: LAN_JITTER_BUFFER_TARGET_MS / 1000,
+  }
+}
+
+/**
+ * Pose la cible basse sur un récepteur, dès `ontrack` (avant la première
+ * syllabe). Un setter absent ou un hors-plage n'empêche pas l'autre.
+ */
+export function applyLanReceiverLatency(receiver: object): void {
+  const config = lanReceiverLatencyConfig()
+  try {
+    Reflect.set(receiver, 'jitterBufferTarget', config.jitterBufferTargetMs)
+  } catch {
+    // Chromium sans la propriété, ou valeur refusée.
+  }
+  try {
+    Reflect.set(receiver, 'playoutDelayHint', config.playoutDelayHintSec)
+  } catch {
+    // Idem.
+  }
+}
 
 /** Valeur par défaut injectée dans un fmtp Opus absent (minptime = 10 ms gardé). */
 const OPUS_DEFAULT_MINPTIME = 'minptime=10'
@@ -152,6 +200,8 @@ export interface MediaTrackRequest {
   readonly echoCancellation: IdealBoolean
   readonly noiseSuppression: IdealBoolean
   readonly autoGainControl: IdealBoolean
+  /** Secondes. Idéal : un micro qui ne sait pas faire 10 ms s'ouvre quand même. */
+  readonly latency: { readonly ideal: number }
   readonly deviceId?: string
 }
 
@@ -166,6 +216,7 @@ export function toMediaTrackConstraints(constraints: MicrophoneConstraints): Med
     echoCancellation: { ideal: constraints.echoCancellation === true },
     noiseSuppression: { ideal: constraints.noiseSuppression === true },
     autoGainControl: { ideal: constraints.autoGainControl === true },
+    latency: { ideal: CAPTURE_LATENCY_IDEAL_SEC },
   }
   if (typeof constraints.deviceId === 'string' && constraints.deviceId.length > 0) {
     return { ...request, deviceId: constraints.deviceId }
@@ -411,4 +462,166 @@ export function summarizeStats(entries: readonly unknown[]): MediaStatsSummary {
     }
   }
   return { bytesSent, bytesReceived, packetsLost, rttMs }
+}
+
+/** Un côté RTP (entrant, sortant, ou retour distant) réduit aux champs de latence. */
+export interface LatencySide {
+  readonly jitterBufferDelaySec: number | null
+  readonly jitterBufferEmittedCount: number | null
+  readonly jitterBufferMs: number | null
+  readonly packetsLost: number | null
+  readonly roundTripTimeSec: number | null
+  readonly totalAudioEnergy: number | null
+  readonly totalSamplesDuration: number | null
+  readonly bytesSent: number | null
+  readonly bytesReceived: number | null
+  readonly jitterSec: number | null
+}
+
+export interface PeerLatencyReading {
+  readonly inbound: LatencySide
+  readonly outbound: LatencySide
+  readonly remoteInbound: LatencySide
+  /** `candidate-pair` sélectionnée, `currentRoundTripTime`, en secondes. */
+  readonly candidateRttSec: number | null
+}
+
+export interface LocalAudioClock {
+  readonly sampleRate: number | null
+  readonly baseLatencySec: number | null
+  readonly outputLatencySec: number | null
+  readonly state: string | null
+  readonly captureSampleRate: number | null
+  readonly captureChannels: number | null
+}
+
+export interface PeerAudioDebug {
+  readonly peerId: string
+  readonly jitterBufferTargetMs: number | null
+  readonly playoutDelayHintSec: number | null
+  readonly latency: PeerLatencyReading
+}
+
+export interface MediaLatencyReport {
+  readonly clock: LocalAudioClock
+  readonly sendOpen: boolean
+  readonly peers: readonly PeerAudioDebug[]
+}
+
+/**
+ * Délai moyen du tampon de gigue, en millisecondes.
+ * La spec somme des secondes (`jitterBufferDelay`) sur des échantillons
+ * (`jitterBufferEmittedCount`) : moyenne = delay / count.
+ */
+export function jitterBufferAverageMs(delaySec: number | null, emitted: number | null): number | null {
+  if (delaySec === null || emitted === null || !(emitted > 0)) return null
+  if (!Number.isFinite(delaySec) || delaySec < 0) return null
+  const ms = (delaySec / emitted) * 1000
+  if (!Number.isFinite(ms) || ms < 0) return null
+  return Math.round(ms * 10) / 10
+}
+
+function emptyLatencySide(): LatencySide {
+  return {
+    jitterBufferDelaySec: null,
+    jitterBufferEmittedCount: null,
+    jitterBufferMs: null,
+    packetsLost: null,
+    roundTripTimeSec: null,
+    totalAudioEnergy: null,
+    totalSamplesDuration: null,
+    bytesSent: null,
+    bytesReceived: null,
+    jitterSec: null,
+  }
+}
+
+function isAudioStat(entry: unknown): boolean {
+  const kind = readString(entry, 'kind')
+  const mediaType = readString(entry, 'mediaType')
+  if (kind === 'video' || mediaType === 'video') return false
+  return true
+}
+
+function keepNumber(current: number | null, entry: unknown, key: string): number | null {
+  if (current !== null) return current
+  return readNumber(entry, key)
+}
+
+function readFlag(entry: unknown, key: string): boolean | null {
+  if (typeof entry !== 'object' || entry === null) return null
+  for (const [name, value] of Object.entries(entry)) {
+    if (name === key && typeof value === 'boolean') return value
+  }
+  return null
+}
+
+/**
+ * Champs de latence d'un `getStats()`, audio seulement. Le premier nombre
+ * rencontré gagne : l'énergie sortante vient de `outbound-rtp` s'il la porte,
+ * sinon de `media-source` (c'est là que Chromium la met le plus souvent).
+ */
+export function peerLatencyFromStats(entries: readonly unknown[]): PeerLatencyReading {
+  let inbound = emptyLatencySide()
+  let outbound = emptyLatencySide()
+  let remoteInbound = emptyLatencySide()
+  let candidateRttSec: number | null = null
+  for (const entry of entries) {
+    if (!isAudioStat(entry)) continue
+    const type = readString(entry, 'type')
+    if (type === 'inbound-rtp') {
+      const delay = keepNumber(inbound.jitterBufferDelaySec, entry, 'jitterBufferDelay')
+      const emitted = keepNumber(inbound.jitterBufferEmittedCount, entry, 'jitterBufferEmittedCount')
+      inbound = {
+        jitterBufferDelaySec: delay,
+        jitterBufferEmittedCount: emitted,
+        jitterBufferMs: jitterBufferAverageMs(delay, emitted),
+        packetsLost: keepNumber(inbound.packetsLost, entry, 'packetsLost'),
+        roundTripTimeSec: inbound.roundTripTimeSec,
+        totalAudioEnergy: keepNumber(inbound.totalAudioEnergy, entry, 'totalAudioEnergy'),
+        totalSamplesDuration: keepNumber(inbound.totalSamplesDuration, entry, 'totalSamplesDuration'),
+        bytesSent: inbound.bytesSent,
+        bytesReceived: keepNumber(inbound.bytesReceived, entry, 'bytesReceived'),
+        jitterSec: keepNumber(inbound.jitterSec, entry, 'jitter'),
+      }
+      continue
+    }
+    if (type === 'outbound-rtp' || type === 'media-source') {
+      outbound = {
+        jitterBufferDelaySec: outbound.jitterBufferDelaySec,
+        jitterBufferEmittedCount: outbound.jitterBufferEmittedCount,
+        jitterBufferMs: outbound.jitterBufferMs,
+        packetsLost: keepNumber(outbound.packetsLost, entry, 'packetsLost'),
+        roundTripTimeSec: outbound.roundTripTimeSec,
+        totalAudioEnergy: keepNumber(outbound.totalAudioEnergy, entry, 'totalAudioEnergy'),
+        totalSamplesDuration: keepNumber(outbound.totalSamplesDuration, entry, 'totalSamplesDuration'),
+        bytesSent: keepNumber(outbound.bytesSent, entry, 'bytesSent'),
+        bytesReceived: outbound.bytesReceived,
+        jitterSec: outbound.jitterSec,
+      }
+      continue
+    }
+    if (type === 'remote-inbound-rtp') {
+      remoteInbound = {
+        jitterBufferDelaySec: remoteInbound.jitterBufferDelaySec,
+        jitterBufferEmittedCount: remoteInbound.jitterBufferEmittedCount,
+        jitterBufferMs: remoteInbound.jitterBufferMs,
+        packetsLost: keepNumber(remoteInbound.packetsLost, entry, 'packetsLost'),
+        roundTripTimeSec: keepNumber(remoteInbound.roundTripTimeSec, entry, 'roundTripTime'),
+        totalAudioEnergy: keepNumber(remoteInbound.totalAudioEnergy, entry, 'totalAudioEnergy'),
+        totalSamplesDuration: remoteInbound.totalSamplesDuration,
+        bytesSent: remoteInbound.bytesSent,
+        bytesReceived: remoteInbound.bytesReceived,
+        jitterSec: keepNumber(remoteInbound.jitterSec, entry, 'jitter'),
+      }
+      continue
+    }
+    if (type === 'candidate-pair') {
+      if (readString(entry, 'state') !== 'succeeded') continue
+      if (readFlag(entry, 'nominated') === false) continue
+      const rtt = readNumber(entry, 'currentRoundTripTime')
+      if (rtt !== null && rtt >= 0) candidateRttSec = rtt
+    }
+  }
+  return { inbound, outbound, remoteInbound, candidateRttSec }
 }

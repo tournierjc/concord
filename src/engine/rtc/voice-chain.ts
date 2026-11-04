@@ -38,6 +38,11 @@ export interface VoiceChainLike {
   readonly current: VoiceFilterId
   /** Applique une voix (détruit l'ancien graphe, monte le nouveau). Rend la piste des pairs. */
   applyFilter(id: VoiceFilterId): MediaStreamTrack
+  /**
+   * Ouvre ou ferme l'émission par un GAIN, sans toucher `track.enabled`.
+   * Absent = la chaîne ne sait pas (repli : le plan coupe la piste).
+   */
+  setSendOpen?(open: boolean): void
   /** Débranche tout. Idempotent. */
   close(): void
 }
@@ -94,6 +99,11 @@ export interface VoiceChainHostHandle {
   apply(id: VoiceFilterId): MediaStreamTrack | null
   /** La voix réellement appliquée (`null` = aucune chaîne ouverte). */
   current(): VoiceFilterId | null
+  /**
+   * Demande au gain d'émission d'ouvrir ou de fermer. `false` = la chaîne n'a
+   * pas de gain (le plan doit couper `track.enabled`, repli historique).
+   */
+  setSendOpen(open: boolean): boolean
   /** Ferme la chaîne (aucune piste n'est arrêtée : le flux appartient au plan média). */
   close(): void
 }
@@ -171,6 +181,11 @@ export function createVoiceChainHost(host: VoiceChainHost): VoiceChainHostHandle
     },
     current(): VoiceFilterId | null {
       return chain === null ? null : chain.current
+    },
+    setSendOpen(open: boolean): boolean {
+      if (chain === null || typeof chain.setSendOpen !== 'function') return false
+      chain.setSendOpen(open)
+      return true
     },
     close(): void {
       if (chain === null) return

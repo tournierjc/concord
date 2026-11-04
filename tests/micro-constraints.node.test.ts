@@ -129,6 +129,7 @@ describe('createMediaPlane — les facettes réglées arrivent à getUserMedia',
         echoCancellation: { ideal: false },
         noiseSuppression: { ideal: false },
         autoGainControl: { ideal: true },
+        latency: { ideal: 0.01 },
         deviceId: 'périphérique-casque',
       });
       plane.close();
