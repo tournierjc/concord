@@ -436,6 +436,15 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
    * intention pour la prochaine ouverture, jamais un silence prétendu).
    */
   let voiceHost: VoiceChainHostHandle | null = null
+  /**
+   * Intention d'émission, UNE seule (VAD ouvert ou PTT enfoncé). Posée par
+   * `setTransmitting` et réappliquée à chaque piste envoyée : changement de
+   * filtre, replaceTrack, arrivée d'un pair, réouverture du micro. Sans cela
+   * une piste neuve (la destination qui renaît quand on la débranche) part
+   * coupée, et le VAD déjà ouvert ne renvoie pas d'événement.
+   */
+  let wantSend = false
+  let wantSendKnown = false
 
   function warn(message: string): void {
     console.warn(`[media-plane ${o.localId}] ${message}`)
@@ -613,12 +622,18 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
   }
 
   /** Branche la piste micro locale sur un pair (création ou remplacement). */
+  function applyWantSend(track: MediaStreamTrack): void {
+    track.enabled = wantSend
+    if (captureTrack !== null && captureTrack !== track) captureTrack.enabled = true
+  }
+
   async function attachLocalTrack(remoteId: string, peer: Peer): Promise<void> {
     const track = localTrack
     if (track === null) {
       warnDeafLink(remoteId)
       return
     }
+    applyWantSend(track)
     if (peer.sender === null) {
       const stream = localStream === null ? new MediaStream([track]) : localStream
       peer.sender = peer.pc.addTrack(track, stream)
@@ -868,12 +883,15 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     // l'appelant a demandé l'inverse à la construction (mode VAD, SPEC-019 avenant
     // 2026-11-02) : en détection de voix le micro doit rester ouvert, c'est la mesure qui
     // décide de qui parle. Le défaut (`undefined`) garde le comportement d'avant.
+    // Une intention déjà posée (setTransmitting avant que le micro réponde) gagne :
+    // c'est la même vérité que le mode en cours, pas un second drapeau.
+    if (!wantSendKnown) {
+      wantSend = o.microOpenOnStart === true
+      wantSendKnown = true
+    }
     // Le levier est la piste ENVOYÉE aux pairs (filtrée quand une voix vit, brute sinon) —
     // jamais la piste micro, qui continuerait d'alimenter le graphe de filtrage en silence.
-    outgoing.enabled = o.microOpenOnStart === true
-    // La capture reste OUVERTE même en push-to-talk : AEC et RNNoise se calibrent sur
-    // elle. Couper `outgoing` (la piste envoyée) suffit à se taire.
-    if (outgoing !== first) first.enabled = true
+    applyWantSend(outgoing)
     // Le vumètre local mesure le MICRO BRUT (la piste `first`), pas la piste filtrée : le
     // push-to-talk et le battement VAD décident sur la voix réelle, pas sur sa version robot —
     // un robot dont la modulation d'anneau ferait osciller le détecteur n'est pas un VAD.
@@ -947,12 +965,14 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
   }
 
   function setTransmitting(on: boolean): void {
+    wantSend = on
+    wantSendKnown = true
     const track = localTrack
     if (track === null) {
       warn('setTransmitting ignoré : micro non démarré')
       return
     }
-    track.enabled = on
+    applyWantSend(track)
   }
 
   function setVoiceFilter(id: VoiceFilterId): MediaStreamTrack | null {
@@ -969,9 +989,10 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     // Le graphe change sur la même destination la plupart du temps, mais un repli
     // (panne) ou une destination neuve change l'identité de la piste. Chaque pair
     // doit recevoir CETTE piste — sinon l'émetteur garde le micro brut.
-    const enabled = localTrack === null ? next.enabled : localTrack.enabled
-    next.enabled = enabled
+    // L'intention d'émission est réappliquée ICI : une piste neuve naît souvent
+    // coupée, et le VAD déjà ouvert n'a pas de nouvelle transition à émettre.
     localTrack = next
+    applyWantSend(next)
     for (const [remoteId, peer] of peers) {
       void attachLocalTrack(remoteId, peer).catch((error: unknown) => {
         warn(`replaceTrack voix « ${id} » refusé pour ${remoteId} : ${describeError(error)}`)

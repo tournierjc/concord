@@ -290,6 +290,13 @@ export function createVoiceFilterChain(
   process: VoiceProcessOptions = {},
 ): VoiceFilterChain {
   const destination = context.createMediaStreamDestination()
+  // Pont permanent vers la destination. Le débrancher (changement de filtre) fait
+  // taire la piste MediaStream dans Chromium : elle se mute ou renaît coupée, et
+  // le VAD déjà ouvert ne réémet pas d'événement pour la rallumer. Le graphe du
+  // filtre se branche sur CE gain, jamais directement sur la destination.
+  const bridge = context.createGain()
+  if (bridge.gain !== undefined) bridge.gain.value = 1
+  bridge.connect(destination)
   /**
    * La piste micro, lue UNE fois sur le flux entrant : c'est elle qui entre dans le graphe,
    * et c'est elle que le repli rend si la destination est vide (contexte fermé).
@@ -422,7 +429,7 @@ export function createVoiceFilterChain(
 
     if (recipe.nodes.length === 0) {
       // Voix neutre : AUCUN nœud de recette. La tête va directement à la destination.
-      head.connect(destination)
+      head.connect(bridge)
       applied = id
       return trackOf()
     }
@@ -493,7 +500,7 @@ export function createVoiceFilterChain(
     const tailIndex = recipe.chain[recipe.chain.length - 1] as number
     const tail = built[tailIndex]
     if (tail === undefined) throw new Error(`[voice-filter] recette « ${id} » : chaîne vide`)
-    tail.output.connect(destination)
+    tail.output.connect(bridge)
     applied = id
     return trackOf()
   }
@@ -519,6 +526,11 @@ export function createVoiceFilterChain(
           // Déjà coupée.
         }
         sourceNode = null
+      }
+      try {
+        bridge.disconnect()
+      } catch {
+        // Déjà coupé.
       }
     },
   }
