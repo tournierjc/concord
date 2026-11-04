@@ -140,6 +140,7 @@
   "settings.audio.duck.help": "Pendant qu’on vous parle, le son des autres logiciels baisse tout seul et revient après.",
   "settings.audio.voiceFilter": "Filtre vocal",
   "settings.audio.voiceFilter.help": "Appliqué à votre micro avant l’envoi aux autres. Changeable en pleine conversation.",
+  "settings.audio.voiceFilter.workletFailed": "Le correcteur de voix n’a pas démarré — seul l’égaliseur est audible.",
   "settings.audio.voiceFilter.unavailable": "Voix indisponible sur cette machine — votre voix normale est envoyée.",
   "settings.audio.voiceFilter.none": "Aucune",
   "settings.audio.voiceFilter.robot": "Robot",

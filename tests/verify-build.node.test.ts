@@ -16,7 +16,7 @@ import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 // @ts-expect-error — plain ESM script without type declarations
-import { lanApiMethods, missingPreloadMethods } from '../scripts/verify-build.mjs';
+import { lanApiMethods, missingPreloadMethods, voiceWorkletProblems } from '../scripts/verify-build.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workDir = mkdtempSync(join(tmpdir(), 'concord-verify-'));
@@ -46,5 +46,38 @@ describe('verify-build — preload/LanAPI parity', () => {
   it('a stale preload (method removed) is rejected', () => {
     const stale = readFileSync(outfile, 'utf8').replace(/\bonDiscoveryStatus\s*:/, 'removedMethod:');
     assert.deepEqual(missingPreloadMethods(stale), ['onDiscoveryStatus']);
+  });
+});
+
+describe('verify-build — le processeur de timbre est dans le bundle, pas un fichier manquant', () => {
+  const inlined = [
+    'concord-voice-character-inline',
+    'function createVoiceCharacterState',
+    'function processVoiceCharacter',
+    "registerProcessor('concord-voice-character', ConcordVoiceCharacter)",
+    'URL.createObjectURL(new Blob([source]))',
+    'worklet.addModule(url)',
+  ].join('\n');
+
+  it('accepte un bundle qui porte le worklet inliné et le charge en blob', () => {
+    assert.deepEqual(voiceWorkletProblems(inlined), []);
+  });
+
+  it('refuse un bundle dont le worklet a été minifié hors de la chaîne (le défaut 0.4.23)', () => {
+    const broken = [
+      'function Jr(){return `\\n${At.toString()}\\nclass ConcordVoiceCharacter',
+      "registerProcessor('concord-voice-character', ConcordVoiceCharacter)`}",
+      'URL.createObjectURL(new Blob([Jr()]))',
+      'l.addModule(u)',
+    ].join('\n');
+    const problems: string[] = voiceWorkletProblems(broken);
+    assert.ok(problems.some((problem) => problem.includes('concord-voice-character-inline')));
+    assert.ok(problems.some((problem) => problem.includes('createVoiceCharacterState')));
+  });
+
+  it('refuse un bundle qui pointe un fichier de worklet sans le corps', () => {
+    const external = 'import url from "./voice-character.worklet.js?url"; worklet.addModule(url); URL.createObjectURL';
+    const problems: string[] = voiceWorkletProblems(external);
+    assert.ok(problems.length > 0);
   });
 });

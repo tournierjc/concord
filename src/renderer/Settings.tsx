@@ -27,6 +27,7 @@ import {
 } from '../shell/settings-schema';
 import { isValidAccelerator, normalizeAccelerator } from '../shell/settings-schema';
 import { VOICE_FILTER_IDS } from '../engine/rtc/voice-filters.ts';
+import { subscribeVoiceProcessor, voiceProcessorPhase } from './voice-character.ts';
 import { configureVoiceProcessing, currentVoiceFilter, reapplyCaptureProcessing, setOutputDevice, setVoiceFilter } from './voice.ts';
 import {
   MIC_CHECK_SPEAKING_RMS,
@@ -156,6 +157,7 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
   // PAS été appliquée au micro ouvert (fabrication impossible — le réglage reste écrit comme
   // intention, la voix brute part aux pairs, et l'aide le dit). Jamais une alerte bloquante.
   const [voiceFilterRefused, setVoiceFilterRefused] = useState<boolean | null>(null);
+  const voiceProcessor = useSyncExternalStore(subscribeVoiceProcessor, voiceProcessorPhase, voiceProcessorPhase);
   // Test du micro (2026-11-03) : l'état du store `mic-check` — le panneau ne fait que le piloter
   // et le rendre. Le panneau qui ferme ARRÊTE l'écoute (un micro ouvert derrière une fenêtre
   // fermée est exactement le genre de fuite que ce poste doit rendre impossible).
@@ -425,6 +427,8 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
             <span className="field__help">
               {t('settings.audio.voiceFilter.help')}
               {voiceFilterRefused === false ? ` — ${t('settings.audio.voiceFilter.unavailable')}` : ''}
+              {voiceProcessor.phase === 'fallback' ? ` — ${t('settings.audio.voiceFilter.workletFailed')}` : ''}
+              {voiceProcessor.phase === 'fallback' && voiceProcessor.detail !== '' ? ` (${voiceProcessor.detail})` : ''}
             </span>
           </div>
 

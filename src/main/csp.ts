@@ -5,8 +5,11 @@ import { asWebSocketOrigin, wsOrigin } from './net-schemes';
  * CSP stricte + garde réseau (SPEC-001 A15 / CA19 / CA20).
  *
  * Politique :
- *  - `script-src 'self'` exclusivement, jamais de `'unsafe-eval'`, jamais de `'unsafe-inline'`
- *    pour les scripts, jamais de source distante.
+ *  - `script-src 'self' blob:` : l'application, plus un blob fabriqué par la page.
+ *    Le blob sert UNIQUEMENT à `audioWorklet.addModule` (le processeur de timbre est
+ *    une chaîne de ce dépôt). Jamais de `'unsafe-eval'`, jamais de `'unsafe-inline'`,
+ *    jamais de source distante. `worker-src` ne s'applique PAS à un AudioWorklet :
+ *    Chrome consulte `worklet-src`, à défaut `script-src`. Les deux portent donc `blob:`.
  *  - `connect-src` : uniquement la boucle locale et les adresses du réseau local. Aucun `https:`,
  *    aucun `wss:` public. La liste des hôtes LAN est calculée au démarrage à partir des interfaces
  *    réseau de la machine, plus les hôtes explicitement autorisés par le moteur (hôte du salon
@@ -100,7 +103,7 @@ export function buildCsp(opts: CspOptions = {}): string {
   }
   const directives: Record<string, string[]> = {
     'default-src': ["'none'"],
-    'script-src': ["'self'"],
+    'script-src': ["'self'", 'blob:'],
     // Les styles sont locaux ; 'unsafe-inline' couvre les attributs `style` produits par React
     // (jauges de niveau, halo de parole). Aucun script inline n'est autorisé.
     'style-src': ["'self'", "'unsafe-inline'"],
@@ -109,6 +112,8 @@ export function buildCsp(opts: CspOptions = {}): string {
     'media-src': ["'self'", 'blob:', 'mediastream:'],
     'connect-src': connect,
     'worker-src': ["'self'", 'blob:'],
+    // AudioWorklet.addModule : worklet-src (repli script-src). worker-src ne suffit pas.
+    'worklet-src': ["'self'", 'blob:'],
     'child-src': ["'none'"],
     'object-src': ["'none'"],
     'base-uri': ["'none'"],

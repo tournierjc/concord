@@ -107,8 +107,21 @@ const defaultWorkletFactory: NoiseGateWorkletFactory = (context, name, options) 
   return new AudioWorkletNode(context as BaseAudioContext, name, options)
 }
 
+/**
+ * Nom réellement déclaré par `toString()` après minification. `keepNames` préserve
+ * `.name`, pas le texte : la classe doit appeler la liaison (`function Xr`), sinon
+ * `addModule` lève ReferenceError et la porte reste un pont silencieux.
+ */
+function workletBinding(fn: Function): string {
+  const match = /^function\s+([A-Za-z0-9_$]+)/.exec(fn.toString())
+  if (match?.[1] === undefined) throw new Error('AudioWorklet: fonction sans déclaration')
+  return match[1]
+}
+
 /** Source du worklet : les deux fonctions pures, puis le processeur qui les appelle. */
 export function noiseGateWorkletSource(): string {
+  const create = workletBinding(createNoiseGateState)
+  const process = workletBinding(processNoiseGate)
   return `
 ${createNoiseGateState.toString()}
 ${processNoiseGate.toString()}
@@ -117,13 +130,13 @@ class ConcordNoiseGate extends AudioWorkletProcessor {
     super()
     const opts = (options && options.processorOptions) || {}
     const db = typeof opts.thresholdDb === 'number' ? opts.thresholdDb : -40
-    this.state = createNoiseGateState(sampleRate, db)
+    this.state = ${create}(sampleRate, db)
   }
   process(inputs, outputs) {
     const input = inputs[0] && inputs[0][0]
     const output = outputs[0] && outputs[0][0]
     if (!input || !output) return true
-    processNoiseGate(this.state, input, output)
+    ${process}(this.state, input, output)
     return true
   }
 }
@@ -197,8 +210,9 @@ export function createNoiseGateNode(
         node.connect(output)
         processor = node
       })
-      .catch(() => {
-        console.warn('[noise-gate] AudioWorklet refusé — porte inactive, voix brute conservée')
+      .catch((error: unknown) => {
+        const detail = error instanceof Error ? error.message : String(error)
+        console.error(`[noise-gate] AudioWorklet refusé — porte inactive, voix brute conservée (${detail})`)
       })
       .finally(() => {
         URL.revokeObjectURL(url)

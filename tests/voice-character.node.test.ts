@@ -11,13 +11,19 @@
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import { voiceFilterCharacter } from '../src/engine/rtc/voice-filters.ts'
 import {
+  VOICE_WORKLET_INLINE_MARK,
+  createVoiceCharacterNode,
   createVoiceCharacterState,
   renderVoiceCharacter,
+  voiceCharacterWorkletSource,
+  voiceProcessorPhase,
   type VoiceCharacterSpec,
 } from '../src/renderer/voice-character.ts'
+import { FakeAudioContext, FakeAudioNode } from './fake-rtc.ts'
 
 const SAMPLE_RATE = 48000
 const SOURCE_F0 = 120
@@ -143,8 +149,10 @@ describe('voice-character — F0 et centroïde sur une voix d’homme synthétiq
       const centroid = spectralCentroid(rendered)
       const ratio = centroid / sourceCentroid
       if (id === 'woman') {
+        assert.ok(measuredF0 >= 200, `${id}: F0 ${measuredF0.toFixed(1)} Hz, plancher 200`)
         assert.ok(ratio >= 1.15, `${id}: centroïde ×${ratio.toFixed(2)} (attendu ≥ 1,15)`)
       } else if (id === 'child') {
+        assert.ok(measuredF0 >= 250, `${id}: F0 ${measuredF0.toFixed(1)} Hz, plancher 250`)
         assert.ok(ratio >= 1.3, `${id}: centroïde ×${ratio.toFixed(2)} (attendu ≥ 1,30)`)
       } else {
         assert.ok(ratio <= 0.85, `${id}: centroïde ×${ratio.toFixed(2)} (attendu ≤ 0,85)`)
@@ -172,5 +180,138 @@ describe('voice-character — F0 et centroïde sur une voix d’homme synthétiq
     assert.ok(childC > womanC)
     assert.ok(womanC > sourceCentroid)
     assert.ok(giantC < sourceCentroid)
+  })
+})
+
+/** Voix un peu réelle : F0 qui tremble (±3 %) et amplitude qui scintille (±8 %). */
+function jitteredMale(): Float32Array {
+  const n = SAMPLE_RATE
+  const pulse = new Float32Array(n)
+  let i = 0
+  while (i < n) {
+    const wobble = 1 + 0.03 * Math.sin((2 * Math.PI * 4.5 * i) / SAMPLE_RATE)
+    const period = Math.max(1, Math.round((SAMPLE_RATE / SOURCE_F0) * wobble))
+    const shimmer = 0.92 + 0.08 * Math.sin((2 * Math.PI * 7 * i) / SAMPLE_RATE)
+    pulse[i] = shimmer
+    i += period
+  }
+  let shaped = pulse
+  for (const freq of [550, 950, 2200]) shaped = resonator(shaped, freq, 90)
+  let energy = 0
+  for (let k = 0; k < shaped.length; k += 1) energy += (shaped[k] ?? 0) * (shaped[k] ?? 0)
+  const rms = Math.sqrt(energy / shaped.length) || 1
+  for (let k = 0; k < shaped.length; k += 1) shaped[k] = ((shaped[k] ?? 0) / rms) * 0.2
+  return shaped
+}
+
+describe('voice-character — une voyelle instable ne retombe pas sur la période d’origine', () => {
+  const source = jitteredMale()
+
+  for (const id of ['woman', 'child', 'deep'] as const) {
+    it(`${id} garde la cible de F0 malgré jitter et shimmer`, () => {
+      const spec = voiceFilterCharacter(id)
+      assert.ok(spec !== null)
+      const rendered = renderVoiceCharacter(source, SAMPLE_RATE, spec)
+      const targetF0 = SOURCE_F0 * spec.pitchRatio
+      const measuredF0 = fundamentalHz(rendered, targetF0)
+      const f0Error = Math.abs(measuredF0 - targetF0) / targetF0
+      assert.ok(
+        f0Error <= 0.08,
+        `${id}: F0 ${measuredF0.toFixed(1)} Hz pour ${targetF0.toFixed(1)} Hz (erreur ${(f0Error * 100).toFixed(1)} %)`,
+      )
+      if (id === 'woman') assert.ok(measuredF0 >= 200)
+      if (id === 'child') assert.ok(measuredF0 >= 250)
+      if (id === 'deep') assert.ok(measuredF0 <= 80)
+    })
+  }
+})
+
+describe('voice-character — le worklet chargé est le corps inliné, et l’échec est visible', () => {
+  it('la chaîne déclare les noms que la classe appelle (pas un toString minifié)', () => {
+    const source = voiceCharacterWorkletSource()
+    assert.ok(source.includes(VOICE_WORKLET_INLINE_MARK))
+    assert.equal(source.includes('.toString()'), false)
+    assert.match(source, /function createVoiceCharacterState\(/)
+    assert.match(source, /function processVoiceCharacter\(/)
+    assert.match(source, /registerProcessor\('concord-voice-character', ConcordVoiceCharacter\)/)
+    const grain = new Function(
+      `${source.slice(0, source.indexOf('class ConcordVoiceCharacter'))}; return createVoiceCharacterState(48000, { pitchRatio: 1.2, formantScale: 1, highpassHz: 0, tilt: 0, lowShelf: 0, subharmonic: 0, chorus: 0 }).grainCap`,
+    )() as number
+    assert.equal(grain, Math.round(48000 * 0.03))
+  })
+
+  it('le test du micro et l’appel construisent le même processeur', () => {
+    const mic = readFileSync(new URL('../src/renderer/mic-check.ts', import.meta.url), 'utf8')
+    const filter = readFileSync(new URL('../src/renderer/voice-filter.ts', import.meta.url), 'utf8')
+    assert.match(mic, /buildChain: createVoiceFilterChain/)
+    assert.match(filter, /createVoiceCharacterNode\(/)
+  })
+
+  it('addModule qui résout branche le processeur avec les paramètres ; un rejet laisse le pont et le dit', async () => {
+    class RecordingWorklet extends FakeAudioNode {
+      readonly name: string
+      readonly options: AudioWorkletNodeOptions
+      readonly port = { onmessage: null as ((event: MessageEvent) => void) | null }
+      constructor(_context: unknown, name: string, options: AudioWorkletNodeOptions) {
+        super()
+        this.name = name
+        this.options = options
+      }
+    }
+    const previousNode = globalThis.AudioWorkletNode
+    const previousCreate = URL.createObjectURL
+    const previousRevoke = URL.revokeObjectURL
+    const previousError = console.error
+    const errors: string[] = []
+    globalThis.AudioWorkletNode = RecordingWorklet as unknown as typeof AudioWorkletNode
+    URL.createObjectURL = () => 'blob:concord-test'
+    URL.revokeObjectURL = () => undefined
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map((part) => String(part)).join(' '))
+    }
+    const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+    try {
+      const spec = voiceFilterCharacter('woman')
+      assert.ok(spec !== null)
+      const live = new FakeAudioContext()
+      let loads = 0
+      live.audioWorklet.addModule = async () => {
+        loads += 1
+      }
+      const node = createVoiceCharacterNode(live, spec)
+      await flush()
+      assert.equal(loads, 1)
+      assert.equal(voiceProcessorPhase().phase, 'live')
+      const processor = node.input instanceof FakeAudioNode ? node.input.outgoing[0] : undefined
+      assert.ok(processor instanceof RecordingWorklet, 'le processeur est entre l’entrée et la sortie')
+      assert.equal(processor.name, 'concord-voice-character')
+      const options = processor.options.processorOptions as { pitchRatio: number; formantScale: number }
+      assert.equal(options.pitchRatio, spec.pitchRatio)
+      assert.equal(options.formantScale, spec.formantScale)
+      assert.ok(processor.outgoing.includes(node.output as FakeAudioNode))
+      createVoiceCharacterNode(live, spec)
+      await flush()
+      assert.equal(loads, 1, 'le module n’est enregistré qu’une fois par contexte')
+      node.close()
+
+      const dead = new FakeAudioContext()
+      dead.audioWorklet.addModule = async () => {
+        throw new Error('Refused to load the script because it violates the CSP')
+      }
+      const bridge = createVoiceCharacterNode(dead, spec)
+      await flush()
+      assert.equal(voiceProcessorPhase().phase, 'fallback')
+      assert.match(voiceProcessorPhase().detail, /CSP/)
+      assert.ok(errors.some((line) => line.includes('AudioWorklet refusé') && line.includes('CSP')))
+      assert.ok(bridge.input instanceof FakeAudioNode)
+      assert.equal(bridge.input.disconnectCalls, 0, 'le pont entrée→sortie reste : seul l’égaliseur est entendu')
+      assert.ok(bridge.input.outgoing.includes(bridge.output as FakeAudioNode))
+      bridge.close()
+    } finally {
+      globalThis.AudioWorkletNode = previousNode
+      URL.createObjectURL = previousCreate
+      URL.revokeObjectURL = previousRevoke
+      console.error = previousError
+    }
   })
 })

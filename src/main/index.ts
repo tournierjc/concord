@@ -471,14 +471,20 @@ function createMainWindow(): BrowserWindow {
   // CONCORD_SIGNAL_DEBUG : le journal du process ne voyait que les lignes `<=` du
   // tuyau. Les erreurs du renderer (micro refusé, rôle du maillage) y remontent,
   // et la page active les traces `[mesh]` déjà gardées par `__CONCORD_DEBUG__`.
-  if (process.env.CONCORD_SIGNAL_DEBUG) {
+  // CONCORD_AUDIO_DEBUG fait la même remontée et arme en plus `__CONCORD_AUDIO_DEBUG__` :
+  // le processeur de timbre poste alors, sur stderr, `[renderer] [voice-character] …`
+  // (processeur chargé, puis inputHz / outputHz / fallback toutes les ~3 s).
+  // Lire : lancer l'application packagée avec CONCORD_AUDIO_DEBUG=1 et regarder stderr.
+  if (process.env.CONCORD_SIGNAL_DEBUG || process.env.CONCORD_AUDIO_DEBUG) {
     window.webContents.on('console-message', (_event, level, message) => {
       if (level < 2) return;
       console.error(`[renderer] ${message}`);
     });
     window.webContents.on('dom-ready', () => {
       if (window.isDestroyed()) return;
-      void window.webContents.executeJavaScript('globalThis.__CONCORD_DEBUG__ = true').catch(() => undefined);
+      void window.webContents
+        .executeJavaScript('globalThis.__CONCORD_DEBUG__ = true; globalThis.__CONCORD_AUDIO_DEBUG__ = true')
+        .catch(() => undefined);
     });
   }
   const reveal = (): void => {

@@ -104,6 +104,14 @@ function runFrames(ratio: number, input: Float32Array, frames: number, warmup: n
 describe('voice-pitch — la hauteur est mesurée, pas déclarée', () => {
   for (const [voice, ratio] of Object.entries(VOICE_FILTER_PITCH_RATIOS)) {
     if (voice === 'none' || voice === 'robot' || voice === 'radio') continue
+    // L'enfant dépasse ×2 : le granulaire historique ramène ce ratio à 1. Le timbre
+    // réel passe par voice-character, qui n'a pas cette borne.
+    if (!isPitchRatioValid(ratio)) {
+      it(`${voice} (ratio ${ratio}) est hors [0.5, 2] : le granulaire le refuse, voice-character le porte`, () => {
+        assert.equal(createPitchState(SAMPLE_RATE, ratio).ratio, 1)
+      })
+      continue
+    }
     it(`${voice} (ratio ${ratio}) : la fréquence dominante mesurée vaut 220 × ratio`, () => {
       const frame = pitchFrameSizeFor(SAMPLE_RATE)
       const input = sine(TONE_HZ, frame * 30)
@@ -121,14 +129,17 @@ describe('voice-pitch — la hauteur est mesurée, pas déclarée', () => {
     })
   }
 
-  it('le SENS est celui promis : deep descend, child monte (220 Hz → grave / aigu)', () => {
+  it('le SENS est celui promis : deep descend, une voix aiguë dans la plage granulaire monte', () => {
     const frame = pitchFrameSizeFor(SAMPLE_RATE)
     const input = sine(TONE_HZ, frame * 30)
+    const upRatio = isPitchRatioValid(VOICE_FILTER_PITCH_RATIOS.child)
+      ? VOICE_FILTER_PITCH_RATIOS.child
+      : VOICE_FILTER_PITCH_RATIOS.woman
     const deep = dominantFreq(runFrames(VOICE_FILTER_PITCH_RATIOS.deep, input, 30, 10).subarray(0, 4096))
-    const child = dominantFreq(runFrames(VOICE_FILTER_PITCH_RATIOS.child, input, 30, 10).subarray(0, 4096))
+    const up = dominantFreq(runFrames(upRatio, input, 30, 10).subarray(0, 4096))
     assert.ok(deep < TONE_HZ - 10, `deep doit descendre sous 220 Hz (${deep})`)
-    assert.ok(child > TONE_HZ + 10, `child doit monter au-dessus de 220 Hz (${child})`)
-    assert.ok(deep < child, 'deep reste plus grave que child')
+    assert.ok(up > TONE_HZ + 10, `la voix aiguë doit monter au-dessus de 220 Hz (${up})`)
+    assert.ok(deep < up, 'deep reste plus grave que la voix aiguë')
   })
 
   it('ratio 1 : la voix passe sans hauteur inventée (≈ 220 Hz, énergie conservée)', () => {

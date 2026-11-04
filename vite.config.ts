@@ -19,7 +19,7 @@ import { wsOrigin } from './src/main/net-schemes';
  */
 const DEV_CSP = [
   "default-src 'none'",
-  "script-src 'self'",
+  "script-src 'self' blob:",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data:",
   "font-src 'self' data:",
@@ -27,6 +27,8 @@ const DEV_CSP = [
   // HMR Vite : uniquement la boucle locale. Aucun wss:/https: autorisé.
   `connect-src 'self' ${wsOrigin('127.0.0.1:*')} ${wsOrigin('localhost:*')}`,
   "worker-src 'self' blob:",
+  // AudioWorklet : worklet-src, pas worker-src. blob: = le processeur de timbre inliné.
+  "worklet-src 'self' blob:",
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'none'",

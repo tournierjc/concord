@@ -39,6 +39,38 @@ export function missingPreloadMethods(preloadSource, methods = lanApiMethods()) 
   return methods.filter((name) => !new RegExp(`\\b${name}\\s*:`).test(preloadSource));
 }
 
+/**
+ * The timbre AudioWorklet must be text inside the renderer bundle and loaded through a
+ * blob URL. A separate file (or a `function.toString()` assembled after minify) does not
+ * survive `app://` + asar: addModule rejects and only the EQ path is heard.
+ */
+export function voiceWorkletProblems(bundleSource) {
+  const problems = [];
+  if (!bundleSource.includes('concord-voice-character-inline')) {
+    problems.push(
+      'processeur de timbre absent du bundle (marqueur concord-voice-character-inline) — addModule ne recevrait pas le corps du worklet',
+    );
+  }
+  if (!bundleSource.includes('function createVoiceCharacterState')) {
+    problems.push(
+      'createVoiceCharacterState n’est pas dans le texte du bundle (un toString() minifié déclare un autre nom et addModule échoue)',
+    );
+  }
+  if (!bundleSource.includes('function processVoiceCharacter')) {
+    problems.push('processVoiceCharacter n’est pas dans le texte du bundle');
+  }
+  if (!/registerProcessor\(\s*\\?['"]concord-voice-character\\?['"]/.test(bundleSource)) {
+    problems.push("registerProcessor('concord-voice-character') absent du bundle renderer");
+  }
+  if (!bundleSource.includes('createObjectURL')) {
+    problems.push('le bundle ne crée pas de blob: URL pour l’AudioWorklet (un chemin dans l’asar ne se charge pas)');
+  }
+  if (!bundleSource.includes('addModule(')) {
+    problems.push('audioWorklet.addModule absent du bundle renderer');
+  }
+  return problems;
+}
+
 /** A file reader over either a directory (`dist/..`) or a packaged `app.asar`. */
 function createReader(asarPath) {
   if (asarPath === null) {
@@ -80,6 +112,11 @@ export function verify({ asarPath = null } = {}) {
       need(posix.join('dist/renderer', match[1]));
     }
     if (html.includes('/src/renderer/')) problems.push(`${doc} référence encore les sources (build Vite absent ?)`);
+  }
+
+  const rendererBundle = 'dist/renderer/assets/index.js';
+  if (need(rendererBundle)) {
+    problems.push(...voiceWorkletProblems(reader.read(rendererBundle)));
   }
 
   const preload = 'dist/preload/index.js';
