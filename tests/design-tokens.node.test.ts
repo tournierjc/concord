@@ -132,6 +132,27 @@ test('état de la voix : live = state.ok, unavailable = state.warn', () => {
   assert.match(rule(".controls__voice[data-voice-status='unavailable']"), /var\(--color-state-warn\)/);
 });
 
+test('barre de parole : une rangée centrée, contrôles à la même hauteur', () => {
+  const bar = rule('.controls {');
+  assert.match(bar, /align-items:\s*center/);
+  assert.match(bar, /flex-flow:\s*row wrap/);
+  const cluster = rule('.controls__cluster');
+  assert.match(cluster, /flex-flow:\s*row wrap/);
+  assert.match(cluster, /align-items:\s*center/);
+  assert.doesNotMatch(cluster, /flex-direction:\s*column/);
+  const button = rule('.controls .button');
+  assert.match(button, /height:\s*var\(--component-button-height\)/);
+  assert.match(button, /border-radius:\s*var\(--radius-md\)/);
+  const voice = rule('.controls__voice {');
+  assert.match(voice, /align-items:\s*center/);
+  assert.match(voice, /min-height:\s*var\(--component-button-height\)/);
+  const room = readFileSync(new URL('../src/renderer/Room.tsx', import.meta.url), 'utf8');
+  const footer = room.slice(room.indexOf('className="controls"'));
+  assert.equal(footer.includes('button--compact'), false, 'les bascules de mode ont la même hauteur que les icônes');
+  assert.match(footer, /controls__cluster controls__mode/);
+  assert.match(footer, /controls__cluster controls__meter/);
+});
+
 test('les jetons de bandeau nommés par la spec sont réellement employés', () => {
   // « fond de bandeau d'erreur » / « fond de bandeau d'avertissement » : les deux jetons existaient
   // sans être employés nulle part.

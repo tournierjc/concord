@@ -475,27 +475,53 @@ body {
 
 .controls {
   display: flex;
+  flex-flow: row wrap;
   align-items: center;
+  align-content: center;
   gap: var(--space-3);
-  flex-wrap: wrap;
   /* Le pied de salon est une barre d'outils à part entière : posée sur une surface relevée et
-     arrondie, elle se lit d'un coup d'œil au lieu de flotter sous la liste (0.4.2). */
+     arrondie, elle se lit d'un coup d'œil au lieu de flotter sous la liste (0.4.2).
+     Une seule rangée, centrée : les libellés « Mode » et « Niveau du micro » sont en ligne
+     avec leur contrôle, pas au-dessus — sinon le centrage aligne les blocs et les boutons
+     se décalent (0.4.30). */
   padding: var(--space-3) var(--space-4);
   background: var(--color-bg-surface);
   border: var(--component-hairline) solid var(--color-border-subtle);
   border-radius: var(--radius-lg);
 }
 
-.controls__mode,
-.controls__meter {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
+/* Libellé + contrôle sur la même ligne, même axe que les boutons icône. */
+.controls__cluster {
+  display: inline-flex;
+  flex-flow: row wrap;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 100%;
+  min-height: var(--component-button-height);
+}
+
+.controls .segmented {
+  align-items: center;
+}
+
+/* Icônes, bascules et maintien : même hauteur, même rayon. Le texte long du
+   maintien ne doit pas grandir le bouton (il restait plus haut et visuellement
+   d'un autre rayon). */
+.controls .button {
+  height: var(--component-button-height);
+  min-height: var(--component-button-height);
+  border-radius: var(--radius-md);
+}
+
+.controls .button--toggle {
+  padding-inline: var(--space-3);
+  font-size: var(--text-sm);
 }
 
 .controls__label {
   color: var(--color-text-muted);
   font-size: var(--text-xs);
+  line-height: var(--leading-tight);
 }
 
 .controls__value {
@@ -503,13 +529,25 @@ body {
 }
 
 .controls__ptt {
-  min-width: calc(var(--space-16) * 2);
+  /* En fenêtre étroite le libellé se coupe plutôt que d'agrandir la hauteur. */
+  min-width: min(100%, calc(var(--space-16) * 2));
+  max-width: 100%;
+  padding-inline: var(--space-3);
+  overflow: hidden;
+  font-size: var(--text-sm);
+  line-height: var(--leading-tight);
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 /* État de la voix locale : la couleur dit la même chose que `data-voice-status`, sans texte en dur. */
 .controls__voice {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--component-button-height);
   color: var(--color-text-muted);
   font-size: var(--text-xs);
+  line-height: var(--leading-tight);
 }
 
 .controls__voice[data-voice-status='live'] {
@@ -522,8 +560,10 @@ body {
 
 .meter {
   display: block;
+  flex: none;
   width: calc(var(--space-16) * 2);
-  height: var(--space-1);
+  max-width: 100%;
+  height: var(--space-2);
   background: var(--color-bg-inset);
   border-radius: var(--radius-pill);
   overflow: hidden;
