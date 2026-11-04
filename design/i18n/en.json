@@ -140,6 +140,7 @@
   "settings.audio.duck.help": "While someone speaks to you, other apps quietly turn down and come back after.",
   "settings.audio.voiceFilter": "Voice filter",
   "settings.audio.voiceFilter.help": "Applied to your microphone before sending to others. Changeable mid-conversation.",
+  "settings.audio.voiceFilter.workletFailed": "The voice processor did not start — only the equalizer is heard.",
   "settings.audio.voiceFilter.unavailable": "Voice unavailable on this machine — your normal voice is sent.",
   "settings.audio.voiceFilter.none": "None",
   "settings.audio.voiceFilter.robot": "Robot",

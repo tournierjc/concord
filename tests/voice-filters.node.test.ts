@@ -278,10 +278,13 @@ describe('voice-filters — femme, enfant, géant : hauteur et formants indépen
     })
   }
 
-  it('femme +7..+10 demi-tons, enfant +10..+12, géant −12..−10', () => {
+  it('femme +7..+10 demi-tons, enfant au-dessus de l’octave (120 Hz → ≥ 250 Hz), géant −12..−10', () => {
     const semis = (id: 'deep' | 'woman' | 'child') => 12 * Math.log2(voiceFilterPitchRatio(id))
-    assert.ok(semis('woman') >= 7 && semis('woman') <= 10)
-    assert.ok(semis('child') >= 10 && semis('child') <= 12)
+    // log2(2^(n/12)) n'est pas exactement n : la borne haute a une marge flottante.
+    assert.ok(semis('woman') >= 7 && semis('woman') < 10.05, `femme ${semis('woman')} demi-tons`)
+    assert.ok(semis('child') > 12 && semis('child') < 14.05, `enfant ${semis('child')} demi-tons`)
+    assert.ok(120 * voiceFilterPitchRatio('woman') >= 200)
+    assert.ok(120 * voiceFilterPitchRatio('child') >= 250)
     assert.ok(semis('deep') <= -10 && semis('deep') >= -12)
   })
 

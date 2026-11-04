@@ -109,10 +109,19 @@ describe('en-têtes — securityHeaders est la source unique, et elle est utilis
 
   it('la CSP ne s’ouvre ni au script inline ni à l’évaluation', () => {
     const csp = headers['Content-Security-Policy'] ?? '';
-    assert.match(csp, /script-src 'self'/);
+    assert.match(csp, /script-src 'self' blob:/);
+    assert.match(csp, /worklet-src 'self' blob:/);
     assert.doesNotMatch(csp, /unsafe-eval/);
     assert.doesNotMatch(csp, /script-src[^;]*unsafe-inline/);
+    assert.doesNotMatch(csp, /script-src[^;]*https:/);
     assert.match(csp, /object-src 'none'/);
+  });
+
+  it('la CSP de dev autorise le même blob AudioWorklet (sinon le worklet ne marche qu’en paquet, ou l’inverse)', () => {
+    const vite = readFileSync(new URL('../vite.config.ts', import.meta.url), 'utf8');
+    assert.match(vite, /script-src 'self' blob:/);
+    assert.match(vite, /worklet-src 'self' blob:/);
+    assert.doesNotMatch(vite, /unsafe-eval/);
   });
 
   it('le main importe et applique securityHeaders (le défaut était : défini, jamais utilisé)', () => {

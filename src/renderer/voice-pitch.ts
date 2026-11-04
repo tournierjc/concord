@@ -199,7 +199,16 @@ export interface PitchShifterNode {
  * `shift(ratio)` (variable libre) et n'écrivait que les 128 premiers échantillons de la
  * trame : le reste était jeté, et le nœud n'était de toute façon pas dans le chemin.
  */
+/** Liaison réellement déclarée par `toString()` (le minificateur renomme le `function`). */
+function workletBinding(fn: Function): string {
+  const match = /^function\s+([A-Za-z0-9_$]+)/.exec(fn.toString())
+  if (match?.[1] === undefined) throw new Error('AudioWorklet: fonction sans déclaration')
+  return match[1]
+}
+
 export function pitchWorkletSource(): string {
+  const hann = workletBinding(hannWindow)
+  const shift = workletBinding(pitchShiftFrame)
   return `
 ${hannWindow.toString()}
 ${pitchShiftFrame.toString()}
@@ -215,7 +224,7 @@ class ConcordPitchShifter extends AudioWorkletProcessor {
       ratio: ratio,
       heads: [{ write: 0, read: 0 }, { write: 0, read: half }],
       ring: new Float32Array(frame * 2),
-      window: hannWindow(frame),
+      window: ${hann}(frame),
     }
     this.pending = new Float32Array(frame)
     this.rendered = new Float32Array(frame)
@@ -242,7 +251,7 @@ class ConcordPitchShifter extends AudioWorkletProcessor {
       this.pending[this.filled] = input[i]
       this.filled += 1
       if (this.filled === frame) {
-        pitchShiftFrame(this.state, this.pending, this.rendered)
+        ${shift}(this.state, this.pending, this.rendered)
         this.enqueue(this.rendered)
         this.filled = 0
       }

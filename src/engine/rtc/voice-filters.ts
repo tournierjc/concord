@@ -28,10 +28,12 @@
  *     PUIS un écrêtage fort (pré-gain × courbe `tanh` à drive élevé). Un drive ~2 sur une
  *     parole à −20 dBFS est presque linéaire : après Opus, on n'entend rien ;
  *   • deep / man / woman / child — hauteur ET formants, séparément. La hauteur est un
- *     ratio (`voiceFilterPitchRatio`) : géant ≈ −12 demi-tons, femme ≈ +9, enfant ≈ +12.
- *     Les formants ne sont PAS des pics ajoutés sur la voix masculine (ça sonne comme un
- *     homme égalisé). L'enveloppe est déplacée par `voiceFilterFormantScale` (géant ×0,78,
- *     femme ×1,18, enfant ×1,35), dans `renderer/voice-character.ts`. L'EQ (brillance,
+ *     ratio (`voiceFilterPitchRatio`) : géant ≈ −12 demi-tons, femme ≈ +10, enfant ≈ +14
+ *     (120 Hz → ~269 Hz, pour rester au-dessus de 250 Hz quand la période détectée
+ *     tombe un ou deux échantillons à côté). Les formants ne sont PAS des pics ajoutés
+ *     sur la voix masculine (ça sonne comme un homme égalisé). L'enveloppe est déplacée
+ *     par `voiceFilterFormantScale` (géant ×0,78, femme ×1,2, enfant ×1,38), dans
+ *     `renderer/voice-character.ts`. L'EQ (brillance,
  *     coupe sous 150 Hz, étagère grave + sous-harmonique du géant) est dans le même rendu.
  *
  * Contraintes (SPEC-004 §3, module pur — vérifié par tests/engine-purity.test.ts) :
@@ -188,13 +190,13 @@ export const VOICE_FILTER_PITCH_RATIOS: Record<VoiceFilterId, number> = {
   radio: 1,
   deep: 2 ** (-12 / 12), // −12 demi-tons — un géant, pas un homme un peu grave
   man: 2 ** (-3 / 12), // −3 demi-tons
-  woman: 2 ** (9 / 12), // +9 demi-tons (une voix d'homme a besoin de +7 à +10)
-  child: 2 ** (12 / 12), // +12 demi-tons
+  woman: 2 ** (10 / 12), // +10 demi-tons — 120 Hz → ~214 Hz
+  child: 2 ** (14 / 12), // +14 demi-tons — 120 Hz → ~269 Hz (le granulaire s'arrête à ×2)
 }
 
 /**
  * Déplacement d'enveloppe, INDÉPENDANT de la hauteur. ×1 laisse les formants de
- * l'interlocuteur là où ils sont (effet chipmunk). Femme ×1,18, enfant ×1,35,
+ * l'interlocuteur là où ils sont (effet chipmunk). Femme ×1,2, enfant ×1,38,
  * géant ×0,78.
  */
 export const VOICE_FILTER_FORMANT_SCALES: Record<VoiceFilterId, number> = {
@@ -203,8 +205,8 @@ export const VOICE_FILTER_FORMANT_SCALES: Record<VoiceFilterId, number> = {
   radio: 1,
   deep: 0.78,
   man: 0.95,
-  woman: 1.18,
-  child: 1.35,
+  woman: 1.2,
+  child: 1.38,
 }
 
 /** Le ratio de hauteur d'une voix (`none`/`robot`/`radio` = 1 : la hauteur est conservée). */
