@@ -184,27 +184,17 @@ describe('voice-filter — radio : les bornes et la saturation arrivent jusqu’
   })
 })
 
-describe('voice-filter — les timbres câblent leurs formants en parallèle', () => {
+describe('voice-filter — les timbres ne rajoutent pas des formants fixes', () => {
   for (const id of ['deep', 'man', 'woman', 'child'] as const) {
-    it(`${id} : chaque résonateur est alimenté par la TÊTE et se somme dans la chaîne`, () => {
+    it(`${id} : pas de passe-bande parallèle (les formants sont déplacés, pas empilés)`, () => {
       const h = harness(id)
       const recipe = voiceFilterRecipeFor(id)
-      assert.ok(recipe.formants !== undefined && recipe.formants.length === 3)
-      // Les quatre filtres de la chaîne directe : 1 bandpass (F1 de base) + 1 lowpass ; les
-      // trois résonateurs sont les trois bandpass restants.
+      assert.equal(recipe.formants, undefined, `${id} n’ajoute pas de pics sur la voix d’origine`)
+      assert.equal(recipe.parallel, undefined)
       const bandpass = h.context.created.biquads.filter((n) => n.type === 'bandpass')
-      assert.equal(bandpass.length, 3, `${id} : trois résonateurs, le sec n’est plus un 4e passe-bande`)
-      for (const filter of bandpass) {
-        const weight = filter.outgoing.find((node) => node instanceof FakeGain)
-        assert.ok(weight instanceof FakeGain, `${id} : le passe-bande alimente son poids (pas l’inverse)`)
-        assert.ok(weight.gain.value >= 0.5, `${id} : poids de formant trop faible (${weight.gain.value})`)
-      }
-      const heads = h.context.created.sources
-      assert.equal(heads.length, 1, 'une seule source : c’est elle qui fourche')
-      const gains = h.context.created.gains
-      assert.ok(gains.length >= 2, 'un gain d’entrée et un gain de sortie au moins')
-      const dry = gains.find((gain) => Math.abs(gain.gain.value - 0.18) < 1e-9)
-      assert.ok(dry !== undefined, `${id} : le résidu sec (0,18) est posé`)
+      assert.equal(bandpass.length, 0, `${id} : un passe-bande fixe figerait les formants masculins`)
+      const lowpass = h.context.created.biquads.find((n) => n.type === 'lowpass')
+      assert.ok(lowpass !== undefined, `${id} : un plafond garde la bande qu’Opus transporte`)
       h.chain.close()
     })
   }

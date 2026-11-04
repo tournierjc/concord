@@ -32,13 +32,12 @@
  */
 
 import {
-  voiceFilterPitchRatio,
+  voiceFilterCharacter,
   voiceFilterRecipeFor,
-  voiceFilterShiftsPitch,
   type FilterNodeSpec,
   type VoiceFilterId,
 } from '../engine/rtc/voice-filters.ts'
-import { createPitchShifterNode, type PitchShifterNode } from './voice-pitch.ts'
+import { createVoiceCharacterNode, type VoiceCharacterNode } from './voice-character.ts'
 import { createNoiseGateNode, type NoiseGateNode } from './noise-gate.ts'
 
 /** Un nœud que la fabrique sait brancher (le `connect` du DOM accepte nœud OU paramètre). */
@@ -301,7 +300,7 @@ export function createVoiceFilterChain(
   /** Le graphe de l'application courante, à débrancher avant la suivante. */
   let parts: FilterNodeLike[] = []
   let oscillators: OscillatorLike[] = []
-  let pitch: PitchShifterNode | null = null
+  let character: VoiceCharacterNode | null = null
   let gate: NoiseGateNode | null = null
   let applied: VoiceFilterId = 'none'
 
@@ -326,9 +325,9 @@ export function createVoiceFilterChain(
         // Un nœud déjà coupé ne peut pas en recouper un autre : le débranchement est idempotent.
       }
     }
-    if (pitch !== null) {
-      pitch.close()
-      pitch = null
+    if (character !== null) {
+      character.close()
+      character = null
     }
     if (gate !== null) {
       gate.close()
@@ -387,10 +386,14 @@ export function createVoiceFilterChain(
       entry.connect(gate.input)
       entry = gate.output
     }
-    if (!voiceFilterShiftsPitch(id)) return entry
-    pitch = createPitchShifterNode(context, voiceFilterPitchRatio(id))
-    entry.connect(pitch.input)
-    return pitch.output
+    // Femme / enfant / géant / homme : hauteur ET formants, dans le même processeur.
+    // Le granulaire seul déplaçait les deux du même facteur (effet chipmunk) et les
+    // passe-bande ajoutés ne bougeaient pas les formants déjà présents.
+    const characterSpec = voiceFilterCharacter(id)
+    if (characterSpec === null) return entry
+    character = createVoiceCharacterNode(context, characterSpec)
+    entry.connect(character.input)
+    return character.output
   }
 
   /** La piste de la destination (celle des pairs), avec son repli tracé par l'appelant. */

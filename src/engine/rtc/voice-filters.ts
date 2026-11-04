@@ -27,11 +27,12 @@
  *   • radio — talkie étroit (passe-haut ~500 Hz, passe-bas ~2400 Hz, passe-bande Q élevé)
  *     PUIS un écrêtage fort (pré-gain × courbe `tanh` à drive élevé). Un drive ~2 sur une
  *     parole à −20 dBFS est presque linéaire : après Opus, on n'entend rien ;
- *   • deep / man / woman / child — hauteur ET timbre. La hauteur est un NOMBRE décidé ici
- *     (`voiceFilterPitchRatio`, plusieurs demi-tons, pas ±2 qui disparaissent dans Opus) et
- *     appliqué par le pitch-shifter granulaire de la page (`renderer/voice-pitch.ts`). Le
- *     timbre est trois résonateurs F1/F2/F3 EN PARALLÈLE, plus forts que le résidu sec :
- *     un mélange presque sec ne change pas la voix.
+ *   • deep / man / woman / child — hauteur ET formants, séparément. La hauteur est un
+ *     ratio (`voiceFilterPitchRatio`) : géant ≈ −12 demi-tons, femme ≈ +9, enfant ≈ +12.
+ *     Les formants ne sont PAS des pics ajoutés sur la voix masculine (ça sonne comme un
+ *     homme égalisé). L'enveloppe est déplacée par `voiceFilterFormantScale` (géant ×0,78,
+ *     femme ×1,18, enfant ×1,35), dans `renderer/voice-character.ts`. L'EQ (brillance,
+ *     coupe sous 150 Hz, étagère grave + sous-harmonique du géant) est dans le même rendu.
  *
  * Contraintes (SPEC-004 §3, module pur — vérifié par tests/engine-purity.test.ts) :
  *   - aucun import (ni node:*, ni paquet npm, ni module relatif) ;
@@ -155,16 +156,6 @@ export const DEEP_FORMANTS: FormantPair = { f1: 450, f2: 800, f3: 1900 }
 export const WOMAN_FORMANTS: FormantPair = { f1: 880, f2: 1750, f3: 2900 }
 export const CHILD_FORMANTS: FormantPair = { f1: 950, f2: 2100, f3: 3300 }
 
-/**
- * Poids des trois formants. Ils DOMINENT le résidu sec (`TIMBRE_DRY_GAIN`) : un mélange
- * à 30 % ne survit pas à Opus 32 kbps mono. Chaque bande est un passe-bande (gain de
- * crête 0 dB), donc ces poids SONT le niveau de la voyelle.
- */
-export const FORMANT_WEIGHTS: FormantPair = { f1: 0.95, f2: 0.75, f3: 0.55 }
-
-/** Résidu sec des voix timbrées. Très en dessous de la somme des formants. */
-export const TIMBRE_DRY_GAIN = 0.18
-
 /** Porteuse du robot (Hz). Dans la bande du vrombissement, assez basse pour qu'Opus garde les bandes latérales. */
 export const ROBOT_CARRIER_HZ = 90
 /** Retard du peigne robot (secondes) — résonance ~125 Hz, métallique et courte. */
@@ -195,10 +186,25 @@ export const VOICE_FILTER_PITCH_RATIOS: Record<VoiceFilterId, number> = {
   none: 1,
   robot: 1,
   radio: 1,
-  deep: 2 ** (-8 / 12), // −8 demi-tons — un géant, pas un léger assombrissement
-  man: 2 ** (-5 / 12), // −5 demi-tons
-  woman: 2 ** (5 / 12), // +5 demi-tons
-  child: 2 ** (8 / 12), // +8 demi-tons — enfant, encore dans [0,5, 2]
+  deep: 2 ** (-12 / 12), // −12 demi-tons — un géant, pas un homme un peu grave
+  man: 2 ** (-3 / 12), // −3 demi-tons
+  woman: 2 ** (9 / 12), // +9 demi-tons (une voix d'homme a besoin de +7 à +10)
+  child: 2 ** (12 / 12), // +12 demi-tons
+}
+
+/**
+ * Déplacement d'enveloppe, INDÉPENDANT de la hauteur. ×1 laisse les formants de
+ * l'interlocuteur là où ils sont (effet chipmunk). Femme ×1,18, enfant ×1,35,
+ * géant ×0,78.
+ */
+export const VOICE_FILTER_FORMANT_SCALES: Record<VoiceFilterId, number> = {
+  none: 1,
+  robot: 1,
+  radio: 1,
+  deep: 0.78,
+  man: 0.95,
+  woman: 1.18,
+  child: 1.35,
 }
 
 /** Le ratio de hauteur d'une voix (`none`/`robot`/`radio` = 1 : la hauteur est conservée). */
@@ -218,6 +224,45 @@ export function voiceFilterFormants(id: VoiceFilterId): FormantPair | null {
 /** Vrai si la voix modifie la hauteur (et que la page doit donc poser un pitchRatio ≠ 1). */
 export function voiceFilterShiftsPitch(id: VoiceFilterId): boolean {
   return voiceFilterPitchRatio(id) !== 1
+}
+
+/** Échelle d'enveloppe spectrale (1 = formants de l'interlocuteur, non déplacés). */
+export function voiceFilterFormantScale(id: VoiceFilterId): number {
+  return VOICE_FILTER_FORMANT_SCALES[id]
+}
+
+/**
+ * Réglage complet du rendu femme / enfant / géant / homme. `null` pour les voix
+ * qui ne déplacent ni la hauteur ni les formants (neutre, robot, radio).
+ */
+export interface VoiceCharacterSpec {
+  readonly pitchRatio: number
+  readonly formantScale: number
+  /** Coupe sous cette fréquence (Hz). 150 pour femme et enfant, 0 sinon. */
+  readonly highpassHz: number
+  /** Mélange d'aigu (positif = plus brillant). */
+  readonly tilt: number
+  /** Boost du grave (géant). */
+  readonly lowShelf: number
+  /** Mélange d'une octave en dessous (géant, léger). */
+  readonly subharmonic: number
+  /** Copie très courte décalée, pour le volume du géant. */
+  readonly chorus: number
+}
+
+export function voiceFilterCharacter(id: VoiceFilterId): VoiceCharacterSpec | null {
+  if (id !== 'deep' && id !== 'man' && id !== 'woman' && id !== 'child') return null
+  const bright = id === 'woman' || id === 'child'
+  const giant = id === 'deep'
+  return {
+    pitchRatio: voiceFilterPitchRatio(id),
+    formantScale: voiceFilterFormantScale(id),
+    highpassHz: bright ? 150 : 0,
+    tilt: id === 'child' ? 0.45 : id === 'woman' ? 0.3 : giant ? -0.15 : 0,
+    lowShelf: giant ? 0.55 : 0,
+    subharmonic: giant ? 0.28 : 0,
+    chorus: giant ? 0.16 : 0,
+  }
 }
 
 /**
@@ -281,34 +326,19 @@ function isTimbreId(id: VoiceFilterId): id is 'deep' | 'man' | 'woman' | 'child'
 }
 
 /**
- * La recette d'une voix timbrée (deep/man/woman/child) : chaîne directe (fondamentale
- * pondérée, formant de base, lissage, sortie) + trois résonateurs F1/F2/F3 en parallèle,
- * sommés après le lissage. Le ratio de hauteur est porté par `VOICE_FILTER_PITCH_RATIOS`.
+ * La recette d'une voix timbrée : seulement un plafond (le déplacement de formants
+ * n'est PAS une somme de passe-bande — il vit dans `voice-character.ts`). Le plafond
+ * garde l'énergie dans la bande qu'Opus 32 kbps mono transporte encore.
  */
 function timbreRecipe(id: 'deep' | 'man' | 'woman' | 'child'): VoiceFilterRecipe {
-  // Non-nul par construction : `isTimbreId` n'admet que les quatre ids qui ont une table.
-  const formants = voiceFilterFormants(id) ?? ADULT_MAN_FORMANTS
-  const ceilingHz = id === 'child' ? 6400 : id === 'woman' ? 5600 : id === 'deep' ? 2800 : 3600
-  const floorHz = id === 'deep' ? 70 : 120
+  const ceilingHz = id === 'child' ? 7500 : id === 'woman' ? 6800 : id === 'deep' ? 4200 : 5200
   return {
     id,
-    parallel: true,
     nodes: [
-      // [0..3] résidu sec (léger), [4..6] les voyelles — branchées sur la TÊTE, pas sur le sec.
-      { kind: 'gain', gain: TIMBRE_DRY_GAIN },
-      { kind: 'highpass', cutoffHz: floorHz },
       { kind: 'lowpass', cutoffHz: ceilingHz },
-      { kind: 'gain', gain: 1 },
-      { kind: 'bandpass', cutoffHz: formants.f1, q: 4, gain: FORMANT_WEIGHTS.f1 },
-      { kind: 'bandpass', cutoffHz: formants.f2, q: 5, gain: FORMANT_WEIGHTS.f2 },
-      { kind: 'bandpass', cutoffHz: formants.f3, q: 6, gain: FORMANT_WEIGHTS.f3 },
+      { kind: 'gain', gain: 1.1 },
     ],
-    chain: [0, 1, 2, 3],
-    formants: [
-      { resonatorIndex: 4, afterChainIndex: 2 },
-      { resonatorIndex: 5, afterChainIndex: 2 },
-      { resonatorIndex: 6, afterChainIndex: 2 },
-    ],
+    chain: [0, 1],
   }
 }
 
