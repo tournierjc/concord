@@ -24,7 +24,7 @@
  * Lancer : npx tsx --test tests/voice-filter.node.test.ts
  */
 
-import { afterEach, beforeEach, describe, it } from 'node:test'
+import { after, afterEach, before, beforeEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
@@ -41,6 +41,19 @@ import {
 import { createVoiceFilterChain, type VoiceFilterChain } from '../src/renderer/voice-filter.ts'
 import { VOICE_FILTER_IDS, voiceFilterRecipeFor } from '../src/engine/rtc/voice-filters.ts'
 import type { VoiceFilterId } from '../src/engine/rtc/voice-filters.ts'
+
+const savedMediaStream = Object.getOwnPropertyDescriptor(globalThis, 'MediaStream')
+before(() => {
+  Object.defineProperty(globalThis, 'MediaStream', {
+    value: FakeMediaStream,
+    configurable: true,
+    writable: true,
+  })
+})
+after(() => {
+  if (savedMediaStream === undefined) Reflect.deleteProperty(globalThis, 'MediaStream')
+  else Object.defineProperty(globalThis, 'MediaStream', savedMediaStream)
+})
 
 /** Le contexte doublure et la source micro d'une chaîne de test. */
 interface Harness {
@@ -303,5 +316,41 @@ describe('voice-filter — la fabrique ne sait construire QUE le vocabulaire de 
     node.connect(param)
     assert.equal(node.outgoing[0], param)
     assert.ok(param instanceof FakeAudioParam)
+  })
+})
+
+describe('voice-filter — createMediaStreamSource exige un MediaStream natif (appel)', () => {
+  it('un objet maison est refusé, la chaîne d’appel passe un flux neuf monopiste', () => {
+    const context = new FakeAudioContext()
+    const plain = {
+      getAudioTracks: () => [],
+      addTrack: () => undefined,
+    }
+    assert.throws(
+      () => context.createMediaStreamSource(plain as unknown as MediaStream),
+      /not of type 'MediaStream'/,
+    )
+    const micTrack = new FakeTrack('micro')
+    const micStream = new FakeMediaStream([micTrack])
+    let addTrackCalls = 0
+    const original = micStream.addTrack.bind(micStream)
+    micStream.addTrack = (track: FakeTrack) => {
+      addTrackCalls += 1
+      original(track)
+    }
+    const chain = createVoiceFilterChain(context, micStream, 'robot', {
+      inputGain: 1.4,
+      noiseGate: true,
+      noiseGateThresholdDb: -40,
+    })
+    assert.equal(context.created.sources.length, 1, 'la chaîne d’appel crée une source')
+    const given = context.created.sources[0]?.stream
+    assert.ok(given instanceof MediaStream, 'la source reçoit un MediaStream')
+    assert.notEqual(given, micStream, 'le flux est neuf : le capté n’est pas réutilisé')
+    assert.equal(given?.getAudioTracks().length, 1)
+    assert.equal(given?.getAudioTracks()[0], micTrack)
+    assert.equal(addTrackCalls, 0, 'le flux capté n’est pas écrit')
+    assert.equal(micStream.getAudioTracks().length, 1)
+    chain.close()
   })
 })

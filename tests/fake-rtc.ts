@@ -595,6 +595,13 @@ export class FakeAudioContext {
    * `ontrack → analyseur → level(peerId)` mesurable sans Chromium.
    */
   public createMediaStreamSource(stream: MediaStream | FakeMediaStream): FakeMediaStreamSourceNode {
+    // Chromium : le paramètre doit être un vrai MediaStream. Quand le global de test est
+    // posé (`MediaStream === FakeMediaStream`), un objet maison est refusé comme dans la page.
+    if (typeof MediaStream === 'function' && !(stream instanceof MediaStream)) {
+      throw new TypeError(
+        "Failed to execute 'createMediaStreamSource' on 'AudioContext': parameter 1 is not of type 'MediaStream'.",
+      )
+    }
     const sample = analyserSampleFor(stream)
     const node = new FakeMediaStreamSourceNode(stream, sample)
     this.created.sources.push(node)
