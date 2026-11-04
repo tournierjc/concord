@@ -13,7 +13,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 
 import type { ParticipantDto } from '../shell/ipc-contract';
-import { avatarEmojiFor, isAvatarRef } from '../shell/avatar';
+import { overlayAvatarNeedsImage, resolveOverlayAvatar } from './overlay-avatar';
 import {
   MAX_OVERLAY_PARTICIPANTS,
   MAX_OVERLAY_WIDTH_PX,
@@ -35,31 +35,33 @@ export interface OverlayProps {
   // (`speaking-surface.ts`). Défaut vide : l'overlay n'affirme alors aucune parole, plutôt que
   // d'en inventer une. Jamais de `false` : l'absence est un `unknown`.
   speaking?: readonly string[];
-}
-
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).slice(0, 2);
-  return parts.map((part) => part.charAt(0).toUpperCase()).join('') || '?';
+  /** Incrémenté à chaque annuaire reçu : relance le chargement des images. */
+  revision?: number;
 }
 
 /**
- * La pastille d'un avatar d'overlay (SPEC-002, amendement 2026-10-31) : emoji de la galerie,
- * image locale reçue, ou initiales — les mêmes règles qu'en salle, mêmes replis. L'aperçu d'une
- * image personnalisée passe par le même canal `getAvatarImage` que la salle : si le main ne la
- * connaît pas, ce sont les initiales, jamais un carré vide.
+ * La pastille d'un avatar d'overlay : emoji de la galerie, image reçue, ou initiales.
+ * `revision` augmente à chaque annuaire : une image arrivée après le premier `null`
+ * est redemandée, sinon la pastille resterait aux initiales pour toute la session.
  */
-function OverlayAvatar({ avatarRef, name }: { avatarRef: string | undefined; name: string }): JSX.Element {
-  const emoji = avatarEmojiFor(avatarRef);
-  const ref = avatarRef !== undefined && isAvatarRef(avatarRef) ? avatarRef : null;
+function OverlayAvatar({
+  avatarRef,
+  name,
+  revision,
+}: {
+  avatarRef: string | undefined;
+  name: string;
+  revision: number;
+}): JSX.Element {
   const [png, setPng] = useState<string | null>(null);
   useEffect(() => {
-    if (ref === null) {
+    if (!overlayAvatarNeedsImage(avatarRef)) {
       setPng(null);
       return;
     }
     let live = true;
     void lanApi()
-      .getAvatarImage(ref)
+      .getAvatarImage(avatarRef)
       .then((image) => {
         if (live) setPng(image);
       })
@@ -69,24 +71,18 @@ function OverlayAvatar({ avatarRef, name }: { avatarRef: string | undefined; nam
     return () => {
       live = false;
     };
-  }, [ref]);
-  if (emoji !== null) {
-    return (
-      <span className="overlay__initials" aria-hidden="true">
-        {emoji}
-      </span>
-    );
-  }
-  if (ref !== null && png !== null) {
+  }, [avatarRef, revision]);
+  const view = resolveOverlayAvatar(avatarRef, name, png);
+  if (view.kind === 'image') {
     return (
       <span className="overlay__initials overlay__initials--image" aria-hidden="true">
-        <img className="overlay__avatar-image" src={`data:image/png;base64,${png}`} alt="" />
+        <img className="overlay__avatar-image" src={view.src} alt="" />
       </span>
     );
   }
   return (
     <span className="overlay__initials" aria-hidden="true">
-      {initials(name)}
+      {view.text}
     </span>
   );
 }
@@ -96,6 +92,7 @@ export function Overlay({
   participants,
   selfId = null,
   speaking = [],
+  revision = 0,
 }: OverlayProps): JSX.Element {
   const t = createTranslator(locale);
   // Au plus 8 participants en salon ; la marge supérieure (10) évite toute surprise.
@@ -144,7 +141,7 @@ export function Overlay({
             title={participant.name}
           >
             <span className="overlay__halo" aria-hidden="true" />
-            <OverlayAvatar avatarRef={participant.avatarRef} name={participant.name} />
+            <OverlayAvatar avatarRef={participant.avatarRef} name={participant.name} revision={revision} />
             {flagsKnown ? <span className="overlay__mute" aria-hidden="true" /> : null}
             <span className="visually-hidden">
               {participant.name}

@@ -48,6 +48,8 @@ export class RoomBridge {
   private pushToTalk = false;
   private mode: TalkModeDto = 'ptt';
   private micLevel = 0;
+  /** Empreinte locale, retenue même avant `join` pour que la ligne « vous » naisse avec. */
+  private selfAvatarRef: string | null = null;
 
   constructor(emit: BridgeEmitter) {
     this.emit = emit;
@@ -98,16 +100,16 @@ export class RoomBridge {
     this.phase = 'connected';
     this.notice = null;
     this.selfIdLocal = SELF_ID;
-    this.participants = [
-      {
-        id: SELF_ID,
-        name: selfName,
-        muted: this.muted,
-        deafened: this.deafened,
-        gain: 1,
-        connection: 'connected',
-      },
-    ];
+    const self: ParticipantDto = {
+      id: SELF_ID,
+      name: selfName,
+      muted: this.muted,
+      deafened: this.deafened,
+      gain: 1,
+      connection: 'connected',
+    };
+    if (this.selfAvatarRef !== null) self.avatarRef = this.selfAvatarRef;
+    this.participants = [self];
     this.emitParticipants();
     this.emitControlState();
     this.emitRoomState();
@@ -176,8 +178,23 @@ export class RoomBridge {
    * pas faire croire à une arrivée.
    */
   addParticipant(participant: Omit<ParticipantDto, 'gain'> & { gain?: number }): boolean {
+    if (this.participants.some((entry) => entry.id === participant.id)) {
+      const existing = this.participants.find((entry) => entry.id === participant.id);
+      if (!existing) return false;
+      let changed = false;
+      if (participant.avatarRef !== undefined && existing.avatarRef !== participant.avatarRef) {
+        existing.avatarRef = participant.avatarRef;
+        changed = true;
+      }
+      if (participant.name.length > 0 && existing.name !== participant.name) {
+        existing.name = participant.name;
+        changed = true;
+      }
+      if (!changed) return false;
+      this.emitParticipants();
+      return true;
+    }
     if (this.participants.length >= IPC_MAX_PARTICIPANTS) return false;
-    if (this.participants.some((entry) => entry.id === participant.id)) return false;
     this.participants.push({ gain: 1, ...participant });
     this.emitParticipants();
     this.emitRoomState();
@@ -208,6 +225,7 @@ export class RoomBridge {
    * un dessin. `null` retire l'avatar (retour aux initiales).
    */
   setSelfAvatar(avatarRef: string | null): void {
+    this.selfAvatarRef = avatarRef;
     const self = this.participants.find((entry) => entry.id === SELF_ID);
     if (!self) return;
     if (avatarRef === null) delete self.avatarRef;

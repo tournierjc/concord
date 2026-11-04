@@ -20,6 +20,7 @@ import './styles.css';
 
 function OverlayRoot(): JSX.Element {
   const [participants, setParticipants] = useState<ParticipantDto[]>([]);
+  const [revision, setRevision] = useState(0);
   const [locale, setLocale] = useState<Locale>('fr');
   const [selfId, setSelfId] = useState<string | null>(null);
   // Parole relayée : `[]` n'affirme rien (l'overlay n'a aucune mesure à lui, AD-17 D1).
@@ -31,7 +32,10 @@ function OverlayRoot(): JSX.Element {
     void api.getSettings().then((settings) => {
       if (active) setLocale(settings.locale);
     });
-    const unsubscribe = api.onParticipants(setParticipants);
+    const unsubscribe = api.onParticipants((next) => {
+      setParticipants(next);
+      setRevision((value) => value + 1);
+    });
     // L'overlay ne reçoit que la liste des participants : l'id local arrive par le salon, et c'est
     // lui seul qui donne un sens aux drapeaux mute/déafen (T18).
     const unsubscribeRoom = api.onRoomState((state) => {
@@ -67,6 +71,7 @@ function OverlayRoot(): JSX.Element {
       participants={participants}
       selfId={selfId}
       speaking={parole}
+      revision={revision}
     />
   );
 }

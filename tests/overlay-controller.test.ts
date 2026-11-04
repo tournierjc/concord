@@ -31,6 +31,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
+import { overlayPresentation, preferX11Ozone, shouldShowOverlay } from '../src/main/overlay-activation';
 import {
   MOUSE_POLL_INTERVAL_MS,
   OverlayController,
@@ -309,7 +310,7 @@ interface Harness {
 }
 
 /** Monte un contrôleur complet sur doubles, avec la fenêtre créée et la géométrie 3 participants. */
-function harness(overrides: { displays?: ScreenDisplay[]; settings?: OverlaySettings } = {}): Harness {
+function harness(overrides: { displays?: ScreenDisplay[]; settings?: OverlaySettings; platform?: string } = {}): Harness {
   const timers = new FakeTimers();
   const screenDouble = new FakeScreen(overrides.displays ?? [DISPLAY]);
   let captured: OverlayWindowOptions | null = null;
@@ -318,6 +319,7 @@ function harness(overrides: { displays?: ScreenDisplay[]; settings?: OverlaySett
   const controller = new OverlayController<FakeWindow>({
     timers,
     screen: screenDouble,
+    ...(overrides.platform === undefined ? {} : { platform: overrides.platform }),
     createWindow: (options) => {
       captured = options;
       const window = new FakeWindow(options);
@@ -485,21 +487,84 @@ describe('overlay-controller — focus', () => {
 // ---------------------------------------------------------------------------------------------
 
 describe('overlay-controller — always-on-top et espaces', () => {
-  it('1 seul setAlwaysOnTop(true,\'screen-saver\') et 1 seul setVisibleOnAllWorkspaces', () => {
-    const h = harness();
-    assert.equal(h.window.alwaysOnTopWrites.length, 1);
-    assert.deepEqual(h.window.alwaysOnTopWrites[0], { flag: true, level: 'screen-saver' });
-    assert.equal(h.window.workspacesWrites.length, 1);
+  it('Windows : floating, posé à la création et réaffirmé au premier affichage', () => {
+    const h = harness({ platform: 'win32' });
+    assert.equal(h.window.alwaysOnTopWrites.length, 2);
+    for (const write of h.window.alwaysOnTopWrites) {
+      assert.deepEqual(write, { flag: true, level: 'floating' });
+    }
+    assert.ok(h.window.workspacesWrites.length >= 1);
     assert.deepEqual(h.window.workspacesWrites[0], { visible: true, options: { visibleOnFullScreen: true } });
   });
 
-  it('apply() et refresh() ne réarment pas le niveau (toujours 1 chacun)', () => {
+  it('Linux : pas de niveau screen-saver', () => {
+    const h = harness({ platform: 'linux' });
+    assert.ok(h.window.alwaysOnTopWrites.length >= 1);
+    for (const write of h.window.alwaysOnTopWrites) {
+      assert.equal(write.flag, true);
+      assert.equal(write.level, undefined);
+    }
+  });
+
+  it('apply() et refresh() sur une fenêtre déjà visible ne réarment pas le niveau', () => {
     const h = harness();
+    const tops = h.window.alwaysOnTopWrites.length;
+    const spaces = h.window.workspacesWrites.length;
     h.controller.apply(settings({ opacity: 0.7 }), 5);
     h.controller.refresh();
-    assert.equal(h.window.alwaysOnTopWrites.length, 1);
-    assert.equal(h.window.workspacesWrites.length, 1);
+    assert.equal(h.window.alwaysOnTopWrites.length, tops);
+    assert.equal(h.window.workspacesWrites.length, spaces);
     assert.equal(h.window.opacityWrites.length, 3, 'seule l’opacité suit les réglages (0.85, 0.7, 0.7)');
+  });
+
+  it('présent après un hide : la fenêtre revient, dessus réaffirmé', () => {
+    const h = harness({ platform: 'win32' });
+    h.window.hide();
+    const shown = h.window.showInactiveCalls;
+    const tops = h.window.alwaysOnTopWrites.length;
+    h.controller.present();
+    assert.equal(h.window.showInactiveCalls, shown + 1);
+    assert.equal(h.window.showCalls, 0);
+    assert.equal(h.window.alwaysOnTopWrites.length, tops + 1);
+    assert.deepEqual(h.window.alwaysOnTopWrites.at(-1), { flag: true, level: 'floating' });
+  });
+
+  it('présent alors qu’Electron la croit encore visible : showInactive et dessus réaffirmés', () => {
+    const h = harness({ platform: 'linux' });
+    const shown = h.window.showInactiveCalls;
+    const tops = h.window.alwaysOnTopWrites.length;
+    h.controller.present();
+    assert.equal(h.window.isVisible(), true);
+    assert.equal(h.window.showInactiveCalls, shown + 1);
+    assert.equal(h.window.showCalls, 0);
+    assert.equal(h.window.alwaysOnTopWrites.length, tops + 1);
+    assert.equal(h.window.alwaysOnTopWrites.at(-1)?.level, undefined);
+  });
+});
+
+describe('overlay — activation sur le bureau', () => {
+  it('visible en salon sur Linux et Windows, fenêtre vivante même cachée', () => {
+    for (const platform of ['linux', 'win32'] as const) {
+      assert.equal(overlayPresentation(platform).visibleOnFullScreen, true);
+      assert.equal(shouldShowOverlay({ enabled: true, inRoom: true, appWindowAlive: true }), true, platform);
+    }
+    assert.equal(overlayPresentation('win32').alwaysOnTopLevel, 'floating');
+    assert.equal(overlayPresentation('linux').alwaysOnTopLevel, undefined);
+  });
+
+  it('caché hors salon, désactivé, ou sans fenêtre d’application', () => {
+    assert.equal(shouldShowOverlay({ enabled: true, inRoom: false, appWindowAlive: true }), false);
+    assert.equal(shouldShowOverlay({ enabled: false, inRoom: true, appWindowAlive: true }), false);
+    assert.equal(shouldShowOverlay({ enabled: true, inRoom: true, appWindowAlive: false }), false);
+  });
+
+  it('Wayland sans choix explicite passe par XWayland ; un choix explicite est gardé', () => {
+    assert.equal(preferX11Ozone('linux', 'wayland', undefined, []), true);
+    assert.equal(preferX11Ozone('linux', 'wayland', 'auto', []), true);
+    assert.equal(preferX11Ozone('linux', 'wayland', 'wayland', []), false);
+    assert.equal(preferX11Ozone('linux', 'wayland', undefined, ['--ozone-platform=wayland']), false);
+    assert.equal(preferX11Ozone('linux', 'x11', undefined, []), false);
+    assert.equal(preferX11Ozone('win32', 'wayland', undefined, []), false);
   });
 });
 
