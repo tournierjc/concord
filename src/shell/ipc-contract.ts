@@ -16,6 +16,7 @@
 import type { Settings, SettingsPatch } from './settings-schema';
 
 import { AVATAR_REF_LENGTH, isAvatarRef, isCustomAvatarShape, isGalleryAvatarId, normalizeIncomingAvatarRef } from './avatar.ts';
+import { isValidOverlayPlacement, type OverlayPlacement } from './overlay-geometry.ts';
 import type { AvatarSetting, CustomAvatar } from './avatar.ts';
 
 // --- Canaux ----------------------------------------------------------------------------------
@@ -370,7 +371,7 @@ export interface OverlayPatchPayload {
   scale?: OverlayScaleDto;
   screenId?: string | null;
   position?: { x: number; y: number } | null;
-  placement?: 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left' | 'left' | 'right';
+  placement?: OverlayPlacement;
   showWithoutDetection?: boolean;
 }
 
@@ -954,15 +955,24 @@ function guardInvoke(channel: string, raw: unknown): GuardResult<unknown> {
         if (position !== undefined) value.position = position;
       }
       if ('placement' in payload) {
-        const placement = guard.oneOf(payload, 'placement', 'payload', [
-          'top-right',
+        const rawPlacement = (payload as Record<string, unknown>)['placement'];
+        const nested = guard.object(rawPlacement, 'payload.placement', ['flow', 'anchor'] as const);
+        const flow = guard.oneOf(nested, 'flow', 'payload.placement', ['horizontal', 'vertical'] as const);
+        const anchor = guard.oneOf(nested, 'anchor', 'payload.placement', [
           'top-left',
-          'bottom-right',
+          'top-center',
+          'top-right',
+          'center-left',
+          'center-right',
           'bottom-left',
-          'left',
-          'right',
+          'bottom-center',
+          'bottom-right',
         ] as const);
-        if (placement !== null) value.placement = placement;
+        if (flow !== null && anchor !== null && isValidOverlayPlacement({ flow, anchor })) {
+          value.placement = { flow, anchor };
+        } else if (flow !== null && anchor !== null) {
+          guard.invalid('payload.placement', 'couple sens/ancrage hors des 12 emplacements');
+        }
       }
       if ('showWithoutDetection' in payload) {
         const showWithoutDetection = guard.boolean(payload, 'showWithoutDetection', 'payload');

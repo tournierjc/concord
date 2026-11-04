@@ -134,7 +134,7 @@ describe('ducking — réglage audio.duckOthers', () => {
         scale: 'md',
         screenId: null,
         position: null,
-        placement: 'top-right',
+        placement: { flow: 'horizontal', anchor: 'top-right' },
         showWithoutDetection: false,
       },
       network: { signalingPort: 47821, discovery: 'auto' },

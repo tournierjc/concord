@@ -19,7 +19,6 @@ import {
   OVERLAY_OPACITY_MAX,
   OVERLAY_OPACITY_MIN,
   SIGNALING_PORT_DEFAULT,
-  type OverlayPlacement,
   type OverlayScale,
   type Settings,
   type SettingsPatch,
@@ -39,6 +38,7 @@ import {
 } from './mic-check.ts';
 import type { LobbyStatusDto, RoomStateDto, UpdateStateDto } from '../shell/ipc-contract';
 import { createTranslator, type Locale } from './i18n';
+import { PlacementPicker } from './PlacementPicker';
 import { lanApi } from './api';
 
 /**
@@ -58,34 +58,6 @@ const SCALE_LABEL_KEYS: Readonly<Record<OverlayScale, string>> = {
   md: 'settings.overlay.scale.md',
   lg: 'settings.overlay.scale.lg',
 };
-const PLACEMENT_CHOICES: readonly OverlayPlacement[] = [
-  'top-right',
-  'top-left',
-  'bottom-left',
-  'bottom-right',
-  'left',
-  'right',
-];
-function placementLabel(
-  t: (key: string) => string,
-  placement: OverlayPlacement,
-): string {
-  switch (placement) {
-    case 'top-left':
-      return t('settings.overlay.placement.topLeft');
-    case 'bottom-right':
-      return t('settings.overlay.placement.bottomRight');
-    case 'bottom-left':
-      return t('settings.overlay.placement.bottomLeft');
-    case 'left':
-      return t('settings.overlay.placement.left');
-    case 'right':
-      return t('settings.overlay.placement.right');
-    case 'top-right':
-    default:
-      return t('settings.overlay.placement.topRight');
-  }
-}
 
 export interface SettingsPanelProps {
   settings: Settings;
@@ -759,19 +731,11 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
 
           <div className="field">
             <span className="field__label">{t('settings.overlay.placement')}</span>
-            <div className="segmented" role="group" aria-label={t('settings.overlay.placement')}>
-              {PLACEMENT_CHOICES.map((placement) => (
-                <button
-                  key={placement}
-                  type="button"
-                  className="button button--toggle"
-                  aria-pressed={settings.overlay.placement === placement}
-                  onClick={() => overlayPatch({ placement, position: null })}
-                >
-                  {placementLabel(t, placement)}
-                </button>
-              ))}
-            </div>
+            <PlacementPicker
+              value={settings.overlay.placement}
+              t={t}
+              onSelect={(placement) => overlayPatch({ placement, position: null })}
+            />
           </div>
 
           <label className="field field--inline">

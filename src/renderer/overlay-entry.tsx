@@ -23,7 +23,7 @@ function OverlayRoot(): JSX.Element {
   const [participants, setParticipants] = useState<ParticipantDto[]>([]);
   const [revision, setRevision] = useState(0);
   const [locale, setLocale] = useState<Locale>('fr');
-  const [placement, setPlacement] = useState<OverlayPlacement>('top-right');
+  const [placement, setPlacement] = useState<OverlayPlacement>({ flow: 'horizontal', anchor: 'top-right' });
   const [selfId, setSelfId] = useState<string | null>(null);
   // Parole relayée : `[]` n'affirme rien (l'overlay n'a aucune mesure à lui, AD-17 D1).
   const [parole, afficherParole] = useState<SpeakingIds>([]);

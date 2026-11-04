@@ -8,6 +8,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
@@ -23,8 +25,11 @@ import {
   PADDING_PX,
   computeOverlayGeometry,
   hitTest,
-  placementAnchor,
-  placementFlow,
+  DEFAULT_OVERLAY_PLACEMENT,
+  OVERLAY_PICKER_SLOTS,
+  migrateOverlayPlacement,
+  pickerBarStyle,
+  samePlacement,
   overlayCssVariables,
   resolveWorkArea,
   sanitizeScaleFactor,
@@ -281,35 +286,116 @@ test('choix de l\'écran : écran demandé, repli sur le principal si absent', (
   assert.throws(() => resolveWorkArea([], '1'));
 });
 
-test('placement : rangée en haut à gauche, colonne sur le côté droit', () => {
-  assert.equal(placementFlow('top-right'), 'row');
-  assert.equal(placementFlow('left'), 'column');
-  assert.equal(placementAnchor('left'), 'top-left');
-  assert.equal(placementAnchor('right'), 'top-right');
-
-  const row = computeOverlayGeometry({
+test('les 12 emplacements tiennent la zone utile, y compris un second écran décalé', () => {
+  // Barre des tâches en haut (y) et écran à droite du primaire (x).
+  const workArea: Rect = { x: 1920, y: 40, width: 1600, height: 900 };
+  const margin = 8;
+  assert.equal(OVERLAY_PICKER_SLOTS.length, 12);
+  const seen = new Set<string>();
+  for (const placement of OVERLAY_PICKER_SLOTS) {
+    const key = `${placement.flow}:${placement.anchor}`;
+    assert.equal(seen.has(key), false, key);
+    seen.add(key);
+    const flow = placement.flow === 'vertical' ? 'column' : 'row';
+    const geometry = computeOverlayGeometry({
+      participantCount: 3,
+      workArea,
+      anchor: placement.anchor,
+      flow,
+      margin,
+    });
+    const { x, y, width, height } = geometry.window;
+    assert.equal(geometry.flow, flow);
+    assert.equal(flow === 'column' ? geometry.columns : geometry.rows, 1);
+    assert.ok(x >= workArea.x + margin - 0.01, key);
+    assert.ok(y >= workArea.y + margin - 0.01, key);
+    assert.ok(x + width <= workArea.x + workArea.width - margin + 0.01, key);
+    assert.ok(y + height <= workArea.y + workArea.height - margin + 0.01, key);
+    const innerX = workArea.x + margin;
+    const innerY = workArea.y + margin;
+    const innerW = workArea.width - 2 * margin;
+    const innerH = workArea.height - 2 * margin;
+    if (placement.anchor.endsWith('left')) assert.equal(x, innerX, key);
+    if (placement.anchor.endsWith('right')) assert.equal(x, innerX + innerW - width, key);
+    if (placement.anchor.endsWith('center')) assert.equal(x, innerX + (innerW - width) / 2, key);
+    if (placement.anchor.startsWith('top')) assert.equal(y, innerY, key);
+    if (placement.anchor.startsWith('bottom')) assert.equal(y, innerY + innerH - height, key);
+    if (placement.anchor.startsWith('center')) assert.equal(y, innerY + (innerH - height) / 2, key);
+    if (placement.flow === 'horizontal') assert.ok(width > height, key);
+    else assert.ok(height > width, key);
+  }
+  const centered = computeOverlayGeometry({
     participantCount: 3,
-    workArea: SCREEN_1080,
-    anchor: 'top-left',
+    workArea,
+    anchor: 'top-center',
     flow: 'row',
+    margin,
   });
-  assert.equal(row.columns, 3);
-  assert.equal(row.rows, 1);
-  assert.equal(row.window.x, 0);
-  assert.equal(row.window.y, 0);
-  assert.ok(row.window.width > row.window.height);
+  assert.equal(centered.window.y, 48);
+  assert.equal(centered.window.x, 1920 + 8 + (1600 - 16 - centered.window.width) / 2);
+});
 
-  const column = computeOverlayGeometry({
-    participantCount: 3,
-    workArea: SCREEN_1080,
-    anchor: placementAnchor('right'),
-    flow: 'column',
-  });
-  assert.equal(column.flow, 'column');
-  assert.equal(column.columns, 1);
-  assert.equal(column.rows, 3);
-  assert.ok(column.window.height > column.window.width);
-  assert.equal(column.window.x, SCREEN_1080.width - column.window.width);
-  assert.equal(column.window.y, 0);
-  assert.equal(column.handle.y, column.window.height - column.handle.height);
+test('migration des 6 emplacements de la 0.4.32 vers les 12', () => {
+  assert.deepEqual(migrateOverlayPlacement('top-right'), { flow: 'horizontal', anchor: 'top-right' });
+  assert.deepEqual(migrateOverlayPlacement('top-left'), { flow: 'horizontal', anchor: 'top-left' });
+  assert.deepEqual(migrateOverlayPlacement('bottom-left'), { flow: 'horizontal', anchor: 'bottom-left' });
+  assert.deepEqual(migrateOverlayPlacement('bottom-right'), { flow: 'horizontal', anchor: 'bottom-right' });
+  assert.deepEqual(migrateOverlayPlacement('left'), { flow: 'vertical', anchor: 'top-left' });
+  assert.deepEqual(migrateOverlayPlacement('right'), { flow: 'vertical', anchor: 'top-right' });
+  assert.deepEqual(migrateOverlayPlacement(DEFAULT_OVERLAY_PLACEMENT), DEFAULT_OVERLAY_PLACEMENT);
+  assert.equal(migrateOverlayPlacement('n-importe-quoi'), null);
+  assert.equal(migrateOverlayPlacement({ flow: 'horizontal', anchor: 'center-left' }), null);
+});
+
+test('les barres du sélecteur ne se superposent pas sur un même coin', () => {
+  const boxes = OVERLAY_PICKER_SLOTS.map((slot) => ({ slot, style: pickerBarStyle(slot) }));
+  assert.equal(boxes.length, 12);
+  const horizontalTopLeft = boxes.find((box) => box.slot.flow === 'horizontal' && box.slot.anchor === 'top-left');
+  const verticalTopLeft = boxes.find((box) => box.slot.flow === 'vertical' && box.slot.anchor === 'top-left');
+  assert.equal(horizontalTopLeft?.style['top'], '6%');
+  assert.equal(horizontalTopLeft?.style['left'], '16%');
+  assert.equal(verticalTopLeft?.style['left'], '4%');
+  assert.equal(verticalTopLeft?.style['top'], '18%');
+  const topCenter = boxes.find((box) => box.slot.anchor === 'top-center');
+  assert.equal(topCenter?.style['left'], '50%');
+  assert.equal(topCenter?.style['transform'], 'translateX(-50%)');
+  const centerLeft = boxes.find((box) => box.slot.anchor === 'center-left');
+  assert.equal(centerLeft?.style['top'], '50%');
+  assert.equal(centerLeft?.style['transform'], 'translateY(-50%)');
+  assert.equal(samePlacement(DEFAULT_OVERLAY_PLACEMENT, { flow: 'horizontal', anchor: 'top-right' }), true);
+  assert.equal(samePlacement(DEFAULT_OVERLAY_PLACEMENT, { flow: 'vertical', anchor: 'top-right' }), false);
+});
+
+test('le sélecteur dessine 12 boutons, un seul pressé, libellés français accessibles', async () => {
+  const { PlacementPicker } = await import('../src/renderer/PlacementPicker.tsx');
+  const { createTranslator } = await import('../src/renderer/i18n.ts');
+  const t = createTranslator('fr');
+  const html = renderToStaticMarkup(
+    createElement(PlacementPicker, {
+      value: { flow: 'horizontal', anchor: 'top-right' },
+      onSelect: () => undefined,
+      t,
+    }),
+  );
+  const buttons = html.match(/<button\b[^>]*>/gu) ?? [];
+  assert.equal(buttons.length, 12);
+  const pressed = buttons.filter((button) => button.includes('aria-pressed="true"'));
+  assert.equal(pressed.length, 1);
+  assert.ok(pressed[0]?.includes('data-flow="horizontal"'));
+  assert.ok(pressed[0]?.includes('data-anchor="top-right"'));
+  assert.ok(html.includes('aria-label="Rangée en haut à droite"'));
+  assert.ok(html.includes('title="Rangée en haut à droite"'));
+  assert.ok(html.includes('aria-label="Colonne au milieu à gauche"'));
+  assert.equal(buttons.every((button) => button.includes('type="button"')), true);
+  const again = renderToStaticMarkup(
+    createElement(PlacementPicker, {
+      value: { flow: 'vertical', anchor: 'center-left' },
+      onSelect: () => undefined,
+      t,
+    }),
+  );
+  const pressedAgain = (again.match(/<button\b[^>]*>/gu) ?? []).filter((button) => button.includes('aria-pressed="true"'));
+  assert.equal(pressedAgain.length, 1);
+  assert.ok(pressedAgain[0]?.includes('data-anchor="center-left"'));
+  assert.equal(again.includes('data-anchor="top-right" aria-pressed="true"') || again.includes('aria-pressed="true" data-anchor="top-right"'), false);
 });
