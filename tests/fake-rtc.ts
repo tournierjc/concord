@@ -483,6 +483,11 @@ export class FakeGain extends FakeAudioNode {
   public readonly gain = new FakeAudioParam()
 }
 
+/** Retard doublure : le peigne du robot (`delayTime` en secondes). */
+export class FakeDelay extends FakeAudioNode {
+  public readonly delayTime = new FakeAudioParam()
+}
+
 /**
  * Source doublure : le flux mesuré est RETENU (un test doit pouvoir exiger « la fabrique a
  * bien branché LA piste micro, pas une autre »), et le RMS du flux est appliqué à l'analyseur
@@ -526,7 +531,10 @@ export class FakeAudioContext {
     oscillators: FakeOscillator[]
     destinations: FakeMediaStreamDestination[]
     sources: FakeMediaStreamSourceNode[]
-  } = { gains: [], biquads: [], shapers: [], oscillators: [], destinations: [], sources: [] }
+    delays: FakeDelay[]
+  } = { gains: [], biquads: [], shapers: [], oscillators: [], destinations: [], sources: [], delays: [] }
+  /** État du contexte : `running` pour que le plan média ne croie pas le graphe suspendu. */
+  public state = 'running'
   /** Vrai si `resume()` a été appelé (le contrat du vumètre : une source sans horloge ment). */
   public resumeCalls = 0
   /** Fréquence de la page (la géométrie du pitch s'y cale). */
@@ -568,6 +576,11 @@ export class FakeAudioContext {
   public createOscillator(): FakeOscillator {
     const node = new FakeOscillator()
     this.created.oscillators.push(node)
+    return node
+  }
+  public createDelay(_maxDelayTime?: number): FakeDelay {
+    const node = new FakeDelay()
+    this.created.delays.push(node)
     return node
   }
   public createMediaStreamDestination(): FakeMediaStreamDestination {

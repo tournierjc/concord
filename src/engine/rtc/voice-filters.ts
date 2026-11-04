@@ -20,18 +20,18 @@
  * Ce que chaque voix EST réellement, une fois câblée — une recette par effet, jamais un nom
  * qui promet plus que le graphe :
  *
- *   • robot — ring modulation : porteuse 120 Hz MULTIPLIÉE au signal (un `GainNode` dont la
- *     commande `gain` est pilotée par un `OscillatorNode` via un gain de modulation), puis
- *     lissage passe-bas. C'est LA voix synthétique classique, 100 % Web Audio natif ;
- *   • radio — talkie : passe-haut 300 Hz + passe-bas 3000 Hz + passe-bande + saturation douce
- *     (`WaveShaperNode`, courbe `tanh` précalculée par `softClipCurve` ici) + remise à niveau ;
- *   • deep / man / woman / child — timbre ET hauteur. La hauteur est un NOMBRE décidé ici
- *     (`voiceFilterPitchRatio`, ratios de demi-tons précalculés) et appliqué par le
- *     pitch-shifter granulaire de la page (`renderer/voice-pitch.ts`, une trame à la fois,
- *     50 % recouvrement, fenêtres de Hann — pas un `playbackRate`, qui accélérerait aussi la
- *     durée et la voix des pairs). Le timbre est fait par trois résonateurs passe-bande
- *     (formants F1/F2/F3) alimentés EN PARALLÈLE et sommés dans la chaîne, ce qui distingue
- *     une voix d'adulte féminine d'une voix de chipmunk.
+ *   • robot — ring modulation BIPOLAIRE (le gain de la chaîne vaut 0, la porteuse ±1 le
+ *     remplace : la voix sèche disparaît, il reste les bandes latérales) PUIS un filtre en
+ *     peigne (retard + réinjection). Un gain qui reste positif n'est qu'un trémolo : la voix
+ *     d'origine traverse, et Opus à 32 kbps la rend presque naturelle ;
+ *   • radio — talkie étroit (passe-haut ~500 Hz, passe-bas ~2400 Hz, passe-bande Q élevé)
+ *     PUIS un écrêtage fort (pré-gain × courbe `tanh` à drive élevé). Un drive ~2 sur une
+ *     parole à −20 dBFS est presque linéaire : après Opus, on n'entend rien ;
+ *   • deep / man / woman / child — hauteur ET timbre. La hauteur est un NOMBRE décidé ici
+ *     (`voiceFilterPitchRatio`, plusieurs demi-tons, pas ±2 qui disparaissent dans Opus) et
+ *     appliqué par le pitch-shifter granulaire de la page (`renderer/voice-pitch.ts`). Le
+ *     timbre est trois résonateurs F1/F2/F3 EN PARALLÈLE, plus forts que le résidu sec :
+ *     un mélange presque sec ne change pas la voix.
  *
  * Contraintes (SPEC-004 §3, module pur — vérifié par tests/engine-purity.test.ts) :
  *   - aucun import (ni node:*, ni paquet npm, ni module relatif) ;
@@ -57,7 +57,7 @@ export type VoiceFilterId = (typeof VOICE_FILTER_IDS)[number]
  * QUE ceux-là : une recette qui en invente un est une erreur de programme visible au
  * typage, pas un nœud ignoré en silence.
  */
-export const FILTER_NODE_KINDS = ['gain', 'bandpass', 'lowpass', 'highpass', 'shaper', 'oscillator'] as const
+export const FILTER_NODE_KINDS = ['gain', 'bandpass', 'lowpass', 'highpass', 'shaper', 'oscillator', 'delay'] as const
 export type FilterNodeKind = (typeof FILTER_NODE_KINDS)[number]
 
 /** La courbe d'un WaveShaper, échantillonnée de −1 à +1 (l'axe du `curve` du DOM). */
@@ -82,6 +82,10 @@ export interface FilterNodeSpec {
   readonly q?: number
   /** `shaper` : la courbe de distorsion (saturation talkie). */
   readonly curve?: readonly ShaperCurve[]
+  /** `delay` : retard du peigne, en secondes. */
+  readonly delaySec?: number
+  /** `delay` : réinjection du peigne, 0..0,92 (au-delà le peigne hurle). */
+  readonly feedback?: number
   /**
    * Vrai pour un nœud de MODULATION (oscillateur du ring + son gain de sommation) : il
    * n'est PAS dans la chaîne écoutée — sa sortie commande le `gain` d'un nœud de la chaîne.
@@ -151,8 +155,36 @@ export const DEEP_FORMANTS: FormantPair = { f1: 450, f2: 800, f3: 1900 }
 export const WOMAN_FORMANTS: FormantPair = { f1: 880, f2: 1750, f3: 2900 }
 export const CHILD_FORMANTS: FormantPair = { f1: 950, f2: 2100, f3: 3300 }
 
-/** Poids (gains) des trois formants : la fondamentale reste la voix, les bandes s'ajoutent. */
-export const FORMANT_WEIGHTS: FormantPair = { f1: 0.3, f2: 0.22, f3: 0.12 }
+/**
+ * Poids des trois formants. Ils DOMINENT le résidu sec (`TIMBRE_DRY_GAIN`) : un mélange
+ * à 30 % ne survit pas à Opus 32 kbps mono. Chaque bande est un passe-bande (gain de
+ * crête 0 dB), donc ces poids SONT le niveau de la voyelle.
+ */
+export const FORMANT_WEIGHTS: FormantPair = { f1: 0.95, f2: 0.75, f3: 0.55 }
+
+/** Résidu sec des voix timbrées. Très en dessous de la somme des formants. */
+export const TIMBRE_DRY_GAIN = 0.18
+
+/** Porteuse du robot (Hz). Dans la bande du vrombissement, assez basse pour qu'Opus garde les bandes latérales. */
+export const ROBOT_CARRIER_HZ = 90
+/** Retard du peigne robot (secondes) — résonance ~125 Hz, métallique et courte. */
+export const ROBOT_COMB_DELAY_SEC = 0.008
+/** Réinjection du peigne. Sous 1 : stable. Assez haut pour s'entendre après l'encodeur. */
+export const ROBOT_COMB_FEEDBACK = 0.72
+/** Profondeur de la porteuse (±1 = ring complet, le sec est nul). */
+export const ROBOT_RING_DEPTH = 1
+
+/** Bornes du talkie. Plus étroites qu'une simple bande téléphonique : Opus en fait déjà une. */
+export const RADIO_HIGHPASS_HZ = 500
+export const RADIO_LOWPASS_HZ = 2400
+export const RADIO_BAND_HZ = 1500
+export const RADIO_BAND_Q = 2.4
+/** Pré-gain avant l'écrêteur : la parole usuelle (≪ 1) doit ENTRER dans la courbe. */
+export const RADIO_PREGAIN = 6
+/** Drive du `tanh`. 2 est presque linéaire sur la parole ; 8 sature franchement. */
+export const RADIO_DRIVE = 8
+/** Remise à niveau après l'écrêtage, pour ne pas saturer l'encodeur Opus. */
+export const RADIO_MAKEUP = 0.4
 
 /**
  * Ratio de hauteur appliqué par la page (pitch-shifter granulaire) par voix. Précalculés ici
@@ -163,10 +195,10 @@ export const VOICE_FILTER_PITCH_RATIOS: Record<VoiceFilterId, number> = {
   none: 1,
   robot: 1,
   radio: 1,
-  deep: 0.7937,  // −4 demi-tons
-  man: 0.8909,   // −2 demi-tons
-  woman: 1.1225, // +2 demi-tons
-  child: 1.2599, // +4 demi-tons
+  deep: 2 ** (-8 / 12), // −8 demi-tons — un géant, pas un léger assombrissement
+  man: 2 ** (-5 / 12), // −5 demi-tons
+  woman: 2 ** (5 / 12), // +5 demi-tons
+  child: 2 ** (8 / 12), // +8 demi-tons — enfant, encore dans [0,5, 2]
 }
 
 /** Le ratio de hauteur d'une voix (`none`/`robot`/`radio` = 1 : la hauteur est conservée). */
@@ -193,15 +225,51 @@ export function voiceFilterShiftsPitch(id: VoiceFilterId): boolean {
  * à ±1 en butée. Pure : mêmes entrées, même tableau. Un `drive` < 1 est ramené à 1 (en
  * dessous, la courbe est linéaire et le shaper ne sert à rien).
  */
-export function softClipCurve(drive: number): readonly ShaperCurve[] {
+/** Un échantillon de la saturation talkie. Même formule que `softClipCurve`. */
+export function softClipSample(x: number, drive: number): number {
   const k = drive < 1 ? 1 : drive
+  const norm = Math.tanh(k)
+  if (norm === 0) return x
+  return Math.tanh(k * x) / norm
+}
+
+export function softClipCurve(drive: number): readonly ShaperCurve[] {
   const N = 1024
   const curve: ShaperCurve[] = []
   for (let i = 0; i < N; i += 1) {
     const x = (i / (N - 1)) * 2 - 1
-    curve.push({ input: x, output: Math.tanh(k * x) / Math.tanh(k) })
+    curve.push({ input: x, output: softClipSample(x, drive) })
   }
   return curve
+}
+
+/**
+ * Modulation d'anneau : `voix × sin(2π f t)`. C'est le graphe du robot quand le gain
+ * de chaîne vaut 0 et que la porteuse va de −1 à +1. Un gain qui reste positif
+ * (trémolo) laisse passer la voix sèche — ce n'est PAS cette fonction.
+ */
+export function ringModulate(input: Float32Array, carrierHz: number, sampleRate: number): Float32Array {
+  const out = new Float32Array(input.length)
+  const step = (2 * Math.PI * carrierHz) / (sampleRate > 0 ? sampleRate : 1)
+  for (let i = 0; i < input.length; i += 1) {
+    out[i] = (input[i] ?? 0) * Math.sin(step * i)
+  }
+  return out
+}
+
+/**
+ * Filtre en peigne : `y[n] = x[n] + feedback · y[n − retard]`. Même coefficients que
+ * le nœud `delay` de la recette robot (retard en échantillons, réinjection < 1).
+ */
+export function combFilter(input: Float32Array, delaySamples: number, feedback: number): Float32Array {
+  const delay = delaySamples < 1 ? 1 : Math.floor(delaySamples)
+  const g = feedback < 0 ? 0 : feedback > 0.95 ? 0.95 : feedback
+  const out = new Float32Array(input.length)
+  for (let i = 0; i < input.length; i += 1) {
+    const delayed = i >= delay ? (out[i - delay] ?? 0) : 0
+    out[i] = (input[i] ?? 0) + g * delayed
+  }
+  return out
 }
 
 /** Les quatre ids qui sont un timbre pitché (garde de typage de `timbreRecipe`). */
@@ -220,20 +288,20 @@ function isTimbreId(id: VoiceFilterId): id is 'deep' | 'man' | 'woman' | 'child'
 function timbreRecipe(id: 'deep' | 'man' | 'woman' | 'child'): VoiceFilterRecipe {
   // Non-nul par construction : `isTimbreId` n'admet que les quatre ids qui ont une table.
   const formants = voiceFilterFormants(id) ?? ADULT_MAN_FORMANTS
-  const ceilingHz = id === 'child' ? 5200 : id === 'woman' ? 4800 : 4200
-  const outputGain = id === 'deep' || id === 'man' ? 1.1 : 0.95
+  const ceilingHz = id === 'child' ? 6400 : id === 'woman' ? 5600 : id === 'deep' ? 2800 : 3600
+  const floorHz = id === 'deep' ? 70 : 120
   return {
     id,
     parallel: true,
     nodes: [
-      // [0..3] la chaîne directe (itinéraire écouté), [4..6] les résonateurs parallèles.
-      { kind: 'gain', gain: 0.6 },
-      { kind: 'bandpass', cutoffHz: formants.f1, q: 5 },
+      // [0..3] résidu sec (léger), [4..6] les voyelles — branchées sur la TÊTE, pas sur le sec.
+      { kind: 'gain', gain: TIMBRE_DRY_GAIN },
+      { kind: 'highpass', cutoffHz: floorHz },
       { kind: 'lowpass', cutoffHz: ceilingHz },
-      { kind: 'gain', gain: outputGain },
-      { kind: 'bandpass', cutoffHz: formants.f1, q: 6, gain: FORMANT_WEIGHTS.f1 },
-      { kind: 'bandpass', cutoffHz: formants.f2, q: 8, gain: FORMANT_WEIGHTS.f2 },
-      { kind: 'bandpass', cutoffHz: formants.f3, q: 10, gain: FORMANT_WEIGHTS.f3 },
+      { kind: 'gain', gain: 1 },
+      { kind: 'bandpass', cutoffHz: formants.f1, q: 4, gain: FORMANT_WEIGHTS.f1 },
+      { kind: 'bandpass', cutoffHz: formants.f2, q: 5, gain: FORMANT_WEIGHTS.f2 },
+      { kind: 'bandpass', cutoffHz: formants.f3, q: 6, gain: FORMANT_WEIGHTS.f3 },
     ],
     chain: [0, 1, 2, 3],
     formants: [
@@ -255,33 +323,37 @@ export function voiceFilterRecipeFor(id: VoiceFilterId): VoiceFilterRecipe {
     return { id, nodes: [], chain: [] }
   }
   if (id === 'robot') {
-    // Ring modulation : [0] gain d'entrée dont la commande `gain` est alimentée par
-    // [2] oscillateur 120 Hz via [3] gain de modulation (tous deux hors chaîne), puis
-    // [1] lissage passe-bas. C'est le multiplieur « porteuse × voix » classique.
+    // Ring BIPOLAIRE : le gain [0] vaut 0, la porteuse (± ROBOT_RING_DEPTH) le remplace.
+    // Puis peigne, bande parole, lissage, remise à niveau. L'oscillateur reste HORS chaîne.
     return {
       id,
       nodes: [
-        { kind: 'gain', gain: 0.9 },
-        { kind: 'lowpass', cutoffHz: 3800 },
-        { kind: 'oscillator', frequency: 120, modulation: true },
-        { kind: 'gain', gain: 1, modulation: true },
+        { kind: 'gain', gain: 0 },
+        { kind: 'delay', delaySec: ROBOT_COMB_DELAY_SEC, feedback: ROBOT_COMB_FEEDBACK },
+        { kind: 'bandpass', cutoffHz: 1600, q: 0.7 },
+        { kind: 'lowpass', cutoffHz: 3400 },
+        { kind: 'gain', gain: 1.8 },
+        { kind: 'oscillator', frequency: ROBOT_CARRIER_HZ, modulation: true },
+        { kind: 'gain', gain: ROBOT_RING_DEPTH, modulation: true },
       ],
-      chain: [0, 1],
-      ring: { oscillatorIndex: 2, modGainIndex: 3, targetIndex: 0 },
+      chain: [0, 1, 2, 3, 4],
+      ring: { oscillatorIndex: 5, modGainIndex: 6, targetIndex: 0 },
     }
   }
   if (id === 'radio') {
-    // Talkie : bande 300–3000 Hz + saturation douce + remise à niveau.
+    // Talkie étroit + distorsion forte. Le pré-gain pousse la parole DANS la courbe.
     return {
       id,
       nodes: [
-        { kind: 'highpass', cutoffHz: 300 },
-        { kind: 'lowpass', cutoffHz: 3000 },
-        { kind: 'bandpass', cutoffHz: 1600, q: 0.9 },
-        { kind: 'shaper', curve: softClipCurve(2.2) },
-        { kind: 'gain', gain: 0.9 },
+        { kind: 'highpass', cutoffHz: RADIO_HIGHPASS_HZ },
+        { kind: 'lowpass', cutoffHz: RADIO_LOWPASS_HZ },
+        { kind: 'bandpass', cutoffHz: RADIO_BAND_HZ, q: RADIO_BAND_Q },
+        { kind: 'gain', gain: RADIO_PREGAIN },
+        { kind: 'shaper', curve: softClipCurve(RADIO_DRIVE) },
+        { kind: 'lowpass', cutoffHz: 2800 },
+        { kind: 'gain', gain: RADIO_MAKEUP },
       ],
-      chain: [0, 1, 2, 3, 4],
+      chain: [0, 1, 2, 3, 4, 5, 6],
     }
   }
   if (isTimbreId(id)) return timbreRecipe(id)

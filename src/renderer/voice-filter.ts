@@ -39,6 +39,7 @@ import {
   type VoiceFilterId,
 } from '../engine/rtc/voice-filters.ts'
 import { createPitchShifterNode, type PitchShifterNode } from './voice-pitch.ts'
+import { createNoiseGateNode, type NoiseGateNode } from './noise-gate.ts'
 
 /** Un nœud que la fabrique sait brancher (le `connect` du DOM accepte nœud OU paramètre). */
 export interface FilterNodeLike {
@@ -72,6 +73,10 @@ export interface FilterAudioContext {
   createBiquadFilter(): FilterLike
   createWaveShaper(): ShaperLike
   createOscillator(): OscillatorLike
+  /** Peigne du robot. `maxDelayTime` en secondes. */
+  createDelay(maxDelayTime?: number): DelayLike
+  /** Présent sur un vrai `AudioContext` ; absent = porte et pitch en pont (test Node). */
+  audioWorklet?: { addModule(url: string): Promise<void> }
   /**
    * Mesure (facultative, et facultative POURTANT obligatoire pour qui veut un VU-mètre) :
    * le test de micro (`mic-check.ts`) branche un analyseur sur le micro BRUT pour prouver la
@@ -135,6 +140,22 @@ export interface OscillatorLike extends FilterNodeLike {
   stop(): void
 }
 
+/** Un retard (peigne). `delayTime` est en secondes. */
+export interface DelayLike extends FilterNodeLike {
+  readonly delayTime: FilterParamLike
+}
+
+/**
+ * Traitement DEVANT la recette : gain d'entrée (le seul AGC — celui du navigateur est coupé)
+ * et porte de bruit. L'objet est relu à chaque `applyFilter` : un réglage en vol mute
+ * l'objet, puis redemande la voix courante.
+ */
+export interface VoiceProcessOptions {
+  inputGain?: number
+  noiseGate?: boolean
+  noiseGateThresholdDb?: number
+}
+
 /** Ce que la fabrique rend à la session : de quoi brancher, changer de voix, et tout débrancher. */
 export interface VoiceFilterChain {
   /**
@@ -158,8 +179,14 @@ export interface VoiceFilterChain {
 
 /** Ce qu'un maillon de recette devient une fois monté. */
 interface BuiltSpec {
-  /** Le nœud qui PARLE à la chaîne (le poids d'un résonateur, pas son filtre). */
-  readonly node: FilterNodeLike
+  /**
+   * Où BRANCHER l'amont. Pour un résonateur, c'est le FILTRE — pas le poids.
+   * (Brancher le poids court-circuitait le passe-bande : les « formants » étaient
+   * du signal sec, et la voix ne changeait presque pas.)
+   */
+  readonly input: FilterNodeLike
+  /** Où lire la sortie (le poids, pour un résonateur). */
+  readonly output: FilterNodeLike
   /** Le `gain` réglable du maillon, si son nœud d'entrée en a un (le multiplicateur du ring). */
   readonly gain: FilterParamLike | null
   /** Les oscillateurs du maillon (un seul pour un `oscillator`, aucun pour les autres). */
@@ -176,13 +203,26 @@ function buildSpec(context: FilterAudioContext, spec: FilterNodeSpec): BuiltSpec
     // reçoit sa valeur À LA CÂBLURE du ring (`modGain.gain.value = 0.9` plus bas). Une valeur
     // de recette écrasée à la création rendrait le ring muet et invisible en test.
     if (typeof spec.gain === 'number' && spec.modulation !== true) node.gain.value = spec.gain
-    return { node, gain: node.gain, oscillators: [], created: [node] }
+    return { input: node, output: node, gain: node.gain, oscillators: [], created: [node] }
   }
   if (spec.kind === 'oscillator') {
     const node = context.createOscillator()
     node.type = 'sine'
     if (typeof spec.frequency === 'number') node.frequency.value = spec.frequency
-    return { node, gain: null, oscillators: [node], created: [node] }
+    return { input: node, output: node, gain: null, oscillators: [node], created: [node] }
+  }
+  if (spec.kind === 'delay') {
+    const delay = context.createDelay(0.05)
+    const seconds = typeof spec.delaySec === 'number' ? spec.delaySec : 0.008
+    delay.delayTime.value = seconds
+    const raw = typeof spec.feedback === 'number' ? spec.feedback : 0
+    const feedback = raw < 0 ? 0 : raw > 0.92 ? 0.92 : raw
+    const fb = context.createGain()
+    fb.gain.value = feedback
+    // y[n] = x[n] + g·y[n−D]. La boucle est interne ; la chaîne lit le même nœud.
+    delay.connect(fb)
+    fb.connect(delay)
+    return { input: delay, output: delay, gain: null, oscillators: [], created: [delay, fb] }
   }
   if (spec.kind === 'shaper') {
     const node = context.createWaveShaper()
@@ -195,9 +235,9 @@ function buildSpec(context: FilterAudioContext, spec: FilterNodeSpec): BuiltSpec
       node.curve = curve
       // Suréchantillonnage : la saturation crée des harmoniques au-delà de Nyquist sans lui
       // (aliasing = un sifflement métallique, pas de la saturation).
-      node.oversample = '2x'
+      node.oversample = '4x'
     }
-    return { node, gain: null, oscillators: [], created: [node] }
+    return { input: node, output: node, gain: null, oscillators: [], created: [node] }
   }
   // Les filtres bidimensionnels sont des BiquadFilter avec leur type — la seule différence
   // est le `type` posé, d'où une branche commune. Un `bandpass` AVEC poids passe par
@@ -210,15 +250,15 @@ function buildSpec(context: FilterAudioContext, spec: FilterNodeSpec): BuiltSpec
     const weight = context.createGain()
     weight.gain.value = spec.gain
     filter.connect(weight)
-    // Le nœud EXPOSÉ du maillon est le poids (c'est lui qui parle à la chaîne) ; le filtre est
-    // créé AVANT lui dans `created`, donc débranché APRÈS lui (débranchement à l'envers).
-    return { node: weight, gain: null, oscillators: [], created: [weight, filter] }
+    // L'ENTRÉE est le filtre (sinon le poids reçoit le signal sec et le passe-bande
+    // ne voit rien). La SORTIE est le poids, qui parle à la chaîne.
+    return { input: filter, output: weight, gain: null, oscillators: [], created: [filter, weight] }
   }
   const node = context.createBiquadFilter()
   node.type = spec.kind
   if (typeof spec.cutoffHz === 'number') node.frequency.value = spec.cutoffHz
   if (typeof spec.q === 'number') node.Q.value = spec.q
-  return { node, gain: null, oscillators: [], created: [node] }
+  return { input: node, output: node, gain: null, oscillators: [], created: [node] }
 }
 
 /**
@@ -251,6 +291,7 @@ export function createVoiceFilterChain(
   context: FilterAudioContext,
   stream: FilterStreamLike,
   initial: VoiceFilterId,
+  process: VoiceProcessOptions = {},
 ): VoiceFilterChain {
   const destination = context.createMediaStreamDestination()
   /**
@@ -264,6 +305,7 @@ export function createVoiceFilterChain(
   let parts: FilterNodeLike[] = []
   let oscillators: OscillatorLike[] = []
   let pitch: PitchShifterNode | null = null
+  let gate: NoiseGateNode | null = null
   let applied: VoiceFilterId = 'none'
 
   /** Débranche le graphe courant : oscillateurs d'abord (un oscillateur non arrêté dure). */
@@ -290,6 +332,10 @@ export function createVoiceFilterChain(
     if (pitch !== null) {
       pitch.close()
       pitch = null
+    }
+    if (gate !== null) {
+      gate.close()
+      gate = null
     }
     parts = []
     oscillators = []
@@ -323,6 +369,29 @@ export function createVoiceFilterChain(
       entry = context.createMediaStreamSource(wrapTrackAsStream(source))
       sourceNode = entry
     }
+    // Gain d'entrée : le SEUL contrôle de niveau. L'AGC du navigateur est coupé
+    // (il pomperait contre ce gain et aplatirait la distorsion). À 1 et sans porte,
+    // aucun nœud : la voix neutre reste le chemin historique.
+    const requested = process.inputGain
+    const linear = typeof requested === 'number' && Number.isFinite(requested) ? requested : 1
+    const clamped = linear < 0 ? 0 : linear > 2 ? 2 : linear
+    if (clamped !== 1) {
+      const level = context.createGain()
+      level.gain.value = clamped
+      entry.connect(level)
+      parts.push(level)
+      entry = level
+    }
+    // Porte de bruit AVANT le filtre vocal (et après l'AEC/NS de la capture).
+    if (process.noiseGate === true) {
+      const threshold = process.noiseGateThresholdDb
+      gate = createNoiseGateNode(
+        context,
+        typeof threshold === 'number' && Number.isFinite(threshold) ? threshold : -40,
+      )
+      entry.connect(gate.input)
+      entry = gate.output
+    }
     if (!voiceFilterShiftsPitch(id)) return entry
     pitch = createPitchShifterNode(context, voiceFilterPitchRatio(id))
     entry.connect(pitch.input)
@@ -332,13 +401,24 @@ export function createVoiceFilterChain(
   /** La piste de la destination (celle des pairs), avec son repli tracé par l'appelant. */
   function trackOf(): MediaStreamTrack {
     const first = destination.stream.getAudioTracks()[0]
-    // Une destination sans piste est une anomalie du contexte (fermé) : la source micro est
-    // rendue plutôt qu'un `undefined` qui éteindrait la session sans le dire.
-    return first ?? (source as MediaStreamTrack)
+    // Jamais le micro brut : une destination vide est une panne, le châssis la trace
+    // et bascule explicitement. Un repli silencieux envoyait la voix non filtrée
+    // tout en prétendant que le filtre était actif.
+    if (first === undefined) {
+      throw new Error('[voice-filter] destination sans piste — le micro brut ne part pas aux pairs')
+    }
+    return first
   }
 
   function apply(id: VoiceFilterId): MediaStreamTrack {
     unplug()
+    if (sourceNode !== null) {
+      try {
+        sourceNode.disconnect()
+      } catch {
+        // Déjà coupée : on la rebranche plus bas.
+      }
+    }
     const recipe = voiceFilterRecipeFor(id)
     const head = headOf(id)
 
@@ -355,7 +435,9 @@ export function createVoiceFilterChain(
     // Les nœuds sont RENVERSÉS à l'enregistrement et la boucle de débranchement consomme
     // `parts` en ordre INVERSE — double renversement : le débranchement réel suit l'ordre de
     // CRÉATION (filtre avant son poids, source avant ses descendants), pas l'ordre des maillons.
-    parts = built.flatMap((entry) => entry.created)
+    // `headOf` a déjà posé le gain d'entrée dans `parts` : on AJOUTE la recette,
+    // on ne l'écrase pas (sinon le gain d'entrée fuit d'un changement de voix à l'autre).
+    parts = parts.concat(built.flatMap((entry) => entry.created))
     oscillators = built.flatMap((entry) => entry.oscillators)
     for (const osc of oscillators) osc.start()
 
@@ -363,13 +445,13 @@ export function createVoiceFilterChain(
     for (let i = 0; i < recipe.chain.length; i += 1) {
       const index = recipe.chain[i] as number
       const builtNode = built[index]
-      const previous = i === 0 ? head : built[recipe.chain[i - 1] as number]?.node
+      const previous = i === 0 ? head : built[recipe.chain[i - 1] as number]?.output
       if (builtNode === undefined || previous === undefined) {
         throw new Error(
           `[voice-filter] recette « ${id} » mal formée : maillon ${index} sur ${built.length} nœuds (bug de recette, pas un réglage)`,
         )
       }
-      previous.connect(builtNode.node)
+      previous.connect(builtNode.input)
     }
 
     // La modulation du ring : l'oscillateur commande un gain, dont la sortie se SOMME dans
@@ -387,11 +469,13 @@ export function createVoiceFilterChain(
       ) {
         throw new Error(`[voice-filter] recette « ${id} » : ring sans oscillateur/gain/cible à gain`)
       }
-      modulator.node.connect(modGain.node)
-      modGain.node.connect(target.gain)
-      // La modulation s'ajoute à la valeur de base du gain cible (0,9) : la voix oscille entre
-      // silence et double — le battement caractéristique du robot.
-      modGain.gain.value = 0.9
+      modulator.output.connect(modGain.input)
+      modGain.output.connect(target.gain)
+      // Profondeur lue sur la recette. 1 sur un gain de base 0 = ring bipolaire
+      // (la voix sèche est supprimée). 0,9 sur une base 0,9 n'était qu'un trémolo.
+      const modSpec = recipe.nodes[recipe.ring.modGainIndex]
+      const depth = modSpec !== undefined && typeof modSpec.gain === 'number' ? modSpec.gain : 1
+      modGain.gain.value = depth
     }
 
     // Les résonateurs de formants : chacun est alimenté par la TÊTE (parallèle, donc) et se
@@ -403,15 +487,15 @@ export function createVoiceFilterChain(
         if (resonator === undefined || after === undefined) {
           throw new Error(`[voice-filter] recette « ${id} » : formant ${branch.resonatorIndex} hors tableau`)
         }
-        head.connect(resonator.node)
-        resonator.node.connect(after.node)
+        head.connect(resonator.input)
+        resonator.output.connect(after.input)
       }
     }
 
     const tailIndex = recipe.chain[recipe.chain.length - 1] as number
     const tail = built[tailIndex]
     if (tail === undefined) throw new Error(`[voice-filter] recette « ${id} » : chaîne vide`)
-    tail.node.connect(destination)
+    tail.output.connect(destination)
     applied = id
     return trackOf()
   }

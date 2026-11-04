@@ -343,12 +343,11 @@ describe('media-plane — maillage, Opus 32 kbps, push-to-talk, filtre LAN', () 
     await plane.startMicrophone()
     const constraints = gumCalls[0]
     assert.deepEqual(constraints?.['audio'], {
-      channelCount: 1,
-      echoCancellation: true,
-      // RNNoise (NS de Chromium) se calibre sur le silence pendant le PTT et tue la parole
-      // à la réactivation (retour JC, 2026-11-02) : le défaut du moteur est ÉTEINT.
-      noiseSuppression: false,
-      autoGainControl: true,
+      channelCount: { ideal: 1 },
+      echoCancellation: { ideal: true },
+      // RNNoise demandé. Le PTT coupe la piste envoyée, pas la capture.
+      noiseSuppression: { ideal: true },
+      autoGainControl: { ideal: false },
     })
     assert.ok(lastTrack !== null, 'une piste doit avoir été ouverte')
     assert.equal(lastTrack?.enabled, false, 'au repos le micro est coupé')

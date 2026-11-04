@@ -37,12 +37,24 @@ import {
   DEEP_FORMANTS,
   FILTER_NODE_KINDS,
   FORMANT_WEIGHTS,
+  RADIO_DRIVE,
+  RADIO_HIGHPASS_HZ,
+  RADIO_LOWPASS_HZ,
+  RADIO_PREGAIN,
+  ROBOT_CARRIER_HZ,
+  ROBOT_COMB_DELAY_SEC,
+  ROBOT_COMB_FEEDBACK,
+  ROBOT_RING_DEPTH,
+  TIMBRE_DRY_GAIN,
   VOICE_FILTER_IDS,
   VOICE_FILTER_PITCH_RATIOS,
   WOMAN_FORMANTS,
   isVoiceFilterId,
   resolveVoiceFilterId,
+  combFilter,
+  ringModulate,
   softClipCurve,
+  softClipSample,
   voiceFilterFormants,
   voiceFilterPitchRatio,
   voiceFilterRecipeFor,
@@ -150,6 +162,7 @@ describe('voice-filters — chaque recette est bien formée avant d’être câb
         highpass: ['kind', 'cutoffHz', 'q'],
         shaper: ['kind', 'curve'],
         oscillator: ['kind', 'frequency', 'modulation'],
+        delay: ['kind', 'delaySec', 'feedback'],
       }
       for (const node of recipe.nodes) {
         assert.ok(
@@ -189,8 +202,16 @@ describe('voice-filters — robot : une vraie modulation d’anneau, pas une not
       typeof carrier === 'number' && carrier >= 80 && carrier <= 200,
       `porteuse hors bande : ${String(carrier)} Hz`,
     )
-    const last = recipe.nodes[recipe.chain[recipe.chain.length - 1] as number]
-    assert.equal(last?.['kind'], 'lowpass', 'la chaîne finit par un lissage (le créneau du ring est dur)')
+    const lowpass = recipe.nodes.find((node) => node.kind === 'lowpass')
+    assert.ok(lowpass !== undefined, 'un lissage reste dans la chaîne (le ring est dur)')
+    const target = recipe.nodes[recipe.ring?.targetIndex ?? -1]
+    assert.equal(target?.gain, 0, 'gain de base 0 : ring bipolaire, pas un trémolo')
+    const mod = recipe.nodes[recipe.ring?.modGainIndex ?? -1]
+    assert.equal(mod?.gain, ROBOT_RING_DEPTH)
+    const delay = recipe.nodes.find((node) => node.kind === 'delay')
+    assert.equal(delay?.delaySec, ROBOT_COMB_DELAY_SEC)
+    assert.equal(delay?.feedback, ROBOT_COMB_FEEDBACK)
+    assert.ok(recipe.chain.includes(recipe.nodes.indexOf(delay as never)), 'le peigne est DANS la chaîne écoutée')
   })
 })
 
@@ -204,8 +225,11 @@ describe('voice-filters — radio : les trois bornes du talkie', () => {
     assert.ok(kinds.includes('shaper'), 'le talkie sature')
     const high = recipe.nodes.find((n) => n.kind === 'highpass')
     const low = recipe.nodes.find((n) => n.kind === 'lowpass')
-    assert.equal(high?.['cutoffHz'], 300)
-    assert.equal(low?.['cutoffHz'], 3000)
+    assert.equal(high?.['cutoffHz'], RADIO_HIGHPASS_HZ)
+    assert.equal(low?.['cutoffHz'], RADIO_LOWPASS_HZ)
+    const drive = recipe.nodes.find((node) => node.kind === 'gain' && node.gain === RADIO_PREGAIN)
+    assert.ok(drive !== undefined, 'un pré-gain pousse la parole dans l’écrêteur')
+    assert.ok(RADIO_DRIVE >= 6, 'le drive doit saturer la parole, pas la caresser')
   })
 
   it('la courbe du shaper est monotone, normalisée à ±1, et couvre [-1, 1]', () => {
@@ -281,12 +305,14 @@ describe('voice-filters — les timbres : des formants parallèles, pas des filt
     assert.ok(voiceFilterPitchRatio('woman') < voiceFilterPitchRatio('child'))
   })
 
-  it('les poids de formants sont sous 1 et identiques pour toutes les voix (somme sans saturation)', () => {
+  it('les formants DOMINENT le résidu sec (le mélange n’est pas presque sec)', () => {
     for (const w of [FORMANT_WEIGHTS.f1, FORMANT_WEIGHTS.f2, FORMANT_WEIGHTS.f3]) {
-      assert.ok(w > 0 && w < 1, `poids hors (0,1) : ${w}`)
+      assert.ok(w > TIMBRE_DRY_GAIN, `formant ${w} ≤ résidu sec ${TIMBRE_DRY_GAIN}`)
+      assert.ok(w <= 1, `poids > 1 : ${w}`)
     }
     const sum = FORMANT_WEIGHTS.f1 + FORMANT_WEIGHTS.f2 + FORMANT_WEIGHTS.f3
-    assert.ok(sum < 1, `somme des formants ${sum} ≥ 1 : la voix saturerait`)
+    assert.ok(sum > TIMBRE_DRY_GAIN * 4, `somme des formants ${sum} trop proche du sec`)
+    assert.ok(TIMBRE_DRY_GAIN < 0.25, 'le résidu sec doit rester minoritaire')
     for (const id of ['deep', 'man', 'woman', 'child'] as const) {
       const recipe = voiceFilterRecipeFor(id)
       for (const branch of recipe.formants ?? []) {
@@ -325,5 +351,65 @@ describe('voice-filters — la résolution d’une valeur lue ne répare pas en 
       assert.equal(resolved.id, 'none', `${String(junk)} doit retomber sur none`)
       assert.equal(resolved.fellBack, true, `${String(junk)} doit être dit replié (jamais silencieux)`)
     }
+  })
+})
+
+/** Magnitude d'une DFT à une fréquence (assez pour comparer fondamentale et bandes latérales). */
+function magnitudeAt(samples: Float32Array, freq: number, sampleRate: number): number {
+  let re = 0
+  let im = 0
+  const n = samples.length
+  for (let i = 0; i < n; i += 1) {
+    const w = (2 * Math.PI * freq * i) / sampleRate
+    const x = samples[i] ?? 0
+    re += x * Math.cos(w)
+    im -= x * Math.sin(w)
+  }
+  return Math.hypot(re, im) / n
+}
+
+describe('voice-filters — rendu hors-ligne : le spectre change vraiment', () => {
+  const rate = 48000
+
+  it('le ring bipolaire déplace un sinus de 200 Hz vers 200±porteuse (le sec s’effondre)', () => {
+    const n = 4800
+    const input = new Float32Array(n)
+    for (let i = 0; i < n; i += 1) input[i] = Math.sin((2 * Math.PI * 200 * i) / rate)
+    const rendered = ringModulate(input, ROBOT_CARRIER_HZ, rate)
+    const dry = magnitudeAt(rendered, 200, rate)
+    const lower = magnitudeAt(rendered, 200 - ROBOT_CARRIER_HZ, rate)
+    const upper = magnitudeAt(rendered, 200 + ROBOT_CARRIER_HZ, rate)
+    assert.ok(lower > dry * 4, `bande basse ${lower} pas assez au-dessus du sec ${dry}`)
+    assert.ok(upper > dry * 4, `bande haute ${upper} pas assez au-dessus du sec ${dry}`)
+  })
+
+  it('le peigne d’un impulse a un écho au retard de la recette, et une crête spectrale', () => {
+    const delay = Math.round(ROBOT_COMB_DELAY_SEC * rate)
+    const n = delay * 8
+    const input = new Float32Array(n)
+    input[0] = 1
+    const rendered = combFilter(input, delay, ROBOT_COMB_FEEDBACK)
+    assert.ok(Math.abs((rendered[delay] ?? 0) - ROBOT_COMB_FEEDBACK) < 1e-6, 'l’écho est au bon retard')
+    const peak = rate / delay
+    const atPeak = magnitudeAt(rendered, peak, rate)
+    const off = magnitudeAt(rendered, peak * 0.5, rate)
+    assert.ok(atPeak > off, `le peigne ne résonne pas vers ${peak.toFixed(0)} Hz (${atPeak} vs ${off})`)
+  })
+
+  it('la saturation radio à drive élevé crée des harmoniques audibles sur une parole faible', () => {
+    const n = 4800
+    const freq = 200
+    const input = new Float32Array(n)
+    for (let i = 0; i < n; i += 1) input[i] = 0.12 * Math.sin((2 * Math.PI * freq * i) / rate)
+    const driven = new Float32Array(n)
+    for (let i = 0; i < n; i += 1) driven[i] = softClipSample((input[i] ?? 0) * RADIO_PREGAIN, RADIO_DRIVE)
+    const fundamental = magnitudeAt(driven, freq, rate)
+    const third = magnitudeAt(driven, freq * 3, rate)
+    assert.ok(third > fundamental * 0.08, `harmonique 3 trop faible (${third} / ${fundamental}) — distorsion inaudible`)
+    // Le drive 2.2 d'avant, sur le même signal, reste presque linéaire.
+    const mild = new Float32Array(n)
+    for (let i = 0; i < n; i += 1) mild[i] = softClipSample(input[i] ?? 0, 2.2)
+    const mildThird = magnitudeAt(mild, freq * 3, rate)
+    assert.ok(third > mildThird * 3, 'le nouveau drive doit distordre nettement plus que 2.2 sans pré-gain')
   })
 })

@@ -26,6 +26,9 @@
  */
 export const OPUS_MAX_BITRATE = 32000
 
+/** Fréquence Opus (SDP `opus/48000`). L'`AudioContext` de la page est calé dessus. */
+export const OPUS_SAMPLE_RATE = 48000
+
 /**
  * Paramètres fmtp Opus imposés par SPEC-005 §2 :
  *   maxaveragebitrate=32000 → 32 kbps de moyenne ;
@@ -45,21 +48,21 @@ const OPUS_FMTP_OVERRIDES: ReadonlyArray<readonly [string, string]> = [
 const OPUS_DEFAULT_MINPTIME = 'minptime=10'
 
 /**
- * Contraintes micro : mono, annulation d'écho, réduction de bruit, gain auto.
+ * Contraintes micro : mono, annulation d'écho, réduction de bruit. Pas d'AGC navigateur.
  *
- * `noiseSuppression: false` (2026-11-02, retour JC) : la NS de Chromium repose désormais sur
- * RNNoise, et son estimateur se calibre sur ce qu'il reçoit — une piste désactivée par le
- * push-to-talk (`track.enabled = false`) le nourrit de silence pur, et à la RÉACTIVATION il
- * traite la parole comme du bruit : le signal tombait à zéro et la détection de voix mourait
- * après la première activation. Un défaut qui casse le geste premier du produit ne se garde
- * pas : éteint par défaut, rallongeable dans les réglages (`audio.noiseSuppression`) par qui
- * préfère la propreté du fond — au prix connu.
+ * `noiseSuppression: true` : la NS de Chromium est RNNoise. Elle était éteinte (2026-11-02)
+ * parce que le push-to-talk coupait la PISTE DE CAPTURE et que RNNoise se calait sur le
+ * silence. Le push-to-talk coupe désormais la piste ENVOYÉE, pas la capture : RNNoise
+ * continue d'entendre le micro. Le réglage `audio.noiseSuppression` peut encore l'éteindre.
+ *
+ * `autoGainControl: false` : le gain d'entrée est un `GainNode` dans le graphe. Un AGC
+ * navigateur en plus pompe contre lui et aplatit les filtres vocaux.
  */
 export const MIC_CONSTRAINTS: MicrophoneConstraints = {
   channelCount: 1,
   echoCancellation: true,
-  noiseSuppression: false,
-  autoGainControl: true,
+  noiseSuppression: true,
+  autoGainControl: false,
 }
 
 /**
@@ -71,8 +74,8 @@ export const MIC_CONSTRAINTS: MicrophoneConstraints = {
  * ICE, ni Opus, ni la topologie du maillage ne sont touchés. Le contrat média gelé de SPEC-005 §2
  * reste intact ; seul le prétraitement du micro devient réglable.
  *
- * `autoGainControl` n'est PAS exposé : le réglage `audio.inputGain` existe déjà et un AGC qui
- * pomperait par-dessus rendrait le gain imprévisible — les deux traitements se contrediraient.
+ * `autoGainControl` n'est PAS exposé et vaut `false` : le réglage `audio.inputGain` est le
+ * seul gain, appliqué dans le graphe. Un AGC navigateur pomperait par-dessus.
  * Le gain est borné 0..2 par le schéma de réglages ; la borne est re-vérifiée ICI, côté moteur,
  * parce qu'un appelant qui propagerait une valeur aberrante couperait le micro sans explication.
  */
@@ -107,9 +110,9 @@ export interface MicrophoneConstraints {
  * Fabrique les contraintes de capture depuis les réglages. PURE, aucune horloge, aucun I/O.
  *
  * Les valeurs absentes ou non valides retombent sur les défauts de `MIC_CONSTRAINTS` (mono,
- * EC/NS/AGC à `true`) : un réglage manquant ne peut pas éteindre le traitement anti-bruit par
- * accident, pas plus qu'un `inputGain` non numérique ne peut passer — il est ignoré, le gain
- * reste neutre.
+ * EC et NS demandés, AGC coupé) : un réglage manquant ne peut pas éteindre l'annulation
+ * d'écho par accident, pas plus qu'un `inputGain` non numérique ne peut passer — il est
+ * ignoré, le gain reste neutre.
  */
 export function buildMicrophoneConstraints(
   settings: MicrophoneSettingsLike | undefined,
@@ -133,6 +136,96 @@ export function buildMicrophoneConstraints(
     constraints.gain = gain
   }
   return constraints
+}
+
+/**
+ * Contrainte booléenne demandée en `ideal` : Chromium l'applique quand le périphérique
+ * le peut, et `getUserMedia` ne meurt pas si le micro refuse un `exact`.
+ */
+export interface IdealBoolean {
+  readonly ideal: boolean
+}
+
+/** Ce qui part vraiment à `getUserMedia({ audio })`. */
+export interface MediaTrackRequest {
+  readonly channelCount: { readonly ideal: number }
+  readonly echoCancellation: IdealBoolean
+  readonly noiseSuppression: IdealBoolean
+  readonly autoGainControl: IdealBoolean
+  readonly deviceId?: string
+}
+
+/**
+ * Traduit les facettes du moteur en contraintes DOM. EC / NS / AGC sont des `{ ideal }`
+ * (un booléen nu est traité en `exact` par la spec et fait échouer des micros). Le
+ * `deviceId` reste une chaîne : c'est le périphérique choisi, pas une préférence molle.
+ */
+export function toMediaTrackConstraints(constraints: MicrophoneConstraints): MediaTrackRequest {
+  const request: MediaTrackRequest = {
+    channelCount: { ideal: constraints.channelCount ?? 1 },
+    echoCancellation: { ideal: constraints.echoCancellation === true },
+    noiseSuppression: { ideal: constraints.noiseSuppression === true },
+    autoGainControl: { ideal: constraints.autoGainControl === true },
+  }
+  if (typeof constraints.deviceId === 'string' && constraints.deviceId.length > 0) {
+    return { ...request, deviceId: constraints.deviceId }
+  }
+  return request
+}
+
+/**
+ * EC / NS / AGC seuls, pour `track.applyConstraints` en vol (changer de périphérique
+ * exige un nouveau `getUserMedia`, pas un `applyConstraints`).
+ */
+export function toProcessingConstraints(constraints: MicrophoneConstraints): {
+  echoCancellation: IdealBoolean
+  noiseSuppression: IdealBoolean
+  autoGainControl: IdealBoolean
+} {
+  return {
+    echoCancellation: { ideal: constraints.echoCancellation === true },
+    noiseSuppression: { ideal: constraints.noiseSuppression === true },
+    autoGainControl: { ideal: constraints.autoGainControl === true },
+  }
+}
+
+/** Ce que `track.getSettings()` a réellement accordé (les absents ne sont pas des refus). */
+export interface CaptureSettingsSnapshot {
+  readonly echoCancellation?: boolean
+  readonly noiseSuppression?: boolean
+  readonly autoGainControl?: boolean
+  readonly sampleRate?: number
+  readonly channelCount?: number
+}
+
+/**
+ * Écarts entre la demande et `getSettings()`. Un champ absent du cliché n'est pas un
+ * écart (la doublure de test ne sait pas) : seul un booléen présent et contraire l'est.
+ */
+export function captureProcessingMismatches(
+  requested: MicrophoneConstraints,
+  applied: CaptureSettingsSnapshot,
+): readonly string[] {
+  const lines: string[] = []
+  const wantEcho = requested.echoCancellation === true
+  const wantNs = requested.noiseSuppression === true
+  const wantAgc = requested.autoGainControl === true
+  if (typeof applied.echoCancellation === 'boolean' && applied.echoCancellation !== wantEcho) {
+    lines.push(
+      `echoCancellation demandé=${String(wantEcho)} obtenu=${String(applied.echoCancellation)}`,
+    )
+  }
+  if (typeof applied.noiseSuppression === 'boolean' && applied.noiseSuppression !== wantNs) {
+    lines.push(
+      `noiseSuppression demandé=${String(wantNs)} obtenu=${String(applied.noiseSuppression)}`,
+    )
+  }
+  if (typeof applied.autoGainControl === 'boolean' && applied.autoGainControl !== wantAgc) {
+    lines.push(
+      `autoGainControl demandé=${String(wantAgc)} obtenu=${String(applied.autoGainControl)}`,
+    )
+  }
+  return lines
 }
 
 /** Résumé numérique d'un `RTCStatsReport` (forme identique à `PeerStats`). */

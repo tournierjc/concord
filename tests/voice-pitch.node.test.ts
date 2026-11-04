@@ -35,12 +35,16 @@ import {
   MIN_PITCH_RATIO,
   PITCH_FRAME_MS,
   PITCH_HEADS,
+  createPitchShifterNode,
   createPitchState,
   hannWindow,
   isPitchRatioValid,
   pitchFrameSizeFor,
   pitchShiftFrame,
+  pitchWorkletSource,
 } from '../src/renderer/voice-pitch.ts'
+import { createNoiseGateState, processNoiseGate } from '../src/renderer/noise-gate.ts'
+import { FakeAudioContext, FakeAudioNode } from './fake-rtc.ts'
 import { VOICE_FILTER_PITCH_RATIOS } from '../src/engine/rtc/voice-filters.ts'
 
 const SAMPLE_RATE = 48000
@@ -171,6 +175,67 @@ describe('voice-pitch — les bornes refusent l’absurde plutôt que de le câb
     const out = new Float32Array(state.frameSize)
     pitchShiftFrame(state, new Float32Array(state.frameSize), out)
     assert.equal(rms(out), 0, 'un anneau vide doit rendre du silence, pas un écho')
+  })
+})
+
+describe('voice-pitch — le worklet EST le décalage, et il est dans le chemin', () => {
+  it('la source du worklet rejoue pitchShiftFrame (pas un shift(ratio) libre)', () => {
+    const source = pitchWorkletSource()
+    assert.equal(source.includes('shift(ratio)'), false)
+    assert.match(source, /pitchShiftFrame\(this\.state/)
+    assert.match(source, /this\.qRead/)
+    const kernel = pitchShiftFrame.toString()
+    const fromWorklet = new Function(`${source.slice(0, source.indexOf('class ConcordPitchShifter'))}; return pitchShiftFrame`)() as typeof pitchShiftFrame
+    const stateA = createPitchState(SAMPLE_RATE, 1.25)
+    const stateB = createPitchState(SAMPLE_RATE, 1.25)
+    const frame = stateA.frameSize
+    const input = sine(TONE_HZ, frame)
+    const outA = new Float32Array(frame)
+    const outB = new Float32Array(frame)
+    pitchShiftFrame(stateA, input, outA)
+    fromWorklet(stateB, input, outB)
+    assert.equal(kernel.includes('PITCH_HEADS'), false, 'le corps ne doit pas refermer une constante du module')
+    for (let i = 0; i < frame; i += 1) {
+      assert.equal(outA[i], outB[i], `échantillon ${i} différent entre la page et le worklet`)
+    }
+  })
+
+  it('le processeur est ENTRE l’entrée et la sortie (pas un gain unique en court-circuit)', async () => {
+    const context = new FakeAudioContext()
+    const processor = new FakeAudioNode()
+    const shifter = createPitchShifterNode(context, 1.5, {
+      workletNodeFactory: () => processor,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const input = context.created.gains[0]
+    const output = context.created.gains[1]
+    assert.ok(input !== undefined && output !== undefined)
+    assert.notEqual(shifter.input, shifter.output, 'entrée et sortie sont deux nœuds')
+    assert.equal(input.outgoing.includes(processor), true, 'l’entrée alimente le processeur')
+    assert.equal(processor.outgoing.includes(output), true, 'le processeur alimente la sortie')
+    shifter.close()
+  })
+})
+
+describe('noise-gate — le fond sous le seuil est coupé, la voix passe', () => {
+  it('un souffle à −60 dBFS sort quasi nul ; un sinus à −14 dBFS passe', () => {
+    const n = 48000
+    const quiet = new Float32Array(n)
+    const loud = new Float32Array(n)
+    for (let i = 0; i < n; i += 1) {
+      quiet[i] = 0.001 * Math.sin((2 * Math.PI * 180 * i) / 48000)
+      loud[i] = 0.2 * Math.sin((2 * Math.PI * 180 * i) / 48000)
+    }
+    const gateQuiet = createNoiseGateState(48000, -40)
+    const gateLoud = createNoiseGateState(48000, -40)
+    const outQuiet = new Float32Array(n)
+    const outLoud = new Float32Array(n)
+    processNoiseGate(gateQuiet, quiet, outQuiet)
+    processNoiseGate(gateLoud, loud, outLoud)
+    const quietRms = rms(outQuiet.subarray(n - 4800))
+    const loudRms = rms(outLoud.subarray(n - 4800))
+    assert.ok(quietRms < 0.0001, `le souffle n’est pas coupé (${quietRms})`)
+    assert.ok(loudRms > 0.1, `la voix est étouffée (${loudRms})`)
   })
 })
 

@@ -119,7 +119,10 @@ export function createPitchState(sampleRate: number, ratio: number): PitchState 
  */
 export function pitchShiftFrame(state: PitchState, input: Float32Array, output: Float32Array): void {
   const { frameSize, ratio, ring, window } = state
-  const half = Math.floor(frameSize / PITCH_HEADS)
+  // `state.heads.length`, pas la constante du module : le corps doit être autonome
+  // (`toString()` part dans l'AudioWorklet, qui n'a pas les imports de la page).
+  const heads = state.heads.length > 0 ? state.heads.length : 1
+  const half = Math.floor(frameSize / heads)
   const span = frameSize * 2
   // 1. Écrire la trame dans l'anneau (copie : le lecteur ne lit jamais `input` directement).
   for (const head of state.heads) {
@@ -150,7 +153,7 @@ export function pitchShiftFrame(state: PitchState, input: Float32Array, output: 
   }
   // 3. Normaliser (deux têtes fenêtrées se somment ≈ à l'amplitude × 1).
   for (let i = 0; i < frameSize; i += 1) {
-    output[i] = (output[i] ?? 0) / PITCH_HEADS
+    output[i] = (output[i] ?? 0) / heads
   }
 }
 
@@ -172,8 +175,10 @@ export interface PitchNodeLike {
   disconnect(): void
 }
 
-/** Le strict minimum d'un gain pour le pitch : un pont débranchable, rien de plus. */
-export interface PitchGainLike extends PitchNodeLike {}
+/** Le strict minimum d'un gain pour le pitch : un pont débranchable, et son niveau. */
+export interface PitchGainLike extends PitchNodeLike {
+  gain?: { value: number }
+}
 
 /** Le nœud de la page : un AudioWorklet qui rejoue `pitchShiftFrame` trame par trame. */
 export interface PitchShifterNode {
@@ -188,76 +193,76 @@ export interface PitchShifterNode {
 }
 
 /**
- * La source du code de l'worklet, en chaîne : le même `pitchShiftFrame`, écrit une seule
- * fois. Elle est embarquée via un Blob URL (le CSP de la page interdit un fichier séparé,
- * et un bundle unique est la règle du projet).
+ * Source du worklet : le MÊME `pitchShiftFrame` que le test numérique (`toString()` du
+ * corps compilé, autonome — aucun import). Le processeur accumule une trame, la décale,
+ * puis vide la file sur les quanta de 128 échantillons. L'ancienne version appelait
+ * `shift(ratio)` (variable libre) et n'écrivait que les 128 premiers échantillons de la
+ * trame : le reste était jeté, et le nœud n'était de toute façon pas dans le chemin.
  */
-const WORKLET_SOURCE = `
+export function pitchWorkletSource(): string {
+  return `
+${hannWindow.toString()}
+${pitchShiftFrame.toString()}
 class ConcordPitchShifter extends AudioWorkletProcessor {
-  static get parameterDescriptors() { return [{ name: 'ratio', defaultValue: 1, minValue: 0.5, maxValue: 2 }] }
   constructor(options) {
     super()
-    const frame = (options.processorOptions && options.processorOptions.frameSize) || 2880
-    this.frameSize = frame
-    this.ring = new Float32Array(frame * 2)
-    this.window = new Float32Array(frame)
-    for (let i = 0; i < frame; i += 1) this.window[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / frame)
-    this.heads = [{ write: 0, read: 0 }, { write: 0, read: Math.floor(frame / 2) }]
-    this.pending = new Float32Array(frame)
-    this.filled = 0
-    this.ratio = (options.processorOptions && options.processorOptions.ratio) || 1
-    this.port.onmessage = (event) => {
-      const data = event.data
-      if (data && typeof data.ratio === 'number') this.ratio = Math.min(2, Math.max(0.5, data.ratio))
+    const opts = (options && options.processorOptions) || {}
+    const frame = opts.frameSize || 2880
+    const ratio = typeof opts.ratio === 'number' ? opts.ratio : 1
+    const half = Math.floor(frame / 2)
+    this.state = {
+      frameSize: frame,
+      ratio: ratio,
+      heads: [{ write: 0, read: 0 }, { write: 0, read: half }],
+      ring: new Float32Array(frame * 2),
+      window: hannWindow(frame),
     }
+    this.pending = new Float32Array(frame)
+    this.rendered = new Float32Array(frame)
+    this.filled = 0
+    this.queue = new Float32Array(frame * 4)
+    this.qRead = 0
+    this.qWrite = 0
   }
-  process(inputs, outputs, parameters) {
-    const input = inputs[0]
-    const output = outputs[0]
-    if (!input || input.length === 0 || !output || output.length === 0) return true
-    const channel = input[0]
-    const out = output[0]
-    const frame = this.frameSize
-    for (let i = 0; i < channel.length; i += 1) {
-      this.pending[this.filled] = channel[i]
+  enqueue(samples) {
+    const q = this.queue
+    const n = q.length
+    for (let i = 0; i < samples.length; i += 1) {
+      q[this.qWrite % n] = samples[i]
+      this.qWrite += 1
+    }
+    if (this.qWrite - this.qRead > n) this.qRead = this.qWrite - n
+  }
+  process(inputs, outputs) {
+    const input = inputs[0] && inputs[0][0]
+    const output = outputs[0] && outputs[0][0]
+    if (!input || !output) return true
+    const frame = this.state.frameSize
+    for (let i = 0; i < input.length; i += 1) {
+      this.pending[this.filled] = input[i]
       this.filled += 1
       if (this.filled === frame) {
-        this.shift(ratio)
+        pitchShiftFrame(this.state, this.pending, this.rendered)
+        this.enqueue(this.rendered)
         this.filled = 0
       }
     }
-    // Le tampon de sortie du graphe fait 128 : la trame est avalée par paquets, et le rendu
-    // est écrit d'un coup à chaque trame pleine.
-    out.set(this.rendered.subarray(0, out.length))
-    return true
-  }
-  shift(ratio) {
-    const frame = this.frameSize
-    const span = frame * 2
-    for (const head of this.heads) {
-      for (let i = 0; i < frame; i += 1) this.ring[(head.write + i) % span] = this.pending[i]
-      head.write = (head.write + frame) % span
-    }
-    if (!this.rendered) this.rendered = new Float32Array(frame)
-    this.rendered.fill(0)
-    for (let h = 0; h < this.heads.length; h += 1) {
-      const head = this.heads[h]
-      const phase = h * Math.floor(frame / this.heads.length)
-      for (let i = 0; i < frame; i += 1) {
-        const position = (head.read + i * ratio + phase) % span
-        const low = Math.floor(position)
-        const weight = position - low
-        const a = this.ring[low % span]
-        const b = this.ring[(low + 1) % span]
-        this.rendered[i] += (a + (b - a) * weight) * this.window[i]
+    const q = this.queue
+    const n = q.length
+    for (let i = 0; i < output.length; i += 1) {
+      if (this.qRead < this.qWrite) {
+        output[i] = q[this.qRead % n]
+        this.qRead += 1
+      } else {
+        output[i] = 0
       }
-      head.read = (head.read + frame * ratio) % span
     }
-    for (let i = 0; i < frame; i += 1) this.rendered[i] /= this.heads.length
+    return true
   }
 }
 registerProcessor('concord-pitch-shifter', ConcordPitchShifter)
 `
+}
 
 /**
  * Le constructeur du nœud, passé en dépendance. `null` = le navigateur ne l'a pas (le repli
@@ -295,84 +300,97 @@ function workletAvailable(context: PitchAudioContext): boolean {
  * le nœud est un PASSTHROUGH (`ratio` rendu à 1, `close()` silencieux) — un pitch qui
  * échoue doit rendre la voix NATURELLE, jamais couper le micro. L'appelant trace le repli.
  */
+function bridge(input: PitchNodeLike, output: PitchNodeLike, ratio: number): PitchShifterNode {
+  input.connect(output)
+  return {
+    input,
+    output,
+    ratio,
+    close(): void {
+      try {
+        input.disconnect()
+      } catch {
+        // Déjà coupé.
+      }
+      if (output !== input) {
+        try {
+          output.disconnect()
+        } catch {
+          // Déjà coupé.
+        }
+      }
+    },
+  }
+}
+
 export function createPitchShifterNode(
   context: PitchAudioContext,
   ratio: number,
   options: PitchShifterOptions = {},
 ): PitchShifterNode {
   const safe = isPitchRatioValid(ratio) ? ratio : 1
-  const passthrough = context.createGain()
+  const input = context.createGain()
+  const output = context.createGain()
+  if (input.gain !== undefined) input.gain.value = 1
+  if (output.gain !== undefined) output.gain.value = 1
+  // Ratio neutre, ou runtime sans worklet (Node, test de graphe) : pont direct.
+  // L'entrée et la sortie restent DEUX nœuds dès qu'un worklet peut s'insérer : le signal
+  // entre dans le processeur, il n'est pas court-circuité par un gain unique.
   if (!workletAvailable(context) || safe === 1) {
-    // Pas de worklet, ou ratio neutre : la voix passe telle quelle. `createGain()` est déjà
-    // un pont validé par tout le reste du graphe (le vumètre en est un), donc le repli ne
-    // peut pas casser la chaîne — il rend juste la voix sans hauteur modifiée.
-    return {
-      input: passthrough,
-      output: passthrough,
-      ratio: 1,
-      close(): void {
-        try {
-          passthrough.disconnect()
-        } catch {
-          // Déjà coupé.
-        }
-      },
-    }
+    return bridge(input, output, safe === 1 ? 1 : 1)
+  }
+  const makeNode = options.workletNodeFactory ?? defaultWorkletNodeFactory
+  if (makeNode === defaultWorkletNodeFactory && typeof AudioWorkletNode !== 'function') {
+    return bridge(input, output, 1)
   }
   let workletNode: PitchNodeLike | null = null
   let applied = 1
+  let closed = false
   try {
-    const url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'application/javascript' }))
-    // `addModule` est asynchrone ; le nœud est créé dès qu'il est prêt, et la page ne doit
-    // PAS attendre : en attendant, le pass-through rend la voix naturelle (dégradé visible,
-    // pas silencieux). Le branchement définitif est posé par le rappel.
+    const url = URL.createObjectURL(new Blob([pitchWorkletSource()], { type: 'application/javascript' }))
     const audioWorklet = context.audioWorklet
     if (audioWorklet === undefined) throw new Error('audioWorklet absent')
-    // Le constructeur du nœud est passé en DÉPENDANCE, pas lu en global : `AudioWorkletNode`
-    // est un global du navigateur, et le typer depuis le code produirait un cast pour le
-    // passer à une doublure de test — exactement ce que C12-3 interdit. La page le fournit
-    // (`defaultWorkletNodeFactory`), un test fournit le sien. Absent = repli pass-through.
-    const makeNode = options.workletNodeFactory ?? defaultWorkletNodeFactory
-    if (makeNode === null) throw new Error('AudioWorkletNode indisponible')
+    // Pont sec le temps du chargement (une trame), puis le processeur REMPLACE le pont :
+    // entrée → worklet → sortie. L'ancien câblage branchait la sortie du worklet sur le
+    // même gain qui servait d'entrée, donc la voix ne traversait jamais le décalage.
+    input.connect(output)
     void audioWorklet.addModule(url).then(() => {
+      if (closed) return
       const node = makeNode(context, 'concord-pitch-shifter', {
         numberOfInputs: 1,
         numberOfOutputs: 1,
+        outputChannelCount: [1],
         channelCount: 1,
         channelCountMode: 'explicit',
         processorOptions: { frameSize: pitchFrameSizeFor(context.sampleRate), ratio: safe },
       })
-      node.connect(passthrough)
+      try {
+        input.disconnect()
+      } catch {
+        // Le pont était déjà coupé.
+      }
+      input.connect(node)
+      node.connect(output)
       workletNode = node
       applied = safe
     }).catch(() => {
-      // Worklet refusé (CSP, mémoire) : le pass-through reste — la voix sort naturelle.
       workletNode = null
       applied = 1
+      console.warn('[voice-pitch] AudioWorklet refusé — hauteur inchangée')
     }).finally(() => {
       URL.revokeObjectURL(url)
     })
   } catch {
-    return {
-      input: passthrough,
-      output: passthrough,
-      ratio: 1,
-      close(): void {
-        try {
-          passthrough.disconnect()
-        } catch {
-          // Déjà coupé.
-        }
-      },
-    }
+    return bridge(input, output, 1)
   }
   return {
-    input: passthrough,
-    output: passthrough,
+    input,
+    output,
     get ratio(): number {
       return applied
     },
     close(): void {
+      closed = true
       if (workletNode !== null) {
         try {
           workletNode.disconnect()
@@ -382,7 +400,12 @@ export function createPitchShifterNode(
         workletNode = null
       }
       try {
-        passthrough.disconnect()
+        input.disconnect()
+      } catch {
+        // Déjà coupé.
+      }
+      try {
+        output.disconnect()
       } catch {
         // Déjà coupé.
       }

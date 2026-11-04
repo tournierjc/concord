@@ -102,7 +102,7 @@ describe('voice-filter — robot : une modulation d’anneau réellement câblé
     assert.equal(oscillator.startCalls, 1, 'la porteuse est démarrée (un oscillateur non démarré est muet)')
     assert.equal(oscillator.type, 'sine')
     // La fréquence de la recette arrive jusqu'au nœud (une recette perdue en route = 440 Hz par défaut).
-    assert.equal(oscillator.frequency.value, 120)
+    assert.equal(oscillator.frequency.value, 90)
     // Et la porteuse n'est JAMAIS dans la chaîne écoutée : sa sortie unique va au gain de modulation.
     const recipe = voiceFilterRecipeFor('robot')
     assert.ok(recipe.ring !== undefined)
@@ -116,43 +116,48 @@ describe('voice-filter — robot : une modulation d’anneau réellement câblé
   it('la modulation se branche sur le PARAMÈTRE gain d’un nœud de la chaîne (le multiplieur)', () => {
     const recipe = voiceFilterRecipeFor('robot')
     assert.ok(recipe.ring !== undefined)
-    // Le gain de modulation est le SECOND gain créé (le premier est le multiplicateur de la
-    // chaîne — cf. `ring.targetIndex`) : les gains sont créés dans l’ordre des maillons de la
-    // recette, pas à leurs indices bruts. Sa sortie doit aller sur un AudioParam, pas un nœud.
-    const modGain = h.context.created.gains[1]
-    assert.ok(modGain !== undefined, 'le gain de modulation existe')
+    // Le gain de modulation est celui que l'oscillateur pilote — plus un index fixe :
+    // le gain d'entrée et la réinjection du peigne créent d'autres gains avant lui.
+    const oscillator = h.context.created.oscillators[0]
+    assert.ok(oscillator !== undefined)
+    const modGain = oscillator.outgoing[0]
+    assert.ok(modGain instanceof FakeGain, 'la porteuse pilote un gain')
     assert.equal(modGain.outgoing.length, 1)
     const target = modGain.outgoing[0]
     assert.ok(target instanceof FakeAudioParam, 'la modulation pilote un PARAMÈTRE (gain), sinon ce n’est pas un ring')
-    // Et ce paramètre est bien celui d’un gain de la chaîne (le multiplicateur).
-    const chainGain = h.context.created.gains[recipe.ring.targetIndex]
-    assert.ok(chainGain !== undefined)
-    assert.equal(chainGain.gain, target, 'la cible est le `gain` du multiplicateur de la chaîne')
+    assert.equal(modGain.gain.value, 1, 'profondeur 1 : la porteuse va de −1 à +1')
+    const zeroed = h.context.created.gains.find((gain) => gain.gain === target)
+    assert.ok(zeroed !== undefined, 'la cible est un gain de la chaîne')
+    assert.equal(zeroed.gain.value, 0, 'base 0 : ring bipolaire, la voix sèche est supprimée')
+    void recipe
   })
 
-  it('la chaîne du robot finit par un lissage, et aboutit à la destination', () => {
-    // Deux gains (entrée + modulation) + un lowpass + un oscillateur : la chaîne écoutée est
-    // gain → lowpass → destination, le reste étant la modulation.
-    assert.equal(h.context.created.biquads.length, 1, 'le robot a son lissage')
-    const smoother = h.context.created.biquads[0]
+  it('la chaîne du robot a un peigne et un lissage, et aboutit à la destination', () => {
+    assert.equal(h.context.created.delays.length, 1, 'le robot a son peigne')
+    const comb = h.context.created.delays[0]
+    assert.ok(comb !== undefined)
+    assert.ok(Math.abs(comb.delayTime.value - 0.008) < 1e-9)
+    const smoother = h.context.created.biquads.find((node) => node.type === 'lowpass')
     assert.ok(smoother !== undefined)
-    assert.equal(smoother.type, 'lowpass')
-    assert.equal(smoother.frequency.value, 3800)
+    assert.equal(smoother.frequency.value, 3400)
     const destination = h.context.created.destinations[0]
     assert.ok(destination !== undefined)
-    assert.ok(smoother.outgoing.includes(destination), 'le lissage aboutit à la destination des pairs')
+    const reaches = h.context.created.gains.some((gain) => gain.outgoing.includes(destination))
+    assert.equal(reaches, true, 'un gain de la chaîne aboutit à la destination des pairs')
   })
 })
 
 describe('voice-filter — radio : les bornes et la saturation arrivent jusqu’aux nœuds', () => {
-  it('passe-haut 300 Hz, passe-bas 3000 Hz, passe-bande, et une courbe posée sur le shaper', () => {
+  it('passe-haut 500 Hz, passe-bas 2400 Hz, passe-bande, et une courbe posée sur le shaper', () => {
     const h = harness('radio')
-    const types = h.context.created.biquads.map((node) => node.type).sort()
-    assert.deepEqual(types, ['bandpass', 'highpass', 'lowpass'])
+    const types = h.context.created.biquads.map((node) => node.type)
+    assert.ok(types.includes('bandpass') && types.includes('highpass') && types.includes('lowpass'))
     const high = h.context.created.biquads.find((n) => n.type === 'highpass')
     const low = h.context.created.biquads.find((n) => n.type === 'lowpass')
-    assert.equal(high?.['frequency'].value, 300)
-    assert.equal(low?.['frequency'].value, 3000)
+    assert.equal(high?.['frequency'].value, 500)
+    assert.equal(low?.['frequency'].value, 2400)
+    const drive = h.context.created.gains.find((gain) => gain.gain.value === 6)
+    assert.ok(drive !== undefined, 'le pré-gain ×6 est posé sur un nœud')
     assert.equal(h.context.created.shapers.length, 1, 'la saturation est montée')
     const shaper = h.context.created.shapers[0]
     assert.ok(shaper !== undefined && shaper.curve !== null, 'la courbe est POSÉE sur le nœud (une courbe perdue = un filtre ordinaire)')
@@ -175,18 +180,18 @@ describe('voice-filter — les timbres câblent leurs formants en parallèle', (
       // Les quatre filtres de la chaîne directe : 1 bandpass (F1 de base) + 1 lowpass ; les
       // trois résonateurs sont les trois bandpass restants.
       const bandpass = h.context.created.biquads.filter((n) => n.type === 'bandpass')
-      assert.equal(bandpass.length, 4, `${id} : un bandpass de base + trois résonateurs`)
+      assert.equal(bandpass.length, 3, `${id} : trois résonateurs, le sec n’est plus un 4e passe-bande`)
+      for (const filter of bandpass) {
+        const weight = filter.outgoing.find((node) => node instanceof FakeGain)
+        assert.ok(weight instanceof FakeGain, `${id} : le passe-bande alimente son poids (pas l’inverse)`)
+        assert.ok(weight.gain.value >= 0.5, `${id} : poids de formant trop faible (${weight.gain.value})`)
+      }
       const heads = h.context.created.sources
       assert.equal(heads.length, 1, 'une seule source : c’est elle qui fourche')
-      const source = heads[0]
-      assert.ok(source !== undefined)
-      // Les poids de formants sont posés sur les gains parallèles (la recette les porte).
       const gains = h.context.created.gains
       assert.ok(gains.length >= 2, 'un gain d’entrée et un gain de sortie au moins')
-      // Chaque résonateur reçoit bien un poids : les trois bandpass parallèles ont des gains
-      // distincts posés (0.30 / 0.22 / 0.12 — cf. FORMANT_WEIGHTS).
-      const weights = gains.map((g) => g.gain.value).filter((v) => v > 0 && v < 0.35).sort((a, b) => b - a)
-      assert.ok(weights.length >= 3, `${id} : les trois poids de formants sont posés (${weights.join(', ')})`)
+      const dry = gains.find((gain) => Math.abs(gain.gain.value - 0.18) < 1e-9)
+      assert.ok(dry !== undefined, `${id} : le résidu sec (0,18) est posé`)
       h.chain.close()
     })
   }

@@ -44,11 +44,15 @@ import type { Timers } from '../timers.ts'
 import {
   MIC_CONSTRAINTS,
   OPUS_MAX_BITRATE,
+  OPUS_SAMPLE_RATE,
+  captureProcessingMismatches,
   lanOnlyConfiguration,
   summarizeStats,
+  toMediaTrackConstraints,
+  toProcessingConstraints,
   withOpusSdpParams,
 } from './media-config.ts'
-import type { MicrophoneConstraints } from './media-config.ts'
+import type { CaptureSettingsSnapshot, MicrophoneConstraints } from './media-config.ts'
 import {
   createVoiceChainHost,
   type FilterAudioContextLike,
@@ -200,6 +204,12 @@ export interface MediaPlane {
   /** La voix réellement appliquée (`null` = micro non démarré), pas l'intention du réglage. */
   voiceFilter(): VoiceFilterId | null
   /**
+   * Réapplique EC / NS / AGC sur la piste de CAPTURE déjà ouverte (`applyConstraints`)
+   * et journalise `getSettings()`. Changer de périphérique exige un nouveau
+   * `getUserMedia` — cette méthode ne le fait pas.
+   */
+  applyCaptureConstraints(constraints: MicrophoneConstraints): Promise<void>
+  /**
    * Niveau RMS (0..1) d'un pair : **un analyseur par pair** (AD-17 / D4).
    *
    *   • `level('b')` → mesure du pair `b`, ou `null` s'il n'existe aucune mesure
@@ -325,19 +335,32 @@ function rootMeanSquare(samples: Float32Array<ArrayBuffer>): number {
  */
 async function requestMicrophone(constraints: MicrophoneConstraints): Promise<MediaStream> {
   try {
-    // Le type DOM accepte `MediaTrackConstraints` ; nos facettes normalisées s'y rangent
-    // sans conversion (toutes primitives du type DOM, `gain` seul est ignoré du navigateur
-    // et porté par la facette pour le prétraitement amont).
-    const audio: MediaTrackConstraints = {
-      channelCount: constraints.channelCount,
-      echoCancellation: constraints.echoCancellation,
-      noiseSuppression: constraints.noiseSuppression,
-      autoGainControl: constraints.autoGainControl,
-      ...(constraints.deviceId === undefined ? {} : { deviceId: constraints.deviceId }),
-    }
+    // `{ ideal }` et non un booléen nu : la spec lit un booléen comme `exact`, et un
+    // micro qui ne peut pas garantir l'exact ferme toute la capture. `gain` n'est pas
+    // une contrainte DOM — il est appliqué par le graphe (voice-filter).
+    const audio: MediaTrackConstraints = toMediaTrackConstraints(constraints)
     return await navigator.mediaDevices.getUserMedia({ audio })
   } catch (error) {
     throw new Error(`getUserMedia audio a échoué : ${describeError(error)}`)
+  }
+}
+
+/** Lit `getSettings()` sans supposer que la doublure de test l'implémente. */
+function readCaptureSettings(track: MediaStreamTrack): CaptureSettingsSnapshot {
+  if (typeof track.getSettings !== 'function') return {}
+  const settings = track.getSettings()
+  const echo = settings.echoCancellation
+  const noise = settings.noiseSuppression
+  const agc = settings.autoGainControl
+  const rate = settings.sampleRate
+  const channels = settings.channelCount
+  const snapshot: CaptureSettingsSnapshot = {}
+  return {
+    ...(typeof echo === 'boolean' ? { echoCancellation: echo } : snapshot),
+    ...(typeof noise === 'boolean' ? { noiseSuppression: noise } : snapshot),
+    ...(typeof agc === 'boolean' ? { autoGainControl: agc } : snapshot),
+    ...(typeof rate === 'number' ? { sampleRate: rate } : snapshot),
+    ...(typeof channels === 'number' ? { channelCount: channels } : snapshot),
   }
 }
 
@@ -400,6 +423,9 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
   const meters = new Map<string, Meter[]>()
   let localStream: MediaStream | null = null
   let localTrack: MediaStreamTrack | null = null
+  /** Piste de CAPTURE (getUserMedia). Le push-to-talk ne la coupe pas : AEC et RNNoise
+   * se calibreraient sur le silence. `localTrack` est la piste ENVOYÉE. */
+  let captureTrack: MediaStreamTrack | null = null
   // Voix demandée alors que le micro n'est pas encore ouvert (le châssis n'existe pas encore) :
   // appliquée à l'ouverture plutôt que perdue (bug « deux clics », 2026-11-04).
   let pendingVoiceFilter: VoiceFilterId | null = null
@@ -413,6 +439,44 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
 
   function warn(message: string): void {
     console.warn(`[media-plane ${o.localId}] ${message}`)
+  }
+
+  /** Contexte à 48 kHz (Opus). Un matériel qui refuse retombe sur sa fréquence, et c'est dit. */
+  function openAudioContext(label: string): AudioContext {
+    let context: AudioContext
+    try {
+      context = new AudioContext({ sampleRate: OPUS_SAMPLE_RATE })
+    } catch (error) {
+      warn(`AudioContext ${OPUS_SAMPLE_RATE} Hz refusé (${label}) : ${describeError(error)}`)
+      context = new AudioContext()
+    }
+    const rate = context.sampleRate
+    const state = context.state
+    console.info(
+      `[media-plane ${o.localId}] AudioContext state=${typeof state === 'string' ? state : 'inconnu'} sampleRate=${typeof rate === 'number' ? String(rate) : 'inconnu'}`,
+    )
+    if (typeof rate === 'number' && rate !== OPUS_SAMPLE_RATE) {
+      warn(`AudioContext ${rate} Hz ≠ Opus ${OPUS_SAMPLE_RATE} Hz (${label})`)
+    }
+    void context.resume().then(() => {
+      const running = context.state
+      if (typeof running === 'string' && running !== 'running') {
+        warn(`AudioContext état « ${running} » (${label}) : le graphe vocal ne tourne pas`)
+      }
+    }).catch((error: unknown) => {
+      warn(`AudioContext.resume a échoué (${label}) : ${describeError(error)}`)
+    })
+    return context
+  }
+
+  function logCapture(track: MediaStreamTrack, requested: MicrophoneConstraints): void {
+    const applied = readCaptureSettings(track)
+    console.info(
+      `[media-plane ${o.localId}] capture getSettings echoCancellation=${String(applied.echoCancellation)} noiseSuppression=${String(applied.noiseSuppression)} autoGainControl=${String(applied.autoGainControl)} sampleRate=${String(applied.sampleRate)} channelCount=${String(applied.channelCount)} (demandé EC=${String(requested.echoCancellation === true)} NS=${String(requested.noiseSuppression === true)} AGC=${String(requested.autoGainControl === true)})`,
+    )
+    for (const line of captureProcessingMismatches(requested, applied)) {
+      warn(`capture : ${line}`)
+    }
   }
 
   /** Refus explicite et traçable d'un candidat hors LAN (jamais silencieux). */
@@ -464,10 +528,7 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     }
     try {
       if (audioContext === null) {
-        audioContext = new AudioContext()
-        audioContext.resume().catch((error: unknown) => {
-          warn(`AudioContext.resume a échoué (${label}) : ${describeError(error)}`)
-        })
+        audioContext = openAudioContext(label)
       }
       const context = audioContext
       const meter = attachAnalyser(context, stream, meterSource)
@@ -754,6 +815,8 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
       throw new Error('le flux micro ne contient aucune piste audio')
     }
     localStream = stream
+    captureTrack = first
+    logCapture(first, constraints)
     // Filtres vocaux (2026-11-03, demande JC) : la chaîne est ouverte AVANT que la piste
     // locale soit retenue — `localTrack` devient la piste des pairs (filtrée, ou brute si la
     // chaîne est absente/a levé, tracé dans les deux cas). `setTransmitting` et `attachLocalTrack`
@@ -772,12 +835,22 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     if (o.voiceChainFactory !== undefined) {
       const factory = o.voiceChainFactory
       if (audioContext === null) {
-        audioContext = new AudioContext()
+        audioContext = openAudioContext('filtre vocal')
       }
       const filterContext = audioContext
-      filterContext.resume().catch((error: unknown) => {
+      try {
+        await filterContext.resume()
+      } catch (error) {
         warn(`AudioContext.resume a échoué (filtre vocal) : ${describeError(error)}`)
-      })
+      }
+      const running = filterContext.state
+      if (typeof running === 'string' && running !== 'running') {
+        warn(`AudioContext état « ${running} » au montage du filtre : le graphe ne tourne pas`)
+      }
+      const rate = filterContext.sampleRate
+      if (typeof rate === 'number' && rate !== OPUS_SAMPLE_RATE) {
+        warn(`AudioContext ${rate} Hz au montage du filtre ≠ Opus ${OPUS_SAMPLE_RATE} Hz`)
+      }
       buildChain = factory
       chainContext = filterContext
     }
@@ -798,6 +871,9 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     // Le levier est la piste ENVOYÉE aux pairs (filtrée quand une voix vit, brute sinon) —
     // jamais la piste micro, qui continuerait d'alimenter le graphe de filtrage en silence.
     outgoing.enabled = o.microOpenOnStart === true
+    // La capture reste OUVERTE même en push-to-talk : AEC et RNNoise se calibrent sur
+    // elle. Couper `outgoing` (la piste envoyée) suffit à se taire.
+    if (outgoing !== first) first.enabled = true
     // Le vumètre local mesure le MICRO BRUT (la piste `first`), pas la piste filtrée : le
     // push-to-talk et le battement VAD décident sur la voix réelle, pas sur sa version robot —
     // un robot dont la modulation d'anneau ferait osciller le détecteur n'est pas un VAD.
@@ -888,7 +964,35 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
       pendingVoiceFilter = id
       return null
     }
-    return voiceHost.apply(id)
+    const next = voiceHost.apply(id)
+    if (next === null) return null
+    // Le graphe change sur la même destination la plupart du temps, mais un repli
+    // (panne) ou une destination neuve change l'identité de la piste. Chaque pair
+    // doit recevoir CETTE piste — sinon l'émetteur garde le micro brut.
+    const enabled = localTrack === null ? next.enabled : localTrack.enabled
+    next.enabled = enabled
+    localTrack = next
+    for (const [remoteId, peer] of peers) {
+      void attachLocalTrack(remoteId, peer).catch((error: unknown) => {
+        warn(`replaceTrack voix « ${id} » refusé pour ${remoteId} : ${describeError(error)}`)
+      })
+    }
+    return next
+  }
+
+  async function applyCaptureConstraints(next: MicrophoneConstraints): Promise<void> {
+    const track = captureTrack
+    if (track === null) return
+    if (typeof track.applyConstraints !== 'function') {
+      warn('applyConstraints indisponible : EC/NS/AGC inchangés jusqu’à la prochaine ouverture')
+      return
+    }
+    try {
+      await track.applyConstraints(toProcessingConstraints(next))
+    } catch (error) {
+      warn(`applyConstraints (EC/NS/AGC) refusé : ${describeError(error)}`)
+    }
+    logCapture(track, next)
   }
 
   function voiceFilter(): VoiceFilterId | null {
@@ -934,6 +1038,7 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     }
     localStream = null
     localTrack = null
+    captureTrack = null
     const context = audioContext
     audioContext = null
     if (context !== null) {
@@ -952,6 +1057,7 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     setTransmitting,
     setVoiceFilter,
     voiceFilter,
+    applyCaptureConstraints,
     level,
     stats,
     close,

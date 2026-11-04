@@ -63,11 +63,15 @@ describe('permissions — la caméra n’est jamais accordée', () => {
       'fullscreen',
       'openExternal',
       'unknown',
-      'speaker-selection',
     ]) {
       assert.equal(isPermissionAllowed(permission, ['audio']), false, `${permission} doit être refusé`);
       assert.equal(isPermissionCheckAllowed(permission, 'audio'), false, `${permission} doit être refusé`);
     }
+  });
+
+  it('speaker-selection est accordé (setSinkId, référence d’écho sur le bon haut-parleur)', () => {
+    assert.equal(isPermissionAllowed('speaker-selection'), true);
+    assert.equal(isPermissionCheckAllowed('speaker-selection', undefined), true);
   });
 
   it('la vérification préalable refuse la vidéo et laisse passer le reste', () => {
