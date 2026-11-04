@@ -138,6 +138,12 @@ export interface VoiceWiring {
   reportFlow(peerId: string): void;
   /** Messages tamponnés en attente d'un mesh (0 hors fenêtre d'ouverture du micro). */
   readonly buffered: number;
+  /**
+   * Id que le serveur de signalisation a donné à CETTE connexion (`p1`, `p2`).
+   * Le maillage s'en sert pour décider qui offre : le `localId` d'UI (`self`) est
+   * le même sur les deux postes et ne départage rien.
+   */
+  noteSignalingSelf(id: string): void;
 }
 
 export function createVoiceWiring(options: VoiceWiringOptions): VoiceWiring {
@@ -207,6 +213,23 @@ export function createVoiceWiring(options: VoiceWiringOptions): VoiceWiring {
   let unsubscribe: (() => void) | null = null;
   let started = false;
   let closed = false;
+
+  let announcedSignalingId: string | null = null;
+
+  /**
+   * Pose l'id serveur avant tout `peer-joined` encore en tampon, ou le livre au
+   * maillage déjà ouvert (un lien resté answerer est promu s'il doit offrir).
+   */
+  function noteSignalingSelf(id: string): void {
+    if (id.length === 0 || announcedSignalingId === id) return;
+    announcedSignalingId = id;
+    const message: SignalIn = { kind: 'link', state: 'connected', detail: `pair=${id} port=0` };
+    if (mesh === null) {
+      queue.unshift(message);
+      return;
+    }
+    route(message, mesh);
+  }
 
   function route(message: SignalIn, current: Mesh): void {
     // `Mesh.onSignal` ne rejette jamais (contrat) ; la garde couvre une promesse non gérée.
@@ -346,5 +369,6 @@ export function createVoiceWiring(options: VoiceWiringOptions): VoiceWiring {
     get buffered(): number {
       return queue.length;
     },
+    noteSignalingSelf,
   };
 }

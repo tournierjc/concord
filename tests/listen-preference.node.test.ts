@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
-import { pickListenHost, type InterfaceLike } from '../src/main/signaling-link.ts';
+import { listListenHosts, pickListenHost, type InterfaceLike } from '../src/main/signaling-link.ts';
 
 function iface(address: string, internal = false): InterfaceLike[] {
   return [{ address, family: 'IPv4', internal }];
@@ -39,5 +39,21 @@ describe('pickListenHost — la route par défaut prime sur le tri alphabétique
     // n'aurait de toute façon pas rendu 172.17.0.1 comme route par défaut. Garde de défense.
     assert.equal(pickListenHost(map, '172.17.0.1'), '172.17.0.1',
       'la préférence du noyau est la vérité — si le noyau dit le pont, c’est qu’il n’y a que lui');
+  });
+});
+
+describe('listListenHosts — deux cartes sur le même sous-réseau', () => {
+  it('rend les deux adresses, la route par défaut en tête, jamais une seule', () => {
+    const map = {
+      enp47s0f3u1u2: iface('192.168.1.71'),
+      enp38s0: iface('192.168.1.70'),
+      tailscale0: iface('100.104.3.45'),
+    };
+    assert.deepEqual(listListenHosts(map, '192.168.1.71'), [
+      '192.168.1.71',
+      '192.168.1.70',
+      '100.104.3.45',
+    ]);
+    assert.deepEqual(listListenHosts(map), ['192.168.1.70', '192.168.1.71', '100.104.3.45']);
   });
 });
