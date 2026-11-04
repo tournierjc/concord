@@ -14,7 +14,7 @@ import { avatarEmojiFor, isAvatarRef } from '../shell/avatar';
 import { createTranslator, type Locale } from './i18n';
 import { lanApi } from './api';
 import { HeadphonesIcon, HeadphonesOffIcon, LeaveIcon, MicIcon, MicOffIcon } from './icons';
-import { setTransmitting, SPEAKING_LEVEL, useVoicePlane, type VoiceSettings, type VoiceSnapshot } from './voice';
+import { setTransmitting, setVoiceTalkMode, SPEAKING_LEVEL, useVoicePlane, type VoiceSettings, type VoiceSnapshot } from './voice';
 import {
   joinStates,
   mutedAttr,
@@ -161,12 +161,15 @@ export function Room({
   // un départ/retour en salon aurait appliqué le nouveau mode.
   useEffect(() => {
     if (room.roomId === null) return;
-    if (modeEpoch === undefined) return;
-    if (control.mode === 'vad') {
-      setTransmitting(true);
-      return;
+    // Epoch 0 = montage. Le mode vient des réglages (`openVoice`). Un contrôle
+    // encore à « ptt » (le pont n'a pas encore relu `talk.mode`) ne doit pas
+    // refermer une détection de voix déjà ouverte — ce faux front ne se
+    // rejouait qu'en basculant le sélecteur.
+    if (modeEpoch === undefined || modeEpoch === 0) return;
+    setVoiceTalkMode(control.mode);
+    if (control.mode === 'ptt') {
+      setTransmitting(control.pushToTalk && !control.muted && !control.deafened);
     }
-    setTransmitting(control.pushToTalk && !control.muted && !control.deafened);
   }, [modeEpoch, control.mode, room.roomId]);
 
   // Anneau « parle » alimenté par `level()` du plan média, pour le participant local.

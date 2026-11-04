@@ -77,6 +77,9 @@ class FakeChain implements VoiceFilterChain {
   public setSendOpen(open: boolean): void {
     this.sendOpen = open
   }
+  public replaceInput(): void {
+    // Le test du micro ne change pas de périphérique en cours d'écoute.
+  }
   public close(): void {
     this.closeCalls += 1
   }

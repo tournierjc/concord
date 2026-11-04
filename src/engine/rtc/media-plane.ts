@@ -214,10 +214,16 @@ export interface MediaPlane {
   voiceFilter(): VoiceFilterId | null
   /**
    * Réapplique EC / NS / AGC sur la piste de CAPTURE déjà ouverte (`applyConstraints`)
-   * et journalise `getSettings()`. Changer de périphérique exige un nouveau
-   * `getUserMedia` — cette méthode ne le fait pas.
+   * et journalise `getSettings()`. Le périphérique, lui, passe par `replaceMicrophone`.
    */
   applyCaptureConstraints(constraints: MicrophoneConstraints): Promise<void>
+  /**
+   * Nouveau `getUserMedia` (changement de micro). La destination filtrée ne change
+   * pas d'identité quand la chaîne sait remplacer son entrée ; l'intention d'émission
+   * est réécrite sur le gain courant. Sans chaîne, la piste brute neuve est posée
+   * sur chaque pair (`replaceTrack`).
+   */
+  replaceMicrophone(constraints: MicrophoneConstraints): Promise<void>
   /**
    * Niveau RMS (0..1) d'un pair : **un analyseur par pair** (AD-17 / D4).
    *
@@ -453,11 +459,15 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
    */
   let voiceHost: VoiceChainHostHandle | null = null
   /**
-   * Intention d'émission, UNE seule (VAD ouvert ou PTT enfoncé). Posée par
-   * `setTransmitting` et réappliquée à chaque piste envoyée : changement de
-   * filtre, replaceTrack, arrivée d'un pair, réouverture du micro. Sans cela
-   * une piste neuve (la destination qui renaît quand on la débranche) part
-   * coupée, et le VAD déjà ouvert ne renvoie pas d'événement.
+   * Intention d'émission, UNE seule (VAD ouvert ou PTT enfoncé).
+   *
+   * `applyTransmitState` est le SEUL écrivain du gain d'émission. Il relit la
+   * chaîne courante à chaque appel : un auditeur VAD ne retient pas le nœud
+   * du graphe précédent. On l'appelle après chaque construction de graphe,
+   * chaque remplacement de piste, chaque changement de mode et chaque join.
+   * Sans cela, une intention déjà ouverte (VAD au démarrage) n'a plus de
+   * front à émettre, et le gain neuf reste à sa valeur initiale — le vumètre
+   * brut, lui, continue de bouger.
    */
   let wantSend = false
   let wantSendKnown = false
@@ -519,6 +529,16 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     )
     if (typeof rate === 'number' && rate !== OPUS_SAMPLE_RATE) {
       warn(`AudioContext ${rate} Hz ≠ Opus ${OPUS_SAMPLE_RATE} Hz (${label})`)
+    }
+    // Reprise réelle (suspended → running) : le gain courant reprend l'intention.
+    // Un contexte qui était suspendu peut avoir figé la piste de destination.
+    // On n'écrit PAS dans le `then` de la première `resume` : elle se résout
+    // souvent avant que le graphe existe, ou une seconde fois après l'écriture
+    // déjà faite par `startMicrophone`, et le push-to-talk compterait un front de trop.
+    if ('addEventListener' in context && typeof context.addEventListener === 'function') {
+      context.addEventListener('statechange', () => {
+        if (context.state === 'running') applyTransmitState()
+      })
     }
     void context.resume().then(() => {
       const running = context.state
@@ -674,8 +694,14 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     )
   }
 
-  /** Branche la piste micro locale sur un pair (création ou remplacement). */
-  function applyWantSend(track: MediaStreamTrack): void {
+  /**
+   * Écrit `wantSend` sur le gain d'émission de la chaîne COURANTE, ou à défaut
+   * sur `track.enabled`. Seul point d'écriture : filtre, périphérique, pair,
+   * reprise du contexte et `setTransmitting` passent tous par ici.
+   */
+  function applyTransmitState(): void {
+    const track = localTrack
+    if (track === null) return
     const gated = voiceHost !== null && voiceHost.setSendOpen(wantSend)
     if (gated) {
       // La piste reste ouverte. `enabled = false` coupe le flux Opus : au
@@ -695,7 +721,7 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
       warnDeafLink(remoteId)
       return
     }
-    applyWantSend(track)
+    applyTransmitState()
     if (peer.sender === null) {
       const stream = localStream === null ? new MediaStream([track]) : localStream
       peer.sender = peer.pc.addTrack(track, stream)
@@ -952,15 +978,22 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     // l'appelant a demandé l'inverse à la construction (mode VAD, SPEC-019 avenant
     // 2026-11-02) : en détection de voix le micro doit rester ouvert, c'est la mesure qui
     // décide de qui parle. Le défaut (`undefined`) garde le comportement d'avant.
-    // Une intention déjà posée (setTransmitting avant que le micro réponde) gagne :
-    // c'est la même vérité que le mode en cours, pas un second drapeau.
-    if (!wantSendKnown) {
-      wantSend = o.microOpenOnStart === true
+    //
+    // La VAD de construction GAGNE sur un `setTransmitting(false)` arrivé avant le
+    // graphe (relâchement du bouton, contrôle encore en push-to-talk). Ce faux front
+    // a posé `wantSendKnown` : sans cet écrasement, `microOpenOnStart` était ignoré,
+    // le gain naissait fermé, et la VAD déjà ouverte n'avait plus de transition à
+    // émettre. Basculer le mode recréait ce front — d'où le contournement.
+    if (o.microOpenOnStart === true) {
+      wantSend = true
+      wantSendKnown = true
+    } else if (!wantSendKnown) {
+      wantSend = false
       wantSendKnown = true
     }
     // Le levier est la piste ENVOYÉE aux pairs (filtrée quand une voix vit, brute sinon) —
     // jamais la piste micro, qui continuerait d'alimenter le graphe de filtrage en silence.
-    applyWantSend(outgoing)
+    applyTransmitState()
     // Le vumètre local mesure le MICRO BRUT (la piste `first`), pas la piste filtrée : le
     // push-to-talk et le battement VAD décident sur la voix réelle, pas sur sa version robot —
     // un robot dont la modulation d'anneau ferait osciller le détecteur n'est pas un VAD.
@@ -1041,7 +1074,7 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
       warn('setTransmitting ignoré : micro non démarré')
       return
     }
-    applyWantSend(track)
+    applyTransmitState()
   }
 
   function setVoiceFilter(id: VoiceFilterId): MediaStreamTrack | null {
@@ -1061,7 +1094,7 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     // L'intention d'émission est réappliquée ICI : une piste neuve naît souvent
     // coupée, et le VAD déjà ouvert n'a pas de nouvelle transition à émettre.
     localTrack = next
-    applyWantSend(next)
+    applyTransmitState()
     for (const [remoteId, peer] of peers) {
       void attachLocalTrack(remoteId, peer).catch((error: unknown) => {
         warn(`replaceTrack voix « ${id} » refusé pour ${remoteId} : ${describeError(error)}`)
@@ -1083,6 +1116,42 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
       warn(`applyConstraints (EC/NS/AGC) refusé : ${describeError(error)}`)
     }
     logCapture(track, next)
+  }
+
+  async function replaceMicrophone(constraints: MicrophoneConstraints): Promise<void> {
+    if (captureTrack === null) return
+    const stream = await requestMicrophone(constraints)
+    const first = stream.getAudioTracks()[0]
+    if (first === undefined) {
+      stream.getTracks().forEach((track) => track.stop())
+      throw new Error('le flux micro ne contient aucune piste audio')
+    }
+    const previousStream = localStream
+    localStream = stream
+    captureTrack = first
+    logCapture(first, constraints)
+    let kept = false
+    if (voiceHost !== null) {
+      try {
+        kept = voiceHost.replaceInput(stream)
+      } catch (error) {
+        warn(`remplacement du micro dans la chaîne refusé : ${describeError(error)}`)
+        kept = false
+      }
+    }
+    if (previousStream !== null) {
+      for (const track of previousStream.getTracks()) track.stop()
+    }
+    if (!kept) {
+      localTrack = first
+      for (const [remoteId, peer] of peers) {
+        await attachLocalTrack(remoteId, peer)
+      }
+    }
+    addMeter(LOCAL_METER_KEY, stream, 'micro local')
+    // Le graphe (ou la piste brute) est neuf : l'intention VAD déjà ouverte
+    // n'émet pas de nouveau front. On la réécrit sur le gain courant.
+    applyTransmitState()
   }
 
   function voiceFilter(): VoiceFilterId | null {
@@ -1193,6 +1262,7 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     setVoiceFilter,
     voiceFilter,
     applyCaptureConstraints,
+    replaceMicrophone,
     level,
     stats,
     audioDebugReport,

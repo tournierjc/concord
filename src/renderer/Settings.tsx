@@ -29,7 +29,7 @@ import {
 import { isValidAccelerator, normalizeAccelerator } from '../shell/settings-schema';
 import { VOICE_FILTER_IDS } from '../engine/rtc/voice-filters.ts';
 import { subscribeVoiceProcessor, voiceProcessorPhase } from './voice-character.ts';
-import { configureVoiceProcessing, currentVoiceFilter, reapplyCaptureProcessing, setOutputDevice, setVoiceFilter } from './voice.ts';
+import { configureVoiceProcessing, currentVoiceFilter, reapplyCaptureProcessing, replaceVoiceInput, setOutputDevice, setVoiceFilter } from './voice.ts';
 import {
   MIC_CHECK_SPEAKING_RMS,
   micCheckSnapshot,
@@ -315,7 +315,19 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
             <select
               className="input"
               value={settings.audio.inputDeviceId ?? ''}
-              onChange={(event) => audioPatch({ inputDeviceId: event.target.value || null })}
+              onChange={(event) => {
+                const inputDeviceId = event.target.value || null
+                audioPatch({ inputDeviceId })
+                // En salon, le micro change tout de suite et l'intention d'émission
+                // (VAD ouverte) est réécrite sur le gain courant — pas au prochain join.
+                void replaceVoiceInput({
+                  echoCancellation: settings.audio.echoCancellation,
+                  noiseSuppression: settings.audio.noiseSuppression,
+                  autoGainControl: false,
+                  inputGain: settings.audio.inputGain,
+                  inputDeviceId,
+                })
+              }}
             >
               <option value="">{t('settings.audio.systemDefault')}</option>
               {inputs.map((device, index) => (
