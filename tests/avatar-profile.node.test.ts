@@ -24,6 +24,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
+import { resolveOverlayAvatar } from '../src/renderer/overlay-avatar.ts';
 import {
   AVATAR_GALLERY,
   AVATAR_IMAGE_EXTENSIONS,
@@ -491,6 +492,23 @@ test('contrat IPC : settingsSet refuse un avatar local dont le nom ment', () => 
   assert.equal(bogus.ok, false);
   const none = guardPayload('invoke', 'lan:settings:set', { avatar: null });
   assert.equal(none.ok, true);
+});
+
+test('overlay : galerie et image, initiales seulement sans avatar', () => {
+  const fox = resolveOverlayAvatar('fox', 'Marion', null);
+  assert.equal(fox.kind, 'emoji');
+  if (fox.kind === 'emoji') assert.equal(fox.text, '🦊');
+
+  const pending = resolveOverlayAvatar('a'.repeat(16), 'Léo Martin', null);
+  assert.equal(pending.kind, 'initials');
+  if (pending.kind === 'initials') assert.equal(pending.text, 'LM');
+
+  const ready = resolveOverlayAvatar('a'.repeat(16), 'Léo Martin', 'AAAA');
+  assert.equal(ready.kind, 'image');
+  if (ready.kind === 'image') assert.equal(ready.src, 'data:image/png;base64,AAAA');
+
+  const none = resolveOverlayAvatar(undefined, 'Sam', null);
+  assert.deepEqual(none, { kind: 'initials', text: 'S' });
 });
 
 test('contrat IPC : avatarGetImage n’accepte que l’empreinte sous son nom exact', () => {

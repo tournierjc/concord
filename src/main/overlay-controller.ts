@@ -58,6 +58,7 @@ import {
   type Rect,
 } from '../shell/overlay-geometry';
 import type { OverlaySettings } from '../shell/settings-schema';
+import { overlayPresentation, type OverlayPlatform } from './overlay-activation';
 import { appUrl } from './renderer-protocol';
 import { systemTimers, type MainTimers } from './timers';
 
@@ -145,6 +146,8 @@ export interface OverlayControllerDeps<W extends OverlayWindow = electron.Browse
   readonly timers?: MainTimers;
   readonly screen?: ScreenPort;
   readonly createWindow?: WindowFactory<W>;
+  /** `win32` / `linux` / `darwin`. Défaut : la plateforme du process. */
+  readonly platform?: OverlayPlatform | string;
 }
 
 /** `electron.screen` EST le port par défaut : pas d'adaptateur, donc pas de dérive silencieuse. */
@@ -180,11 +183,13 @@ export class OverlayController<W extends OverlayWindow = electron.BrowserWindow>
   private readonly timers: MainTimers;
   private readonly screenPort: ScreenPort;
   private readonly createWindow: WindowFactory<W>;
+  private readonly platform: string;
 
   constructor(deps: OverlayControllerDeps<W> = {}) {
     this.timers = deps.timers ?? systemTimers;
     this.screenPort = deps.screen ?? systemScreen;
     this.createWindow = deps.createWindow ?? defaultWindowFactory<W>;
+    this.platform = deps.platform ?? process.platform;
   }
 
   getWindow(): W | null {
@@ -228,9 +233,10 @@ export class OverlayController<W extends OverlayWindow = electron.BrowserWindow>
       },
     });
 
-    // Niveau « screen-saver » : au-dessus des fenêtres plein écran sans les capturer.
-    window.setAlwaysOnTop(true, 'screen-saver');
-    window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    // Dessus posé AVANT le premier affichage, puis réaffirmé APRÈS `showInactive`
+    // (`raise`) : sur Windows le bit topmost posé pendant que la fenêtre est cachée
+    // ne se compose pas sur le bureau.
+    this.raise(window);
     window.setIgnoreMouseEvents(true, { forward: true });
 
     window.on('closed', () => {
@@ -251,8 +257,35 @@ export class OverlayController<W extends OverlayWindow = electron.BrowserWindow>
     void window.loadURL(url);
     // `apply()` may have hidden the overlay (disabled, or no room) before the document loaded.
     window.once('ready-to-show', () => {
-      if (this.geometry !== null) window.showInactive();
+      if (this.geometry !== null) this.reveal(window);
     });
+  }
+
+  /**
+   * Ramène l'overlay au-dessus du bureau. Appelé quand la fenêtre principale se
+   * minimise ou se range dans le bac : certains compositeurs cachent alors toutes
+   * les fenêtres de l'application, y compris celle qui doit rester visible.
+   */
+  present(): void {
+    const window = this.getWindow();
+    if (!window || this.geometry === null) return;
+    this.reveal(window);
+  }
+
+  private raise(window: W): void {
+    const presentation = overlayPresentation(this.platform);
+    if (presentation.alwaysOnTopLevel === undefined) window.setAlwaysOnTop(true);
+    else window.setAlwaysOnTop(true, presentation.alwaysOnTopLevel);
+    window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: presentation.visibleOnFullScreen });
+  }
+
+  private reveal(window: W): void {
+    // `showInactive` même si Electron croit la fenêtre déjà visible : un compositeur
+    // peut l'avoir rangée avec la fenêtre principale (minimize, bac) sans que
+    // `isVisible()` passe à faux. Le dessus est réaffirmé APRÈS : sur Windows le bit
+    // topmost posé pendant que la fenêtre était cachée ne se compose pas sur le bureau.
+    window.showInactive();
+    this.raise(window);
   }
 
   /**
@@ -289,7 +322,7 @@ export class OverlayController<W extends OverlayWindow = electron.BrowserWindow>
       height: geometry.window.height,
     });
     window.setOpacity(settings.opacity);
-    if (!window.isVisible()) window.showInactive();
+    if (!window.isVisible()) this.reveal(window);
     return geometry;
   }
 

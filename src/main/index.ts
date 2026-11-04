@@ -34,6 +34,7 @@ import { createDiscoveryBridge, type DiscoveryBridge, type DiscoveryHealth } fro
 import { installNetworkGuard } from './net-guard';
 import { hasRoutableNetwork } from './network-state';
 import { APP_SCHEME, SCHEME_SEP } from './net-schemes';
+import { preferX11Ozone, shouldShowOverlay } from './overlay-activation';
 import { OverlayController, listDisplays } from './overlay-controller';
 import { registerPushToTalk, releasePushToTalk, type PttRegistration } from './ptt';
 import { appUrl, registerAppProtocol, registerAppScheme } from './renderer-protocol';
@@ -187,6 +188,12 @@ if (!hasLock) {
   // refuse hors LAN avant émission — seuls des candidats déjà LAN-partageables circulent.
   // (Un appel ultérieur de même clé gagne : le réglage reste unique, jamais fusionné.)
   app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');
+  // Wayland natif ne pose pas une fenêtre transparente au-dessus du bureau (pas de
+  // always-on-top, position et click-through non fiables sous KWin/Mutter). XWayland
+  // le fait. Un `--ozone-platform` ou `ELECTRON_OZONE_PLATFORM_HINT` explicite gagne.
+  if (preferX11Ozone(process.platform, process.env.XDG_SESSION_TYPE, process.env.ELECTRON_OZONE_PLATFORM_HINT, process.argv)) {
+    app.commandLine.appendSwitch('ozone-platform', 'x11');
+  }
   void app.whenReady().then(bootstrap);
 }
 
@@ -501,6 +508,11 @@ function createMainWindow(): BrowserWindow {
     if (quitting || process.platform === 'darwin') return;
     event.preventDefault();
     window.hide();
+    // Le bac ne doit pas emporter l'overlay : il reste sur le bureau tant que le salon est ouvert.
+    overlay.present();
+  });
+  window.on('minimize', () => {
+    overlay.present();
   });
   window.on('closed', () => {
     mainWindow = null;
@@ -886,7 +898,12 @@ function syncOverlayGeometry(): void {
   const room = bridge.getRoomState();
   // The overlay floats above every other app: outside a room it has nothing to show, so it stays
   // hidden instead of printing "nobody here yet" over the user's desktop.
-  const enabled = settings.overlay.enabled && room.roomId !== null && mainWindow !== null;
+  const alive = mainWindow !== null && !mainWindow.isDestroyed();
+  const enabled = shouldShowOverlay({
+    enabled: settings.overlay.enabled,
+    inRoom: room.roomId !== null,
+    appWindowAlive: alive,
+  });
   if (!enabled) {
     overlay.destroy();
     return;
@@ -1149,7 +1166,12 @@ function startSignalingLink(roomId: string, name: string, selfId: string, avatar
         const png = message.data === null ? null : decodeAvatarPngFromWire(message.data);
         if (png !== null) {
           const encoded = encodeAvatarPngForWire(png);
-          if (encoded !== null) sessionAvatars.set(message.avatarRef, encoded);
+          if (encoded !== null) {
+            sessionAvatars.set(message.avatarRef, encoded);
+            // L'overlay a déjà demandé l'image (et reçu null) : republier l'annuaire le fait
+            // recharger, sinon la pastille reste aux initiales pour toute la session.
+            sendEvent(IPC.eventParticipants, bridge.getParticipants());
+          }
         }
       } else if (message.kind === 'peer-joined' && message.avatarRef !== undefined) {
         // Un pair annonce une empreinte que nous ne connaissons pas : la demande d'image part

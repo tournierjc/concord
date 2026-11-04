@@ -153,3 +153,34 @@ describe('room-bridge — contrôles locaux', () => {
     assert.equal(self.deafened, true);
   });
 });
+
+describe('room-bridge — l’avatar local voyage jusqu’à l’annuaire de l’overlay', () => {
+  it('choisi avant l’entrée, il est déjà sur la ligne locale', () => {
+    const { bridge } = createHarness();
+    bridge.setSelfAvatar('fox');
+    bridge.join({ roomId: 'r1', name: 'Salon' }, 'Marion');
+    const self = bridge.getParticipants().find((participant) => participant.id === 'self');
+    assert.equal(self?.avatarRef, 'fox');
+  });
+
+  it('changé en salon, la publication suivante porte la nouvelle empreinte', () => {
+    const { bridge, events } = createHarness();
+    bridge.join({ roomId: 'r1', name: 'Salon' }, 'Marion');
+    events.length = 0;
+    bridge.setSelfAvatar('a'.repeat(16));
+    const self = bridge.getParticipants().find((participant) => participant.id === 'self');
+    assert.equal(self?.avatarRef, 'a'.repeat(16));
+    const last = events.filter((event) => event.channel === IPC.eventParticipants).at(-1);
+    assert.ok(last && last.channel === IPC.eventParticipants);
+    assert.equal(last.payload.find((participant) => participant.id === 'self')?.avatarRef, 'a'.repeat(16));
+  });
+
+  it('retiré, la ligne revient aux initiales (plus d’empreinte)', () => {
+    const { bridge } = createHarness();
+    bridge.setSelfAvatar('fox');
+    bridge.join({ roomId: 'r1', name: 'Salon' }, 'Marion');
+    bridge.setSelfAvatar(null);
+    const self = bridge.getParticipants().find((participant) => participant.id === 'self');
+    assert.equal(self?.avatarRef, undefined);
+  });
+});

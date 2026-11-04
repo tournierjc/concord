@@ -157,6 +157,25 @@ describe('roster-link — un pair qui part quitte la liste', () => {
   });
 });
 
+describe('roster-link — l’avatar d’un pair arrive dans le DTO de l’overlay', () => {
+  it('peer-joined porte l’empreinte, et une annonce suivante la met à jour', () => {
+    const { bridge, events } = createHarness();
+    bridge.join({ roomId: 'r1', name: 'Salon' }, 'Marion');
+    assert.equal(apply(bridge, { kind: 'peer-joined', peerId: '12', name: 'Léo' }), true);
+    assert.equal(bridge.getParticipants().find((participant) => participant.id === '12')?.avatarRef, undefined);
+
+    events.length = 0;
+    assert.equal(
+      apply(bridge, { kind: 'peer-joined', peerId: '12', name: 'Léo', avatarRef: 'fox' }),
+      true,
+    );
+    assert.equal(bridge.getParticipants().find((participant) => participant.id === '12')?.avatarRef, 'fox');
+    const last = events.filter((event) => event.channel === IPC.eventParticipants).at(-1);
+    assert.ok(last && last.channel === IPC.eventParticipants);
+    assert.equal(last.payload.find((participant) => participant.id === '12')?.avatarRef, 'fox');
+  });
+});
+
 describe('roster-link — les autres messages ne touchent pas l’annuaire', () => {
   it('offer, answer, ice et link ne changent pas la liste', () => {
     const { bridge, events } = createHarness();
