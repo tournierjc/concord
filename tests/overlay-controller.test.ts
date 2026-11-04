@@ -73,7 +73,7 @@ function settings(overrides: Partial<OverlaySettings> = {}): OverlaySettings {
     scale: 'md',
     screenId: null,
     position: null,
-    placement: 'top-right',
+    placement: { flow: 'horizontal', anchor: 'top-right' },
     showWithoutDetection: false,
     ...overrides,
   };

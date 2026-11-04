@@ -24,7 +24,12 @@ import {
   type AvatarSetting,
   type CustomAvatar,
 } from './avatar.ts';
-import { OVERLAY_PLACEMENTS, type OverlayPlacement } from './overlay-geometry.ts';
+import {
+  DEFAULT_OVERLAY_PLACEMENT,
+  isValidOverlayPlacement,
+  migrateOverlayPlacement,
+  type OverlayPlacement,
+} from './overlay-geometry.ts';
 
 /** Version courante du schéma. Toute évolution de forme incrémente ce nombre. */
 export const SETTINGS_VERSION = 1;
@@ -109,7 +114,7 @@ export interface OverlaySettings {
   screenId: string | null;
   /** Dernière position (DIP), null = ancrage par défaut. */
   position: Point | null;
-  /** Coin (rangée) ou côté (colonne). Défaut `top-right`. */
+  /** Un des 12 emplacements (sens × ancrage). Défaut : rangée en haut à droite. */
   placement: OverlayPlacement;
   /**
    * Afficher l'overlay quand le plein écran ne peut pas être détecté (Wayland natif).
@@ -245,7 +250,7 @@ export function defaultSettings(): Settings {
       scale: 'md',
       screenId: null,
       position: null,
-      placement: 'top-right',
+      placement: DEFAULT_OVERLAY_PLACEMENT,
       showWithoutDetection: false,
     },
     network: {
@@ -789,6 +794,38 @@ function readRoomSection(ctx: Ctx, source: Dict): RoomSettings {
   return { auto, lastHosted };
 }
 
+const PLACEMENT_KEYS = ['flow', 'anchor'] as const;
+
+function readPlacement(ctx: Ctx, source: Dict, path: string): OverlayPlacement {
+  const value = source['placement'];
+  if (value === undefined) {
+    fail(ctx, `${path}.placement`, 'missing-field', `champ requis absent : ${path}.placement`);
+    return DEFAULT_OVERLAY_PLACEMENT;
+  }
+  if (!isPlainObject(value)) {
+    fail(ctx, `${path}.placement`, 'type', `${path}.placement doit être un objet {flow, anchor}`);
+    return DEFAULT_OVERLAY_PLACEMENT;
+  }
+  checkUnknownKeys(ctx, value, PLACEMENT_KEYS, `${path}.placement`);
+  const flow = readEnum(ctx, value, 'flow', `${path}.placement`, ['horizontal', 'vertical'] as const);
+  const anchor = readEnum(ctx, value, 'anchor', `${path}.placement`, [
+    'top-left',
+    'top-center',
+    'top-right',
+    'center-left',
+    'center-right',
+    'bottom-left',
+    'bottom-center',
+    'bottom-right',
+  ] as const);
+  const placement = { flow, anchor };
+  if (!isValidOverlayPlacement(placement)) {
+    fail(ctx, `${path}.placement`, 'enum', `${path}.placement n’est pas l’un des 12 emplacements`);
+    return DEFAULT_OVERLAY_PLACEMENT;
+  }
+  return placement;
+}
+
 function readPosition(ctx: Ctx, source: Dict, key: string, path: string): Point | null {
   const value = source[key];
   if (value === undefined) {
@@ -866,7 +903,7 @@ function validateV1(source: Dict): SettingsResult {
     scale: readEnum(ctx, overlaySource, 'scale', 'overlay', OVERLAY_SCALES),
     screenId: readNullableString(ctx, overlaySource, 'screenId', 'overlay', 64),
     position: readPosition(ctx, overlaySource, 'position', 'overlay'),
-    placement: readEnum(ctx, overlaySource, 'placement', 'overlay', OVERLAY_PLACEMENTS),
+    placement: readPlacement(ctx, overlaySource, 'overlay'),
     showWithoutDetection: readBoolean(ctx, overlaySource, 'showWithoutDetection', 'overlay'),
   };
 
@@ -1197,6 +1234,16 @@ function mergeUnknown(base: Dict, extras: Dict): Dict {
   return out;
 }
 
+function interpretPlacement(raw: unknown, fallback: OverlayPlacement, repaired: SettingsError[]): OverlayPlacement {
+  if (raw === undefined) return fallback;
+  const migrated = migrateOverlayPlacement(raw);
+  if (migrated === null) {
+    noteRepair(repaired, 'overlay.placement', 'enum', 'emplacement inconnu, rangée en haut à droite rétablie');
+    return fallback;
+  }
+  return migrated;
+}
+
 function interpretCurrent(source: Dict, defaults: Settings, repaired: SettingsError[]): { value: Settings; extras: Dict } {
   const { known, extra } = peelUnknown(source, TOP_KEYS);
   const audioIn = isPlainObject(known['audio']) ? known['audio'] : {};
@@ -1277,9 +1324,15 @@ function interpretCurrent(source: Dict, defaults: Settings, repaired: SettingsEr
   const extras: Dict = { ...extra };
   if (Object.keys(audioExtra).length > 0) extras['audio'] = { ...(isPlainObject(extras['audio']) ? extras['audio'] : {}), ...audioExtra };
   if (Object.keys(talkExtra).length > 0) extras['talk'] = { ...(isPlainObject(extras['talk']) ? extras['talk'] : {}), ...talkExtra };
-  if (Object.keys(overlayPeeled.extra).length > 0 || Object.keys(positionExtra).length > 0) {
+  const placementExtra: Dict = {};
+  const rawPlacement = overlayPeeled.known['placement'];
+  if (isPlainObject(rawPlacement)) {
+    Object.assign(placementExtra, peelUnknown(rawPlacement, ['flow', 'anchor']).extra);
+  }
+  if (Object.keys(overlayPeeled.extra).length > 0 || Object.keys(positionExtra).length > 0 || Object.keys(placementExtra).length > 0) {
     const overlayExtras: Dict = { ...overlayPeeled.extra };
     if (Object.keys(positionExtra).length > 0) overlayExtras['position'] = positionExtra;
+    if (Object.keys(placementExtra).length > 0) overlayExtras['placement'] = placementExtra;
     extras['overlay'] = overlayExtras;
   }
   if (Object.keys(networkExtra).length > 0) extras['network'] = networkExtra;
@@ -1329,7 +1382,7 @@ function interpretCurrent(source: Dict, defaults: Settings, repaired: SettingsEr
       scale: takeEnum(overlayPeeled.known['scale'], defaults.overlay.scale, 'overlay.scale', repaired, OVERLAY_SCALES),
       screenId: takeNullableString(overlayPeeled.known['screenId'], defaults.overlay.screenId, 'overlay.screenId', repaired, 64),
       position,
-      placement: takeEnum(overlayPeeled.known['placement'], defaults.overlay.placement, 'overlay.placement', repaired, OVERLAY_PLACEMENTS),
+      placement: interpretPlacement(overlayPeeled.known['placement'], defaults.overlay.placement, repaired),
       showWithoutDetection: takeBoolean(
         overlayPeeled.known['showWithoutDetection'],
         defaults.overlay.showWithoutDetection,

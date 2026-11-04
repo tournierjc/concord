@@ -19,6 +19,7 @@ import {
   MAX_OVERLAY_WIDTH_PX,
   computeOverlayGeometry,
   overlayCssVariables,
+  DEFAULT_OVERLAY_PLACEMENT,
   placementFlow,
   type OverlayPlacement,
 } from '../shell/overlay-geometry';
@@ -97,7 +98,7 @@ export function Overlay({
   selfId = null,
   speaking = [],
   revision = 0,
-  placement = 'top-right',
+  placement = DEFAULT_OVERLAY_PLACEMENT,
 }: OverlayProps): JSX.Element {
   const t = createTranslator(locale);
   // Au plus 8 participants en salon ; la marge supérieure (10) évite toute surprise.

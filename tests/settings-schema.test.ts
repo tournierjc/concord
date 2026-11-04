@@ -396,3 +396,36 @@ test('voiceFilter : les sept voix du vocabulaire sont acceptées, rien d’autre
   const hostile = parseSettings({ ...base, audio: { ...base.audio, voiceFilter: 'chipmunk' } });
   assert.equal(hostile.ok, false, 'une voix inventée est refusée');
 });
+
+test('interpretSettings : les 6 emplacements de la 0.4.32 deviennent le couple sens × ancrage', () => {
+  const base = defaultSettings();
+  const cases = [
+    ['top-right', { flow: 'horizontal', anchor: 'top-right' }],
+    ['top-left', { flow: 'horizontal', anchor: 'top-left' }],
+    ['bottom-left', { flow: 'horizontal', anchor: 'bottom-left' }],
+    ['bottom-right', { flow: 'horizontal', anchor: 'bottom-right' }],
+    ['left', { flow: 'vertical', anchor: 'top-left' }],
+    ['right', { flow: 'vertical', anchor: 'top-right' }],
+  ] as const;
+  for (const [legacy, expected] of cases) {
+    const parsed = interpretSettings({ ...base, overlay: { ...base.overlay, placement: legacy } });
+    assert.equal(parsed.ok, true, legacy);
+    if (!parsed.ok) continue;
+    assert.deepEqual(parsed.value.overlay.placement, expected);
+    assert.equal(parsed.repaired.length, 0, legacy);
+  }
+  const missing = { ...base, overlay: { ...base.overlay } } as Record<string, unknown>;
+  delete (missing['overlay'] as Record<string, unknown>)['placement'];
+  const absent = interpretSettings(missing);
+  assert.equal(absent.ok, true);
+  if (absent.ok) assert.deepEqual(absent.value.overlay.placement, { flow: 'horizontal', anchor: 'top-right' });
+  const invalid = interpretSettings({
+    ...base,
+    overlay: { ...base.overlay, placement: { flow: 'horizontal', anchor: 'center-left' } },
+  });
+  assert.equal(invalid.ok, true);
+  if (invalid.ok) {
+    assert.deepEqual(invalid.value.overlay.placement, { flow: 'horizontal', anchor: 'top-right' });
+    assert.ok(invalid.repaired.some((error) => error.path === 'overlay.placement'));
+  }
+});

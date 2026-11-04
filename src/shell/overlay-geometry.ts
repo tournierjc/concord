@@ -40,32 +40,137 @@ export interface Rect {
 
 export type OverlayScale = 'sm' | 'md' | 'lg';
 
-export type OverlayAnchor = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'custom';
+export type OverlayAnchor =
+  | 'top-left'
+  | 'top-center'
+  | 'top-right'
+  | 'center-left'
+  | 'center-right'
+  | 'bottom-left'
+  | 'bottom-center'
+  | 'bottom-right'
+  | 'custom';
 
-/** Emplacement choisi dans les réglages. Les côtés sont une colonne, les coins une rangée. */
-export const OVERLAY_PLACEMENTS = ['top-right', 'top-left', 'bottom-right', 'bottom-left', 'left', 'right'] as const;
-export type OverlayPlacement = (typeof OVERLAY_PLACEMENTS)[number];
+/** Rangée ou colonne, une fois la fenêtre dimensionnée. */
 export type OverlayFlow = 'row' | 'column';
 
-export function placementFlow(placement: OverlayPlacement): OverlayFlow {
-  return placement === 'left' || placement === 'right' ? 'column' : 'row';
+/** Sens persisté : horizontal = rangée, vertical = colonne. */
+export type OverlayOrientation = 'horizontal' | 'vertical';
+
+export type OverlayEdgeAnchor = Exclude<OverlayAnchor, 'custom'>;
+
+/** Un des 12 emplacements : sens × ancrage, pas le produit complet (un centre de bord n’a qu’un sens). */
+export interface OverlayPlacement {
+  readonly flow: OverlayOrientation;
+  readonly anchor: OverlayEdgeAnchor;
 }
 
-export function placementAnchor(placement: OverlayPlacement): Exclude<OverlayAnchor, 'custom'> {
-  switch (placement) {
-    case 'left':
-    case 'top-left':
-      return 'top-left';
-    case 'bottom-left':
-      return 'bottom-left';
-    case 'bottom-right':
-      return 'bottom-right';
-    case 'right':
-    case 'top-right':
-      return 'top-right';
-    default:
-      return 'top-right';
+export const DEFAULT_OVERLAY_PLACEMENT: OverlayPlacement = { flow: 'horizontal', anchor: 'top-right' };
+
+const HORIZONTAL_ANCHORS: readonly OverlayEdgeAnchor[] = [
+  'top-left',
+  'top-center',
+  'top-right',
+  'bottom-left',
+  'bottom-center',
+  'bottom-right',
+];
+const VERTICAL_ANCHORS: readonly OverlayEdgeAnchor[] = [
+  'top-left',
+  'center-left',
+  'bottom-left',
+  'top-right',
+  'center-right',
+  'bottom-right',
+];
+
+/** Les 12 boutons du sélecteur, dans l’ordre du bord haut, du bord bas, puis des côtés. */
+export const OVERLAY_PICKER_SLOTS: readonly OverlayPlacement[] = [
+  ...HORIZONTAL_ANCHORS.map((anchor) => ({ flow: 'horizontal' as const, anchor })),
+  ...VERTICAL_ANCHORS.map((anchor) => ({ flow: 'vertical' as const, anchor })),
+];
+
+const LEGACY_PLACEMENT: Readonly<Record<string, OverlayPlacement>> = {
+  'top-right': { flow: 'horizontal', anchor: 'top-right' },
+  'top-left': { flow: 'horizontal', anchor: 'top-left' },
+  'bottom-left': { flow: 'horizontal', anchor: 'bottom-left' },
+  'bottom-right': { flow: 'horizontal', anchor: 'bottom-right' },
+  // L’ancienne colonne était calée en haut du bord.
+  left: { flow: 'vertical', anchor: 'top-left' },
+  right: { flow: 'vertical', anchor: 'top-right' },
+};
+
+export function isValidOverlayPlacement(value: unknown): value is OverlayPlacement {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const flow = record['flow'];
+  const anchor = record['anchor'];
+  if (flow === 'horizontal') return (HORIZONTAL_ANCHORS as readonly string[]).includes(String(anchor));
+  if (flow === 'vertical') return (VERTICAL_ANCHORS as readonly string[]).includes(String(anchor));
+  return false;
+}
+
+/**
+ * Ancien réglage (chaîne de la 0.4.32) ou objet déjà au format 12 emplacements.
+ * `null` si la valeur n’est ni l’un ni l’autre : l’appelant retombe sur le défaut.
+ */
+export function migrateOverlayPlacement(value: unknown): OverlayPlacement | null {
+  if (typeof value === 'string' && Object.prototype.hasOwnProperty.call(LEGACY_PLACEMENT, value)) {
+    return LEGACY_PLACEMENT[value] ?? null;
   }
+  if (!isValidOverlayPlacement(value)) return null;
+  return { flow: value.flow, anchor: value.anchor };
+}
+
+export function samePlacement(a: OverlayPlacement, b: OverlayPlacement): boolean {
+  return a.flow === b.flow && a.anchor === b.anchor;
+}
+
+export function placementFlow(placement: OverlayPlacement): OverlayFlow {
+  return placement.flow === 'vertical' ? 'column' : 'row';
+}
+
+export function placementAnchor(placement: OverlayPlacement): OverlayEdgeAnchor {
+  return placement.anchor;
+}
+
+/** Clé i18n du bouton. Le composant l’écrit aussi en littéral pour la garde des clés mortes. */
+export function placementLabelKey(placement: OverlayPlacement): string {
+  const camel = placement.anchor.replace(/-([a-z])/gu, (_match, letter: string) => letter.toUpperCase());
+  return `settings.overlay.placement.${placement.flow}.${camel}`;
+}
+
+/**
+ * Barre miniature collée au bord qu’elle représente.
+ * Les centres sont à 50 % du bord, les coins rentrés de 6 %.
+ */
+export function pickerBarStyle(placement: OverlayPlacement): Record<string, string> {
+  const horizontal = placement.flow === 'horizontal';
+  const anchor = placement.anchor;
+  const style: Record<string, string> = {
+    width: horizontal ? '22%' : '8%',
+    height: horizontal ? '10%' : '26%',
+  };
+  if (horizontal) {
+    if (anchor.startsWith('top')) style['top'] = '6%';
+    if (anchor.startsWith('bottom')) style['bottom'] = '6%';
+    if (anchor.endsWith('left')) style['left'] = '16%';
+    if (anchor.endsWith('right')) style['right'] = '16%';
+    if (anchor.endsWith('center')) {
+      style['left'] = '50%';
+      style['transform'] = 'translateX(-50%)';
+    }
+    return style;
+  }
+  if (anchor.endsWith('left')) style['left'] = '4%';
+  if (anchor.endsWith('right')) style['right'] = '4%';
+  if (anchor.startsWith('top')) style['top'] = '18%';
+  if (anchor.startsWith('bottom')) style['bottom'] = '18%';
+  if (anchor.startsWith('center')) {
+    style['top'] = '50%';
+    style['transform'] = 'translateY(-50%)';
+  }
+  return style;
 }
 
 /** Résultat d'un test de survol : la fenêtre overlay ne capture les clics que sur ces zones. */
@@ -234,6 +339,45 @@ export interface OverlayGeometry {
   positionClamped: boolean;
 }
 
+function placeOnWorkArea(
+  anchor: OverlayAnchor,
+  workArea: Rect,
+  width: number,
+  height: number,
+  margin: number,
+  position: Point | null | undefined,
+): Point {
+  const innerX = workArea.x + margin;
+  const innerY = workArea.y + margin;
+  const innerW = Math.max(0, workArea.width - 2 * margin);
+  const innerH = Math.max(0, workArea.height - 2 * margin);
+  const centerX = innerX + (innerW - width) / 2;
+  const centerY = innerY + (innerH - height) / 2;
+  const rightX = innerX + innerW - width;
+  const bottomY = innerY + innerH - height;
+  switch (anchor) {
+    case 'top-left':
+      return { x: innerX, y: innerY };
+    case 'top-center':
+      return { x: centerX, y: innerY };
+    case 'center-left':
+      return { x: innerX, y: centerY };
+    case 'center-right':
+      return { x: rightX, y: centerY };
+    case 'bottom-left':
+      return { x: innerX, y: bottomY };
+    case 'bottom-center':
+      return { x: centerX, y: bottomY };
+    case 'bottom-right':
+      return { x: rightX, y: bottomY };
+    case 'custom':
+      return position ? { x: position.x, y: position.y } : { x: rightX, y: innerY };
+    case 'top-right':
+    default:
+      return { x: rightX, y: innerY };
+  }
+}
+
 /** Calcule la géométrie complète de l'overlay pour N participants sur un écran donné. */
 export function computeOverlayGeometry(input: OverlayGeometryInput): OverlayGeometry {
   if (typeof input.participantCount !== 'number' || !Number.isFinite(input.participantCount)) {
@@ -282,34 +426,11 @@ export function computeOverlayGeometry(input: OverlayGeometryInput): OverlayGeom
   const width = workArea.width === 0 ? contentWidth : Math.min(contentWidth, workArea.width);
   const height = workArea.height === 0 ? contentHeight : Math.min(contentHeight, workArea.height);
 
-  // Placement ancré, puis bornage : l'overlay reste intégralement dans la zone utile.
-  let x: number;
-  let y: number;
-  switch (anchor) {
-    case 'top-left':
-      x = workArea.x + margin;
-      y = workArea.y + margin;
-      break;
-    case 'bottom-left':
-      x = workArea.x + margin;
-      y = workArea.y + workArea.height - height - margin;
-      break;
-    case 'bottom-right':
-      x = workArea.x + workArea.width - width - margin;
-      y = workArea.y + workArea.height - height - margin;
-      break;
-    case 'custom': {
-      const position = input.position;
-      x = position ? position.x : workArea.x + workArea.width - width - margin;
-      y = position ? position.y : workArea.y + margin;
-      break;
-    }
-    case 'top-right':
-    default:
-      x = workArea.x + workArea.width - width - margin;
-      y = workArea.y + margin;
-      break;
-  }
+  // Marge rentrée des deux côtés, puis ancrage. Un centre est le milieu du bord
+  // utile (barre des tâches déjà hors de workArea), pas le milieu de l’écran brut.
+  const placed = placeOnWorkArea(anchor, workArea, width, height, margin, input.position);
+  let x = placed.x;
+  let y = placed.y;
 
   const maxX = workArea.x + Math.max(0, workArea.width - width);
   const maxY = workArea.y + Math.max(0, workArea.height - height);

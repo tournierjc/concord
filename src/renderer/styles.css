@@ -745,6 +745,35 @@ body {
 
 /* --- Overlay --------------------------------------------------------------------------- */
 
+.placement-screen {
+  position: relative;
+  width: 11rem;
+  height: 7rem;
+  margin-block-start: var(--space-2);
+  border: var(--component-hairline) solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-inset);
+}
+
+.placement-screen__bar {
+  position: absolute;
+  padding: 0;
+  border: var(--component-hairline) solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-overlay);
+  cursor: pointer;
+}
+
+.placement-screen__bar[aria-pressed='true'] {
+  background: var(--color-accent-default);
+  border-color: var(--color-accent-default);
+}
+
+.placement-screen__bar:focus-visible {
+  outline: var(--component-focus-width) solid var(--color-accent-default);
+  outline-offset: 2px;
+}
+
 .overlay-body {
   background: transparent;
   overflow: hidden;
