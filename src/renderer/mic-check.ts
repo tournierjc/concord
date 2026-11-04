@@ -181,7 +181,7 @@ function ensureAudioElement(): HTMLAudioElement {
 
 const defaultPort: MicCheckPort = {
   getUserMedia: (constraints) => navigator.mediaDevices.getUserMedia(constraints),
-  createAudioContext: () => new AudioContext() as unknown as FilterAudioContext,
+  createAudioContext: () => new AudioContext({ latencyHint: 'interactive' }) as unknown as FilterAudioContext,
   buildChain: createVoiceFilterChain,
   speakers: pageSpeakerHost,
 };

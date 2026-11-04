@@ -34,6 +34,7 @@ import { createDiscoveryBridge, type DiscoveryBridge, type DiscoveryHealth } fro
 import { installNetworkGuard } from './net-guard';
 import { hasRoutableNetwork } from './network-state';
 import { APP_SCHEME, SCHEME_SEP } from './net-schemes';
+import { linuxAudioBufferFrames, pulseLatencyMsec } from './audio-capture';
 import { preferX11Ozone, shouldShowOverlay } from './overlay-activation';
 import { OverlayController, listDisplays } from './overlay-controller';
 import { registerPushToTalk, releasePushToTalk, type PttRegistration } from './ptt';
@@ -188,6 +189,14 @@ if (!hasLock) {
   // refuse hors LAN avant émission — seuls des candidats déjà LAN-partageables circulent.
   // (Un appel ultérieur de même clé gagne : le réglage reste unique, jamais fusionné.)
   app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');
+  // Capture Linux (PipeWire/Pulse dans l'AppImage) : sans latence demandée,
+  // Pulse tamponne environ 2 s, constant dès la première syllabe. Windows n'est
+  // pas touché. Une valeur PULSE_LATENCY_MSEC déjà posée par l'utilisateur gagne.
+  // Doit précéder l'ouverture audio (donc `whenReady` et le premier getUserMedia).
+  const pulseLatency = pulseLatencyMsec(process.platform, process.env.PULSE_LATENCY_MSEC);
+  if (pulseLatency !== null) process.env.PULSE_LATENCY_MSEC = pulseLatency;
+  const audioFrames = linuxAudioBufferFrames(process.platform);
+  if (audioFrames !== null) app.commandLine.appendSwitch('audio-buffer-size', audioFrames);
   // Wayland natif ne pose pas une fenêtre transparente au-dessus du bureau (pas de
   // always-on-top, position et click-through non fiables sous KWin/Mutter). XWayland
   // le fait. Un `--ozone-platform` ou `ELECTRON_OZONE_PLATFORM_HINT` explicite gagne.
@@ -478,10 +487,15 @@ function createMainWindow(): BrowserWindow {
   // CONCORD_SIGNAL_DEBUG : le journal du process ne voyait que les lignes `<=` du
   // tuyau. Les erreurs du renderer (micro refusé, rôle du maillage) y remontent,
   // et la page active les traces `[mesh]` déjà gardées par `__CONCORD_DEBUG__`.
-  // CONCORD_AUDIO_DEBUG fait la même remontée et arme en plus `__CONCORD_AUDIO_DEBUG__` :
-  // le processeur de timbre poste alors, sur stderr, `[renderer] [voice-character] …`
-  // (processeur chargé, puis inputHz / outputHz / fallback toutes les ~3 s).
-  // Lire : lancer l'application packagée avec CONCORD_AUDIO_DEBUG=1 et regarder stderr.
+  // CONCORD_AUDIO_DEBUG fait la même remontée et arme `__CONCORD_AUDIO_DEBUG__` :
+  // toutes les 2 s, une ligne `[concord-audio] {…}` (warning, donc stderr) porte
+  // baseLatency/outputLatency, la file du worklet, et par pair jitterBufferDelay,
+  // jitterBufferEmittedCount, jitterBufferMs, roundTripTime, packetsLost,
+  // totalAudioEnergy. Lancer DEPUIS un terminal, sur les deux machines :
+  //   Linux   CONCORD_AUDIO_DEBUG=1 ./Concord-*.AppImage
+  //   Windows cmd : set CONCORD_AUDIO_DEBUG=1 & Concord.exe
+  //   PowerShell : $env:CONCORD_AUDIO_DEBUG='1'; .\Concord.exe
+  // Un raccourci du bureau n'affiche pas stderr.
   if (process.env.CONCORD_SIGNAL_DEBUG || process.env.CONCORD_AUDIO_DEBUG) {
     window.webContents.on('console-message', (_event, level, message) => {
       if (level < 2) return;
@@ -489,8 +503,12 @@ function createMainWindow(): BrowserWindow {
     });
     window.webContents.on('dom-ready', () => {
       if (window.isDestroyed()) return;
+      const audio =
+        process.env.CONCORD_AUDIO_DEBUG === undefined || process.env.CONCORD_AUDIO_DEBUG === ''
+          ? ''
+          : 'globalThis.__CONCORD_AUDIO_DEBUG__ = true;';
       void window.webContents
-        .executeJavaScript('globalThis.__CONCORD_DEBUG__ = true; globalThis.__CONCORD_AUDIO_DEBUG__ = true')
+        .executeJavaScript(`globalThis.__CONCORD_DEBUG__ = true; ${audio}`)
         .catch(() => undefined);
     });
   }

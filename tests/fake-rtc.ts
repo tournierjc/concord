@@ -263,6 +263,10 @@ export class FakePeerConnection {
   private readonly gatheringListeners: Array<() => void> = []
   public ontrack: ((event: unknown) => void) | null = null
   public onconnectionstatechange: (() => void) | null = null
+  /** Récepteur posé par `fireTrack`, après application de la cible de gigue. */
+  public lastReceiver: FakeRtpReceiver | null = null
+  /** Entrées rendues par `getStats` (journal de latence). */
+  public statEntries: unknown[] = []
 
   public constructor(config: Record<string, unknown>) {
     this.config = config
@@ -332,7 +336,9 @@ export class FakePeerConnection {
 
   /** Rapport de stats figé : mêmes formes que Chromium, valeurs choisies (RTT 12,5 ms → 13). */
   public async getStats(): Promise<{ forEach: (visit: (entry: unknown) => void) => void }> {
-    const entries: unknown[] = [
+    const entries: unknown[] = this.statEntries.length > 0
+      ? this.statEntries
+      : [
       { type: 'outbound-rtp', kind: 'audio', bytesSent: 1200 },
       { type: 'inbound-rtp', kind: 'audio', bytesReceived: 3400, packetsLost: 2 },
       { type: 'candidate-pair', state: 'in-progress', currentRoundTripTime: 0.5 },
@@ -523,7 +529,25 @@ export class FakeMediaStreamDestination extends FakeAudioNode {
  * exiger « la recette robot a bien monté un oscillateur hors chaîne, branché sur le gain de
  * modulation, qui pilote le `gain` d'un gain de la chaîne ».
  */
+export class FakeRtpReceiver {
+  public jitterBufferTarget: number | null = null
+  public playoutDelayHint: number | null = null
+}
+
 export class FakeAudioContext {
+  public static instances: FakeAudioContext[] = []
+
+  public static reset(): void {
+    FakeAudioContext.instances = []
+  }
+
+  /** Options reçues par `new AudioContext(...)` (latencyHint, sampleRate). */
+  public readonly options: { readonly latencyHint?: unknown; readonly sampleRate?: unknown }
+  /** Sortie matérielle : le gain muet s'y branche pour caler l'horloge. */
+  public readonly destination = new FakeAudioNode()
+  /** Valeurs lues par le journal de latence. */
+  public baseLatency = 0.008
+  public outputLatency = 0.02
   public readonly created: {
     gains: FakeGain[]
     biquads: FakeBiquadFilter[]
@@ -549,6 +573,11 @@ export class FakeAudioContext {
     },
   }
   public workletModuleLoads = 0
+
+  public constructor(options?: { latencyHint?: unknown; sampleRate?: unknown }) {
+    this.options = options ?? {}
+    FakeAudioContext.instances.push(this)
+  }
 
   /**
    * Sans mesure : le test du micro doit rendre `null` (absence d'affirmation, AD-17), et la
@@ -664,6 +693,7 @@ const STUBBED_GLOBALS = [
  */
 export function installFakeDom(): FakeDom {
   FakePeerConnection.reset()
+  FakeAudioContext.reset()
 
   const warnings: string[] = []
   const gumCalls: Array<Record<string, unknown>> = []
@@ -736,7 +766,9 @@ export function installFakeDom(): FakeDom {
     fireTrack(peer: FakePeerConnection, stream: FakeMediaStream, track: FakeTrack): void {
       const handler = peer.ontrack
       if (handler === null) throw new Error('ontrack n’est pas câblé sur cette connexion')
-      handler({ track, streams: [stream] })
+      const receiver = new FakeRtpReceiver()
+      peer.lastReceiver = receiver
+      handler({ track, streams: [stream], receiver })
     },
     restore(): void {
       console.warn = originalWarn

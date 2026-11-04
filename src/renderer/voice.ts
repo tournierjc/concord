@@ -50,7 +50,9 @@ import {
 import type { RoomPhase, SignalIn, SignalOut } from '../shell/ipc-contract';
 import { lanApi } from './api';
 import { createAudioSinkRegistry, documentSinkHost, type AudioSinkRegistry } from './audio-sink';
+import { AUDIO_DEBUG_PERIOD_MS, concordAudioDebugEnabled, formatAudioDebugLine, type AudioDebugMemory } from './audio-debug.ts';
 import { browserBeat } from './browser-beat.ts';
+import { voiceCharacterQueueFramesLive } from './voice-character.ts';
 import {
   SAMPLE_PERIOD_MS,
   createPeerSpeechTracker,
@@ -153,6 +155,8 @@ interface VoiceSession {
   readonly beat: MeterBeatDriver;
   /** Arrêt du battement armé par `startMeter` ; `null` tant qu'aucun battement ne court. */
   stopBeat: (() => void) | null;
+  /** Arrêt du journal `CONCORD_AUDIO_DEBUG` ; `null` tant qu'il n'est pas armé. */
+  stopAudioDebug: (() => void) | null;
   live: boolean;
   want: boolean;
   /**
@@ -486,6 +490,49 @@ function meterTick(current: VoiceSession, now: number): void {
   // Parole locale et distante, dans le MÊME ensemble (AD-20 D1) : la mesure locale est
   // certaine (`level()` du plan média), elle n'a donc pas besoin d'échantillon daté.
   publishSpeaking(current, level, now);
+  armAudioDebug(current);
+}
+
+/**
+ * Journal de latence, toutes les 2 s, seulement si `CONCORD_AUDIO_DEBUG` est posé.
+ * Le battement de mesure (50 ms) tente l'armement : le drapeau arrive parfois
+ * juste après l'ouverture, et un second armement ne double pas la cadence.
+ */
+function armAudioDebug(current: VoiceSession): void {
+  if (current.stopAudioDebug !== null) return;
+  if (!concordAudioDebugEnabled()) return;
+  const beat = browserBeat();
+  let memory: AudioDebugMemory | null = null;
+  const handle = beat.repeat(AUDIO_DEBUG_PERIOD_MS, (now) => {
+    if (session !== current) return;
+    void current.wire.plane
+      .audioDebugReport()
+      .then((report) => {
+        if (session !== current) return;
+        const formatted = formatAudioDebugLine({
+          nowMs: now,
+          report,
+          noiseGateFrames: 0,
+          characterFrames: voiceCharacterQueueFramesLive(),
+          previous: memory,
+        });
+        memory = formatted.memory;
+        // warn, pas info : le process ne remonte que warning et error vers stderr.
+        console.warn(formatted.line);
+      })
+      .catch((error: unknown) => {
+        console.warn(`[concord-audio] relevé impossible : ${describeError(error)}`);
+      });
+  });
+  current.stopAudioDebug = () => {
+    beat.cancel(handle);
+  };
+}
+
+function releaseAudioDebug(current: VoiceSession): void {
+  const stop = current.stopAudioDebug;
+  current.stopAudioDebug = null;
+  if (stop !== null) stop();
 }
 
 /**
@@ -625,6 +672,7 @@ export function closeVoice(): void {
     return;
   }
   session = null;
+  releaseAudioDebug(current);
   stopMeter(current);
   // Le relais meurt avec la session : sans ce `reset`, la session suivante croirait avoir déjà
   // publié un ensemble, et une extinction pourrait être sautée (halo allumé dans le vide).
@@ -666,6 +714,7 @@ export function suspendVoice(): void {
   const current = session;
   if (current === null) return;
   session = null;
+  releaseAudioDebug(current);
   stopMeter(current);
   // Même isolement qu'à la sortie de salon : un retrait refusé par le DOM ne doit pas laisser la
   // reprise de connexion bloquée sur un nettoyage à moitié fait.
@@ -852,6 +901,7 @@ export function openVoice(
         if (failed !== null) {
           failed.live = false;
           if (session === failed) session = null;
+          releaseAudioDebug(failed);
           stopMeter(failed);
           failed.link.sinks.clear();
           failed.wire.close();
@@ -886,6 +936,7 @@ export function openVoice(
     makeBeat,
     beat: makeBeat(),
     stopBeat: null,
+    stopAudioDebug: null,
     live: false,
     want: false,
     speech: createPeerSpeechTracker(),

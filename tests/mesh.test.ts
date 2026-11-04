@@ -184,6 +184,21 @@ class FakePlane implements MediaPlane {
     return { bytesSent: 0, bytesReceived: 0, packetsLost: 0, rttMs: 0 }
   }
 
+  public async audioDebugReport() {
+    return {
+      clock: {
+        sampleRate: null,
+        baseLatencySec: null,
+        outputLatencySec: null,
+        state: null,
+        captureSampleRate: null,
+        captureChannels: null,
+      },
+      sendOpen: this.transmitting,
+      peers: [],
+    }
+  }
+
   public close(): void {
     this.closeCalls += 1
     this.log.push('close')

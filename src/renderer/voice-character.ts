@@ -74,6 +74,50 @@ export interface VoiceCharacterState {
  */
 export const VOICE_WORKLET_INLINE_MARK = 'concord-voice-character-inline'
 
+/** Quantum de l'AudioWorklet. La file du timbre se compte en trames de cette taille. */
+export const VOICE_WORKLET_QUANTUM = 128
+
+/**
+ * Plafond de la file du timbre, en trames de 128. Le grain tient en ~12 trames
+ * (30 ms). 32 trames (~85 ms à 48 kHz) absorbent un écart de cadence. Au-delà
+ * on jette le plus ancien : une file qui grandit n'est pas le retard de 2–3 s
+ * (celui-là est constant dès la première syllabe), mais elle ne doit pas pouvoir
+ * le devenir plus tard.
+ */
+export const VOICE_CHARACTER_MAX_QUEUE_FRAMES = 32
+
+/** Profondeur courante, en trames de `VOICE_WORKLET_QUANTUM`. */
+export function voiceCharacterQueueFrames(state: VoiceCharacterState): number {
+  const backlog = state.received - state.pulled
+  if (!Number.isFinite(backlog) || backlog <= 0) return 0
+  return Math.ceil(backlog / VOICE_WORKLET_QUANTUM)
+}
+
+let characterQueueOwner: object | null = null
+let characterQueueFramesLive: number | null = null
+
+/** Dernière file annoncée par le processeur de timbre, `null` s'il n'est pas dans le graphe. */
+export function voiceCharacterQueueFramesLive(): number | null {
+  return characterQueueFramesLive
+}
+
+export function claimVoiceCharacterQueue(owner: object): void {
+  characterQueueOwner = owner
+  characterQueueFramesLive = 0
+}
+
+export function noteVoiceCharacterQueue(owner: object, frames: number): void {
+  if (characterQueueOwner !== owner) return
+  if (!Number.isFinite(frames) || frames < 0) return
+  characterQueueFramesLive = Math.round(frames)
+}
+
+export function releaseVoiceCharacterQueue(owner: object): void {
+  if (characterQueueOwner !== owner) return
+  characterQueueOwner = null
+  characterQueueFramesLive = null
+}
+
 /**
  * Source exécutée par l'AudioWorklet. Littérale : le minificateur n'entre pas
  * dans la chaîne, donc les noms appelés par la classe sont ceux qui sont déclarés.
@@ -253,13 +297,37 @@ function snapshot(state, start, length) {
   return frame
 }
 
+function capVoiceCharacter(state) {
+  var maxSamples = ${VOICE_CHARACTER_MAX_QUEUE_FRAMES} * ${VOICE_WORKLET_QUANTUM}
+  var backlog = state.received - state.pulled
+  if (backlog <= maxSamples) return
+  var drop = backlog - maxSamples
+  if (drop >= state.ola.length) {
+    state.ola.fill(0)
+    state.olaN.fill(0)
+    state.pulled += drop
+  } else {
+    for (var i = 0; i < drop; i += 1) {
+      var slot = state.pulled % state.ola.length
+      state.ola[slot] = 0
+      state.olaN[slot] = 0
+      state.pulled += 1
+    }
+  }
+  var minCursor = state.pulled + Math.ceil(state.grainCap / 2)
+  if (state.cursor < minCursor) state.cursor = minCursor
+}
+
 function processVoiceCharacter(state, input, output) {
   const span = state.ring.length
   for (let i = 0; i < input.length; i += 1) {
     state.ring[state.received % span] = input[i] ?? 0
     state.received += 1
   }
-  while (state.cursor + Math.ceil(state.grainCap / 2) <= state.received) {
+  capVoiceCharacter(state)
+  let steps = 0
+  while (state.cursor + Math.ceil(state.grainCap / 2) <= state.received && steps < 256) {
+    steps += 1
     const look = Math.min(state.grainCap, state.received - state.cursor)
     const frame = snapshot(state, state.cursor, look)
     const period = detectVoicePeriod(frame, state.sampleRate, state.lastPeriod)
@@ -307,6 +375,7 @@ class ConcordVoiceCharacter extends AudioWorkletProcessor {
     this.readyPosted = false
     this.forceSilence = o.forceSilence === true
     this.nextReport = Math.round(sampleRate * 3)
+    this.nextQueue = Math.round(sampleRate * 0.5)
     if (this.trace) {
       this.port.postMessage({
         type: 'loaded',
@@ -379,6 +448,12 @@ class ConcordVoiceCharacter extends AudioWorkletProcessor {
     if (!this.tripped && !this.readyPosted && this.seen >= sampleRate * 0.04) {
       this.readyPosted = true
       this.port.postMessage({ type: 'ready', processor: 'concord-voice-character' })
+    }
+    if (this.seen >= this.nextQueue) {
+      this.nextQueue += Math.round(sampleRate * 0.5)
+      var backlog = this.state.received - this.state.pulled
+      var frames = backlog <= 0 ? 0 : Math.ceil(backlog / ${VOICE_WORKLET_QUANTUM})
+      this.port.postMessage({ type: 'queue', processor: 'concord-voice-character', frames: frames, samples: backlog > 0 ? backlog : 0 })
     }
     if (!this.trace || this.seen < this.nextReport) return true
     this.nextReport += Math.round(sampleRate * 3)
@@ -610,6 +685,7 @@ export function createVoiceCharacterNode(
   dry.connect(output)
   wet.connect(output)
   const trace = audioDebugEnabled()
+  const queueOwner = {}
   const goWet = (): void => {
     if (tripped || closed) return
     setGain(wet, 1)
@@ -648,7 +724,12 @@ export function createVoiceCharacterNode(
           const port = (node as { port?: { onmessage: ((event: MessageEvent) => void) | null } }).port
           if (port !== undefined) {
             port.onmessage = (event: MessageEvent) => {
-              const data = event.data as { type?: string } | null
+              if (closed) return
+              const data = event.data as { type?: string; frames?: unknown } | null
+              if (data?.type === 'queue') {
+                if (typeof data.frames === 'number') noteVoiceCharacterQueue(queueOwner, data.frames)
+                return
+              }
               if (data?.type === 'ready') {
                 goWet()
                 if (processorPhase.phase !== 'fallback') publishPhase({ phase: 'live', detail: '' })
@@ -664,6 +745,7 @@ export function createVoiceCharacterNode(
           input.connect(node)
           node.connect(wet)
           processor = node
+          claimVoiceCharacterQueue(queueOwner)
           if (trace) {
             console.error(
               `[voice-character] processeur concord-voice-character chargé pitch=${spec.pitchRatio} formant=${spec.formantScale} sr=${context.sampleRate}`,
@@ -685,6 +767,7 @@ export function createVoiceCharacterNode(
     output,
     close(): void {
       closed = true
+      releaseVoiceCharacterQueue(queueOwner)
       if (processor !== null) {
         try {
           processor.disconnect()

@@ -16,8 +16,9 @@
  *   • Opus 48 kHz mono 32 kbps : contraintes micro mono + munging SDP
  *     `maxaveragebitrate=32000;stereo=0;useinbandfec=1` + `setParameters`
  *     `encodings[].maxBitrate = 32000` ;
- *   • push-to-talk : `setTransmitting(on)` = `track.enabled`, micro **coupé au
- *     repos** ;
+ *   • push-to-talk : si la chaîne vocale a un gain d'émission, la piste reste
+ *     `enabled` et le silence est ce gain (couper `track.enabled` relance Opus
+ *     et le tampon de gigue). Sans ce gain, repli historique : `track.enabled` ;
  *   • `onRemoteStream(peerId, stream)` : un flux entrant PORTE SON PAIR (AD-17 / D3).
  *     Le plan média est le seul à savoir de quelle `RTCPeerConnection` vient la
  *     piste (`ontrack` est par pair) : il transmet donc l'identité au lieu de
@@ -45,14 +46,22 @@ import {
   MIC_CONSTRAINTS,
   OPUS_MAX_BITRATE,
   OPUS_SAMPLE_RATE,
+  applyLanReceiverLatency,
   captureProcessingMismatches,
   lanOnlyConfiguration,
+  peerLatencyFromStats,
   summarizeStats,
   toMediaTrackConstraints,
   toProcessingConstraints,
   withOpusSdpParams,
 } from './media-config.ts'
-import type { CaptureSettingsSnapshot, MicrophoneConstraints } from './media-config.ts'
+import type {
+  CaptureSettingsSnapshot,
+  LocalAudioClock,
+  MediaLatencyReport,
+  MicrophoneConstraints,
+  PeerAudioDebug,
+} from './media-config.ts'
 import {
   createVoiceChainHost,
   type FilterAudioContextLike,
@@ -222,6 +231,11 @@ export interface MediaPlane {
    */
   level(peerId?: string): number | null
   stats(remoteId: string): Promise<PeerStats>
+  /**
+   * Horloge locale, cible de gigue et champs `getStats` de latence. Le journal
+   * `CONCORD_AUDIO_DEBUG` (toutes les 2 s) est le seul appelant.
+   */
+  audioDebugReport(): Promise<MediaLatencyReport>
   close(): void
 }
 
@@ -229,6 +243,8 @@ export interface MediaPlane {
 interface Peer {
   readonly pc: RTCPeerConnection
   sender: RTCRtpSender | null
+  /** Récepteur de la piste distante, dès `ontrack` (cible de gigue LAN). */
+  receiver: RTCRtpReceiver | null
   readonly pending: RTCIceCandidateInit[]
   remoteDescriptionSet: boolean
 }
@@ -445,24 +461,61 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
    */
   let wantSend = false
   let wantSendKnown = false
+  /**
+   * Gain muet branché sur `context.destination`. Sans lui, le contexte n'a
+   * comme tirage que la `MediaStreamDestination` et Chromium peut prendre le
+   * tampon Pulse par défaut (environ 2 s, constant dès la première syllabe).
+   * Gain 0 : rien n'est audible, l'horloge reste celle de la sortie.
+   */
+  let clockPace: GainNode | null = null
 
   function warn(message: string): void {
     console.warn(`[media-plane ${o.localId}] ${message}`)
   }
 
-  /** Contexte à 48 kHz (Opus). Un matériel qui refuse retombe sur sa fréquence, et c'est dit. */
+  function finiteProp(target: object, key: string): number | null {
+    const value = Reflect.get(target, key)
+    return typeof value === 'number' && Number.isFinite(value) ? value : null
+  }
+
+  /** Cale le rendu sur la sortie, quantum « interactive », sans s'entendre. */
+  function paceAudioContext(context: AudioContext): void {
+    if (clockPace !== null) return
+    try {
+      const silent = context.createGain()
+      silent.gain.value = 0
+      silent.connect(context.destination)
+      clockPace = silent
+    } catch (error) {
+      warn(`horloge AudioContext non calée sur la sortie : ${describeError(error)}`)
+    }
+  }
+
+  /**
+   * Contexte à 48 kHz (Opus), latence interactive. Un matériel qui refuse
+   * retombe sur sa fréquence, et c'est dit. `interactive` + le gain muet
+   * évitent le tampon de lecture long qui décale toute la voix d'un bloc.
+   */
   function openAudioContext(label: string): AudioContext {
     let context: AudioContext
     try {
-      context = new AudioContext({ sampleRate: OPUS_SAMPLE_RATE })
+      context = new AudioContext({ sampleRate: OPUS_SAMPLE_RATE, latencyHint: 'interactive' })
     } catch (error) {
-      warn(`AudioContext ${OPUS_SAMPLE_RATE} Hz refusé (${label}) : ${describeError(error)}`)
-      context = new AudioContext()
+      warn(`AudioContext ${OPUS_SAMPLE_RATE} Hz interactif refusé (${label}) : ${describeError(error)}`)
+      try {
+        context = new AudioContext({ latencyHint: 'interactive' })
+      } catch (fallback) {
+        warn(`AudioContext interactif refusé (${label}) : ${describeError(fallback)}`)
+        context = new AudioContext()
+      }
     }
+    paceAudioContext(context)
     const rate = context.sampleRate
     const state = context.state
+    const base = finiteProp(context, 'baseLatency')
+    const output = finiteProp(context, 'outputLatency')
     console.info(
-      `[media-plane ${o.localId}] AudioContext state=${typeof state === 'string' ? state : 'inconnu'} sampleRate=${typeof rate === 'number' ? String(rate) : 'inconnu'}`,
+      `[media-plane ${o.localId}] AudioContext state=${typeof state === 'string' ? state : 'inconnu'} sampleRate=${typeof rate === 'number' ? String(rate) : 'inconnu'} latencyHint=interactive baseLatency=${base === null ? 'inconnu' : String(base)} outputLatency=${output === null ? 'inconnu' : String(output)}`,
     )
     if (typeof rate === 'number' && rate !== OPUS_SAMPLE_RATE) {
       warn(`AudioContext ${rate} Hz ≠ Opus ${OPUS_SAMPLE_RATE} Hz (${label})`)
@@ -623,6 +676,15 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
 
   /** Branche la piste micro locale sur un pair (création ou remplacement). */
   function applyWantSend(track: MediaStreamTrack): void {
+    const gated = voiceHost !== null && voiceHost.setSendOpen(wantSend)
+    if (gated) {
+      // La piste reste ouverte. `enabled = false` coupe le flux Opus : au
+      // réveil, le tampon de gigue du pair repart à froid et peut poser
+      // d'un coup 2 à 3 s qu'il ne rend pas. Le silence est le gain d'émission.
+      track.enabled = true
+      if (captureTrack !== null && captureTrack !== track) captureTrack.enabled = true
+      return
+    }
     track.enabled = wantSend
     if (captureTrack !== null && captureTrack !== track) captureTrack.enabled = true
   }
@@ -673,7 +735,7 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     const existing = peers.get(remoteId)
     if (existing !== undefined) return existing
     const pc = new RTCPeerConnection(configuration)
-    const peer: Peer = { pc, sender: null, pending: [], remoteDescriptionSet: false }
+    const peer: Peer = { pc, sender: null, receiver: null, pending: [], remoteDescriptionSet: false }
 
     pc.onicecandidate = (event) => {
       onIceCandidate(remoteId, event)
@@ -690,6 +752,13 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
       // Ici, et nulle part ailleurs, on sait de quel pair vient la piste :
       // `pc` a été construit POUR `remoteId`. Le vumètre est donc rattaché au pair
       // et le flux part avec son identité (AD-17 / D3 et D4).
+      // Cible de gigue AVANT la première syllabe : un récepteur Windows qui
+      // choisit seul peut verrouiller 2 à 3 s dès le premier paquet.
+      const receiver = event.receiver
+      if (receiver !== undefined && receiver !== null) {
+        peer.receiver = receiver
+        applyLanReceiverLatency(receiver)
+      }
       const first = event.streams[0]
       const stream = first === undefined ? new MediaStream([event.track]) : first
       addMeter(remoteId, stream, `distant ${remoteId}`)
@@ -1020,6 +1089,42 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     return voiceHost === null ? null : voiceHost.current()
   }
 
+  function readClock(): LocalAudioClock {
+    const context = audioContext
+    const capture = captureTrack === null ? null : readCaptureSettings(captureTrack)
+    return {
+      sampleRate: context === null ? null : finiteProp(context, 'sampleRate'),
+      baseLatencySec: context === null ? null : finiteProp(context, 'baseLatency'),
+      outputLatencySec: context === null ? null : finiteProp(context, 'outputLatency'),
+      state: context === null || typeof context.state !== 'string' ? null : context.state,
+      captureSampleRate: capture === null || typeof capture.sampleRate !== 'number' ? null : capture.sampleRate,
+      captureChannels: capture === null || typeof capture.channelCount !== 'number' ? null : capture.channelCount,
+    }
+  }
+
+  async function audioDebugReport(): Promise<MediaLatencyReport> {
+    const rows: PeerAudioDebug[] = []
+    for (const [peerId, peer] of peers) {
+      const entries: unknown[] = []
+      try {
+        const report = await peer.pc.getStats()
+        report.forEach((entry) => {
+          entries.push(entry)
+        })
+      } catch (error) {
+        warn(`getStats debug refusé pour ${peerId} : ${describeError(error)}`)
+      }
+      const receiver = peer.receiver
+      rows.push({
+        peerId,
+        jitterBufferTargetMs: receiver === null ? null : finiteProp(receiver, 'jitterBufferTarget'),
+        playoutDelayHintSec: receiver === null ? null : finiteProp(receiver, 'playoutDelayHint'),
+        latency: peerLatencyFromStats(entries),
+      })
+    }
+    return { clock: readClock(), sendOpen: wantSend, peers: rows }
+  }
+
   async function stats(remoteId: string): Promise<PeerStats> {
     const peer = peerFor(remoteId)
     const report = await peer.pc.getStats()
@@ -1062,6 +1167,15 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     captureTrack = null
     const context = audioContext
     audioContext = null
+    const pace = clockPace
+    clockPace = null
+    if (pace !== null) {
+      try {
+        pace.disconnect()
+      } catch {
+        // Déjà coupé avec le contexte.
+      }
+    }
     if (context !== null) {
       context.close().catch((error: unknown) => {
         warn(`AudioContext.close a échoué : ${describeError(error)}`)
@@ -1081,6 +1195,7 @@ export function createMediaPlane(o: MediaPlaneOptions): MediaPlane {
     applyCaptureConstraints,
     level,
     stats,
+    audioDebugReport,
     close,
   }
 }
