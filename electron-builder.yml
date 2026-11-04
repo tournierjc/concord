@@ -111,6 +111,9 @@ nsis:
   warningsAsErrors: false
   oneClick: false
   perMachine: false
+  # Case « lancer Concord » de l'installeur assisté. En silencieux (`/S`) NSIS saute
+  # cet écran : la relance est alors faite par le processus détaché de `update.ts`.
+  runAfterFinish: true
   allowToChangeInstallationDirectory: true
   differentialPackage: false
   deleteAppDataOnUninstall: false

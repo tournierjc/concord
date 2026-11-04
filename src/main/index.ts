@@ -104,6 +104,11 @@ const DEV_SERVER = process.env['LAN_DEV_SERVER'] ?? null;
 
 let mainWindow: BrowserWindow | null = null;
 let settings: Settings = defaultSettings();
+/**
+ * Vrai tant que `settings.json` est illisible : aucune écriture ne doit le remplacer par les
+ * défauts (0.4.21). Une copie `settings.json.bak` a déjà été prise au chargement.
+ */
+let settingsDiskBlocked = false;
 /** Icône de la barre des tâches/système. `null` tant que l'app n'a pas démarré (ou sans icône). */
 let tray: Tray | null = null;
 /**
@@ -236,9 +241,11 @@ async function bootstrap(): Promise<void> {
   duckingController = createDuckingController({ exec: electronDuckExec(), timers: systemTimers });
   const loaded = store.load();
   settings = loaded.settings;
-  if (loaded.recovered) {
-    // Réglages corrompus ou d'une version future : on repart des défauts, sans bloquer le démarrage.
-    console.warn('[réglages] fichier inutilisable, valeurs par défaut appliquées', loaded.errors);
+  settingsDiskBlocked = loaded.blocked;
+  if (loaded.blocked) {
+    console.warn('[réglages] fichier illisible, laissé tel quel (copie .bak). Défauts en mémoire seulement.', loaded.errors);
+  } else if (loaded.recovered) {
+    console.warn('[réglages] champs invalides rétablis un par un, le reste est conservé', loaded.errors);
   }
 
   applySecurityPolicies();
@@ -279,6 +286,7 @@ async function bootstrap(): Promise<void> {
     // L'exécutable courant : la relance post-installeur attend ce fichier puis le redémarre
     // (NSIS assisté silencieux ne relance jamais lui-même — fix 2026-11-02).
     installedExePath: () => process.execPath,
+    processPid: () => process.pid,
     onStateChange: (state) => {
       // Publication immédiate (l'UI suit la machine en direct), puis enregistrement des MESURES
       // (checkedAt, lastSeenVersion) — des faits observés, jamais des réglages saisis.
@@ -953,6 +961,12 @@ function forwardBridgeEvent(event: BridgeEvent): void {
 function persist(next: Settings): void {
   const previousSettings = settings;
   settings = next;
+  if (settingsDiskBlocked) {
+    // Le fichier n'a pas pu être lu : l'écrire maintenant remplacerait le document
+    // (éventuellement plus récent, ou simplement corrompu mais récupérable) par les défauts.
+    console.warn('[réglages] écriture ignorée : le fichier sur disque est protégé (settings.json.bak)');
+    return;
+  }
   try {
     store.save(next);
   } catch (error) {

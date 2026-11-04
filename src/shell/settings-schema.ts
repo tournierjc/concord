@@ -1056,3 +1056,322 @@ export function pushToTalkAcceleratorChanged(previous: Settings, next: Settings)
 export function serializeSettings(settings: Settings): string {
   return `${JSON.stringify(settings, null, 2)}\n`;
 }
+
+/**
+ * Lecture TOLÉRANTE d'un fichier de réglages (0.4.21).
+ *
+ * Un champ inconnu (écrit par une version plus récente, par exemple `audio.voiceFilter`
+ * lu par un binaire qui ne le connaît pas encore) est CONSERVÉ et ressort à l'écriture.
+ * Un champ invalide retombe sur SON défaut, les autres restent. Une version de schéma
+ * plus grande que la nôtre n'est pas refusée : on la réécrit telle quelle, avec les
+ * champs inconnus. Seul un document qui n'est pas un objet est illisible — et dans ce
+ * cas l'appelant ne doit PAS remplacer le fichier par les défauts.
+ */
+export interface InterpretedSettings {
+  readonly ok: true;
+  readonly value: Settings;
+  /** Clés inconnues, imbriquées comme dans le fichier, à fusionner à l'écriture. */
+  readonly extras: Dict;
+  /** Version à réécrire. Supérieure à `SETTINGS_VERSION` si le fichier vient d'un binaire plus récent. */
+  readonly persistVersion: number;
+  readonly repaired: SettingsError[];
+  readonly migratedFrom: number | null;
+}
+
+export type InterpretResult = InterpretedSettings | { ok: false; errors: SettingsError[] };
+
+function peelUnknown(source: Dict, allowed: readonly string[]): { known: Dict; extra: Dict } {
+  const known: Dict = {};
+  const extra: Dict = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (allowed.includes(key)) known[key] = value;
+    else extra[key] = value;
+  }
+  return { known, extra };
+}
+
+function noteRepair(repaired: SettingsError[], path: string, code: SettingsErrorCode, message: string): void {
+  repaired.push({ path, code, message });
+}
+
+function takeBoolean(value: unknown, fallback: boolean, path: string, repaired: SettingsError[]): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value === 'boolean') return value;
+  noteRepair(repaired, path, 'type', `${path} invalide, défaut rétabli`);
+  return fallback;
+}
+
+function takeString(value: unknown, fallback: string, path: string, repaired: SettingsError[], maxLength: number, allowEmpty: boolean): string {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'string') {
+    noteRepair(repaired, path, 'type', `${path} invalide, défaut rétabli`);
+    return fallback;
+  }
+  const text = value.trim();
+  if ((!allowEmpty && text.length === 0) || text.length > maxLength) {
+    noteRepair(repaired, path, 'range', `${path} hors borne, défaut rétabli`);
+    return fallback;
+  }
+  return text;
+}
+
+function takeNullableString(value: unknown, fallback: string | null, path: string, repaired: SettingsError[], maxLength: number): string | null {
+  if (value === undefined) return fallback;
+  if (value === null) return null;
+  if (typeof value !== 'string' || value.length > maxLength) {
+    noteRepair(repaired, path, 'type', `${path} invalide, défaut rétabli`);
+    return fallback;
+  }
+  return value;
+}
+
+function takeNumber(value: unknown, fallback: number, path: string, repaired: SettingsError[], min: number, max: number, integer: boolean): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isFinite(value) || (integer && !Number.isInteger(value)) || value < min || value > max) {
+    noteRepair(repaired, path, 'range', `${path} invalide, défaut rétabli`);
+    return fallback;
+  }
+  return value;
+}
+
+function takeEnum<T extends string>(value: unknown, fallback: T, path: string, repaired: SettingsError[], allowed: readonly T[]): T {
+  if (value === undefined) return fallback;
+  if (typeof value === 'string' && allowed.includes(value as T)) return value as T;
+  noteRepair(repaired, path, 'enum', `${path} invalide, défaut rétabli`);
+  return fallback;
+}
+
+function takeAvatar(value: unknown, fallback: AvatarSetting, path: string, repaired: SettingsError[]): AvatarSetting {
+  if (value === undefined) return fallback;
+  if (value === null) return null;
+  if (typeof value === 'string') {
+    if (isGalleryAvatarId(value)) return value;
+    noteRepair(repaired, path, 'range', `${path} invalide, défaut rétabli`);
+    return fallback;
+  }
+  if (isCustomAvatarShape(value) && isAvatarFileName(value.file) && isAvatarRef(value.ref) && value.file === `${value.ref}.png`) {
+    return { kind: 'custom', file: value.file, ref: value.ref };
+  }
+  noteRepair(repaired, path, 'type', `${path} invalide, défaut rétabli`);
+  return fallback;
+}
+
+/** Fusionne les clés inconnues dans un objet déjà sérialisé. Les clés connues gagnent. */
+export function mergeSettingsExtras(settings: Settings, extras: Dict, persistVersion: number): Dict {
+  const base = JSON.parse(serializeSettings(settings)) as Dict;
+  const merged = mergeUnknown(base, extras);
+  if (persistVersion !== settings.version) merged['version'] = persistVersion;
+  return merged;
+}
+
+function mergeUnknown(base: Dict, extras: Dict): Dict {
+  const out: Dict = { ...base };
+  for (const [key, value] of Object.entries(extras)) {
+    const current = out[key];
+    if (isPlainObject(current) && isPlainObject(value)) out[key] = mergeUnknown(current, value);
+    else if (!(key in base)) out[key] = value;
+  }
+  return out;
+}
+
+function interpretCurrent(source: Dict, defaults: Settings, repaired: SettingsError[]): { value: Settings; extras: Dict } {
+  const { known, extra } = peelUnknown(source, TOP_KEYS);
+  const audioIn = isPlainObject(known['audio']) ? known['audio'] : {};
+  const audioExtra = isPlainObject(known['audio']) ? peelUnknown(audioIn, AUDIO_KEYS).extra : {};
+  if (known['audio'] !== undefined && !isPlainObject(known['audio'])) {
+    noteRepair(repaired, 'audio', 'type', 'section audio invalide, défauts rétablis');
+  }
+  const audioKnown = isPlainObject(known['audio']) ? peelUnknown(audioIn, AUDIO_KEYS).known : {};
+  const talkIn = isPlainObject(known['talk']) ? known['talk'] : {};
+  const talkExtra = isPlainObject(known['talk']) ? peelUnknown(talkIn, TALK_KEYS).extra : {};
+  if (known['talk'] !== undefined && !isPlainObject(known['talk'])) noteRepair(repaired, 'talk', 'type', 'section talk invalide, défauts rétablis');
+  const talkKnown = isPlainObject(known['talk']) ? peelUnknown(talkIn, TALK_KEYS).known : {};
+  const overlayIn = isPlainObject(known['overlay']) ? known['overlay'] : {};
+  const overlayPeeled = isPlainObject(known['overlay']) ? peelUnknown(overlayIn, OVERLAY_KEYS) : { known: {}, extra: {} };
+  if (known['overlay'] !== undefined && !isPlainObject(known['overlay'])) noteRepair(repaired, 'overlay', 'type', 'section overlay invalide, défauts rétablis');
+  const networkIn = isPlainObject(known['network']) ? known['network'] : {};
+  const networkExtra = isPlainObject(known['network']) ? peelUnknown(networkIn, NETWORK_KEYS).extra : {};
+  if (known['network'] !== undefined && !isPlainObject(known['network'])) noteRepair(repaired, 'network', 'type', 'section network invalide, défauts rétablis');
+  const networkKnown = isPlainObject(known['network']) ? peelUnknown(networkIn, NETWORK_KEYS).known : {};
+  const updateIn = isPlainObject(known['update']) ? known['update'] : {};
+  const updateExtra = isPlainObject(known['update']) ? peelUnknown(updateIn, UPDATE_KEYS).extra : {};
+  if (known['update'] !== undefined && !isPlainObject(known['update'])) noteRepair(repaired, 'update', 'type', 'section update invalide, défauts rétablis');
+  const updateKnown = isPlainObject(known['update']) ? peelUnknown(updateIn, UPDATE_KEYS).known : {};
+  const roomIn = isPlainObject(known['room']) ? known['room'] : {};
+  const roomPeeled = isPlainObject(known['room']) ? peelUnknown(roomIn, ROOM_KEYS) : { known: {} as Dict, extra: {} as Dict };
+  if (known['room'] !== undefined && !isPlainObject(known['room'])) noteRepair(repaired, 'room', 'type', 'section room invalide, défauts rétablis');
+
+  let position: Point | null = defaults.overlay.position;
+  const positionExtra: Dict = {};
+  const rawPosition = overlayPeeled.known['position'];
+  if (rawPosition === undefined) position = defaults.overlay.position;
+  else if (rawPosition === null) position = null;
+  else if (isPlainObject(rawPosition)) {
+    const peeled = peelUnknown(rawPosition, POSITION_KEYS);
+    Object.assign(positionExtra, peeled.extra);
+    if (peeled.known['x'] === undefined && peeled.known['y'] === undefined) {
+      position = defaults.overlay.position;
+    } else {
+      const x = takeNumber(peeled.known['x'], 0, 'overlay.position.x', repaired, -100000, 100000, false);
+      const y = takeNumber(peeled.known['y'], 0, 'overlay.position.y', repaired, -100000, 100000, false);
+      position = { x, y };
+    }
+  } else {
+    noteRepair(repaired, 'overlay.position', 'type', 'overlay.position invalide, défaut rétabli');
+  }
+
+  let accelerator = defaults.talk.pttAccelerator;
+  if (talkKnown['pttAccelerator'] !== undefined) {
+    if (typeof talkKnown['pttAccelerator'] !== 'string') {
+      noteRepair(repaired, 'talk.pttAccelerator', 'type', 'raccourci invalide, défaut rétabli');
+    } else {
+      try {
+        accelerator = normalizeAccelerator(talkKnown['pttAccelerator']);
+      } catch {
+        noteRepair(repaired, 'talk.pttAccelerator', 'format', 'raccourci invalide, défaut rétabli');
+      }
+    }
+  }
+
+  let lastHosted: RoomLastHosted | null = defaults.room.lastHosted;
+  const lastExtra: Dict = {};
+  const rawHosted = roomPeeled.known['lastHosted'];
+  if (rawHosted === undefined) lastHosted = defaults.room.lastHosted;
+  else if (rawHosted === null) lastHosted = null;
+  else if (isPlainObject(rawHosted)) {
+    const peeled = peelUnknown(rawHosted, LAST_HOSTED_KEYS);
+    Object.assign(lastExtra, peeled.extra);
+    const name = takeString(peeled.known['name'], '', 'room.lastHosted.name', repaired, 32, false);
+    const capacity = takeNumber(peeled.known['capacity'], MAX_ROOM_PARTICIPANTS, 'room.lastHosted.capacity', repaired, MAX_ROOM_PARTICIPANTS, MAX_ROOM_PARTICIPANTS, true);
+    lastHosted = name.length > 0 ? { name, capacity } : null;
+    if (name.length === 0 && peeled.known['name'] !== undefined) {
+      noteRepair(repaired, 'room.lastHosted.name', 'range', 'nom de salon vide, mesure oubliée');
+    }
+  } else {
+    noteRepair(repaired, 'room.lastHosted', 'type', 'room.lastHosted invalide, défaut rétabli');
+  }
+
+  const extras: Dict = { ...extra };
+  if (Object.keys(audioExtra).length > 0) extras['audio'] = { ...(isPlainObject(extras['audio']) ? extras['audio'] : {}), ...audioExtra };
+  if (Object.keys(talkExtra).length > 0) extras['talk'] = { ...(isPlainObject(extras['talk']) ? extras['talk'] : {}), ...talkExtra };
+  if (Object.keys(overlayPeeled.extra).length > 0 || Object.keys(positionExtra).length > 0) {
+    const overlayExtras: Dict = { ...overlayPeeled.extra };
+    if (Object.keys(positionExtra).length > 0) overlayExtras['position'] = positionExtra;
+    extras['overlay'] = overlayExtras;
+  }
+  if (Object.keys(networkExtra).length > 0) extras['network'] = networkExtra;
+  if (Object.keys(updateExtra).length > 0) extras['update'] = updateExtra;
+  if (Object.keys(roomPeeled.extra).length > 0 || Object.keys(lastExtra).length > 0) {
+    const roomExtras: Dict = { ...roomPeeled.extra };
+    if (Object.keys(lastExtra).length > 0) roomExtras['lastHosted'] = lastExtra;
+    extras['room'] = roomExtras;
+  }
+
+  const checkedAt = updateKnown['checkedAt'];
+  let checked: number | null = defaults.update.checkedAt;
+  if (checkedAt === undefined || checkedAt === null) checked = checkedAt === null ? null : defaults.update.checkedAt;
+  else if (typeof checkedAt === 'number' && Number.isFinite(checkedAt) && checkedAt >= 0) checked = checkedAt;
+  else noteRepair(repaired, 'update.checkedAt', 'type', 'update.checkedAt invalide, défaut rétabli');
+
+  const seen = updateKnown['lastSeenVersion'];
+  let lastSeen: string | null = defaults.update.lastSeenVersion;
+  if (seen === undefined || seen === null) lastSeen = seen === null ? null : defaults.update.lastSeenVersion;
+  else if (typeof seen === 'string' && /^\d+\.\d+\.\d+$/.test(seen)) lastSeen = seen;
+  else noteRepair(repaired, 'update.lastSeenVersion', 'format', 'update.lastSeenVersion invalide, défaut rétabli');
+
+  const value: Settings = {
+    version: SETTINGS_VERSION,
+    locale: takeEnum(known['locale'], defaults.locale, 'locale', repaired, LOCALES),
+    theme: takeEnum(known['theme'], defaults.theme, 'theme', repaired, THEMES),
+    nickname: takeString(known['nickname'], defaults.nickname, 'nickname', repaired, 32, true),
+    avatar: takeAvatar(known['avatar'], defaults.avatar, 'avatar', repaired),
+    audio: {
+      inputDeviceId: takeNullableString(audioKnown['inputDeviceId'], defaults.audio.inputDeviceId, 'audio.inputDeviceId', repaired, 128),
+      outputDeviceId: takeNullableString(audioKnown['outputDeviceId'], defaults.audio.outputDeviceId, 'audio.outputDeviceId', repaired, 128),
+      noiseSuppression: takeBoolean(audioKnown['noiseSuppression'], defaults.audio.noiseSuppression, 'audio.noiseSuppression', repaired),
+      echoCancellation: takeBoolean(audioKnown['echoCancellation'], defaults.audio.echoCancellation, 'audio.echoCancellation', repaired),
+      inputGain: takeNumber(audioKnown['inputGain'], defaults.audio.inputGain, 'audio.inputGain', repaired, 0, 2, false),
+      voiceFilter: takeEnum(audioKnown['voiceFilter'], defaults.audio.voiceFilter, 'audio.voiceFilter', repaired, VOICE_FILTER_VALUES),
+      duckOthers: takeBoolean(audioKnown['duckOthers'], defaults.audio.duckOthers, 'audio.duckOthers', repaired),
+    },
+    talk: {
+      mode: takeEnum(talkKnown['mode'], defaults.talk.mode, 'talk.mode', repaired, TALK_MODES),
+      pttAccelerator: accelerator,
+      vadThresholdDb: takeNumber(talkKnown['vadThresholdDb'], defaults.talk.vadThresholdDb, 'talk.vadThresholdDb', repaired, -80, -10, false),
+    },
+    overlay: {
+      enabled: takeBoolean(overlayPeeled.known['enabled'], defaults.overlay.enabled, 'overlay.enabled', repaired),
+      opacity: takeNumber(overlayPeeled.known['opacity'], defaults.overlay.opacity, 'overlay.opacity', repaired, OVERLAY_OPACITY_MIN, OVERLAY_OPACITY_MAX, false),
+      scale: takeEnum(overlayPeeled.known['scale'], defaults.overlay.scale, 'overlay.scale', repaired, OVERLAY_SCALES),
+      screenId: takeNullableString(overlayPeeled.known['screenId'], defaults.overlay.screenId, 'overlay.screenId', repaired, 64),
+      position,
+    },
+    network: {
+      signalingPort: takeNumber(networkKnown['signalingPort'], defaults.network.signalingPort, 'network.signalingPort', repaired, SIGNALING_PORT_DEFAULT, SIGNALING_PORT_MAX, true),
+      discovery: takeEnum(networkKnown['discovery'], defaults.network.discovery, 'network.discovery', repaired, DISCOVERY_MODES),
+    },
+    update: {
+      auto: takeBoolean(updateKnown['auto'], defaults.update.auto, 'update.auto', repaired),
+      checkedAt: checked,
+      lastSeenVersion: lastSeen,
+    },
+    room: {
+      auto: takeBoolean(roomPeeled.known['auto'], defaults.room.auto, 'room.auto', repaired),
+      lastHosted,
+    },
+  };
+  return { value, extras };
+}
+
+export function interpretSettings(input: unknown): InterpretResult {
+  if (!isPlainObject(input)) {
+    return { ok: false, errors: [{ path: '', code: 'not-an-object', message: 'objet de réglages attendu' }] };
+  }
+  const rawVersion = input['version'];
+  const defaults = defaultSettings();
+  const repaired: SettingsError[] = [];
+  if (rawVersion === undefined || rawVersion === LEGACY_SETTINGS_VERSION) {
+    const allowed = rawVersion === undefined ? LEGACY_KEYS : [...LEGACY_KEYS, 'version'];
+    const { known, extra } = peelUnknown(input, allowed);
+    const legacy = known;
+    const base = defaultSettings();
+    if (typeof legacy['nickname'] === 'string') base.nickname = takeString(legacy['nickname'], base.nickname, 'nickname', repaired, 32, true);
+    if (legacy['locale'] !== undefined) base.locale = takeEnum(legacy['locale'], base.locale, 'locale', repaired, LOCALES);
+    if (legacy['theme'] !== undefined) base.theme = takeEnum(legacy['theme'], base.theme, 'theme', repaired, THEMES);
+    if (legacy['mic'] !== undefined) base.audio = { ...base.audio, inputDeviceId: takeNullableString(legacy['mic'], null, 'mic', repaired, 128) };
+    if (legacy['speaker'] !== undefined) base.audio = { ...base.audio, outputDeviceId: takeNullableString(legacy['speaker'], null, 'speaker', repaired, 128) };
+    if (legacy['gain'] !== undefined) base.audio = { ...base.audio, inputGain: takeNumber(legacy['gain'], base.audio.inputGain, 'gain', repaired, 0, 2, false) };
+    if (legacy['vadDb'] !== undefined) base.talk = { ...base.talk, vadThresholdDb: takeNumber(legacy['vadDb'], base.talk.vadThresholdDb, 'vadDb', repaired, -80, -10, false) };
+    if (legacy['vadMode'] !== undefined) base.talk = { ...base.talk, mode: takeEnum(legacy['vadMode'], base.talk.mode, 'vadMode', repaired, TALK_MODES) };
+    if (typeof legacy['shortcut'] === 'string') {
+      try {
+        base.talk = { ...base.talk, pttAccelerator: normalizeAccelerator(legacy['shortcut']) };
+      } catch {
+        noteRepair(repaired, 'shortcut', 'format', 'raccourci invalide, défaut rétabli');
+      }
+    }
+    if (typeof legacy['overlayOn'] === 'boolean') base.overlay = { ...base.overlay, enabled: legacy['overlayOn'] };
+    if (legacy['scale'] !== undefined) base.overlay = { ...base.overlay, scale: takeEnum(legacy['scale'], base.overlay.scale, 'scale', repaired, OVERLAY_SCALES) };
+    if (legacy['opacity'] !== undefined) {
+      base.overlay = {
+        ...base.overlay,
+        opacity: takeNumber(legacy['opacity'], base.overlay.opacity, 'opacity', repaired, OVERLAY_OPACITY_MIN, OVERLAY_OPACITY_MAX, false),
+      };
+    }
+    return { ok: true, value: base, extras: extra, persistVersion: SETTINGS_VERSION, repaired, migratedFrom: LEGACY_SETTINGS_VERSION };
+  }
+  if (typeof rawVersion !== 'number' || !Number.isInteger(rawVersion) || rawVersion < 0) {
+    noteRepair(repaired, 'version', 'version-unsupported', 'version de schéma illisible, version courante rétablie');
+    const { value, extras } = interpretCurrent({ ...input, version: SETTINGS_VERSION }, defaults, repaired);
+    return { ok: true, value, extras, persistVersion: SETTINGS_VERSION, repaired, migratedFrom: null };
+  }
+  const { value, extras } = interpretCurrent(input, defaults, repaired);
+  return {
+    ok: true,
+    value,
+    extras,
+    persistVersion: rawVersion > SETTINGS_VERSION ? rawVersion : SETTINGS_VERSION,
+    repaired,
+    migratedFrom: null,
+  };
+}

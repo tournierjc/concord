@@ -14,11 +14,19 @@
 ; (`un.customInstall`), la mise à jour les écrase (add rule écrase une règle du même nom).
 
 !macro customInstall
+  ; Best effort, et surtout NON BLOQUANT. `netsh` sans élévation rend un code non nul
+  ; et lève le drapeau d'erreur NSIS. Sans `ClearErrors`, une macro plus loin (ou la
+  ; fin d'installation qui décide de lancer l'application) peut s'arrêter là. Le
+  ; pare-feu n'a pas le droit d'empêcher la relance.
+  ClearErrors
   nsExec::ExecToLog 'netsh advfirewall firewall add rule name="Concord (voix et découverte)" dir=in action=allow program="$INSTDIR\concord.exe" enable=yes profile=any'
   Pop $0
+  ClearErrors
 !macroend
 
 !macro customUnInstall
+  ClearErrors
   nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="Concord (voix et découverte)"'
   Pop $0
+  ClearErrors
 !macroend

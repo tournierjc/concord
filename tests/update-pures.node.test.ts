@@ -198,7 +198,7 @@ describe('chooseInstallerStrategy', () => {
     assert.notEqual(plan, null);
     assert.equal(plan?.spawnPath, '/tmp/' + name);
     assert.deepEqual(plan?.spawnArgs, nsisSpawnArgs('/tmp/' + name));
-    assert.deepEqual(plan?.spawnArgs, ['/tmp/' + name, '/S']);
+    assert.deepEqual(plan?.spawnArgs, ['/S']);
     assert.equal(plan?.spawnEnv, undefined);
   });
   it('linux + AppImage : env APPIMAGE pointé sur le NOUVEAU fichier', () => {

@@ -77,6 +77,17 @@ export const systemTimers: MainTimers = {
   },
 };
 
+/**
+ * Détache un processus enfant pour qu'il ne retienne PAS le processus principal.
+ *
+ * La mise à jour Windows en a besoin : sans ça, `app.quit()` attend l'installeur (qui, lui,
+ * attend que `concord.exe` lâche le verrou de fichier). L'`unref` reste dans cette porte —
+ * les autres fichiers n'écrivent pas `.unref(`.
+ */
+export function detachProcess(child: { unref(): void }): void {
+  child.unref();
+}
+
 /** Horloge inerte, pour les tests qui ne veulent aucune échéance réelle. */
 export const NO_MAIN_TIMERS: MainTimers = {
   once: (): unknown => null,
