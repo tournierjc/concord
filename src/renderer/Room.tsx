@@ -342,18 +342,20 @@ export function Room({
           {control.deafened ? <HeadphonesOffIcon /> : <HeadphonesIcon />}
         </button>
 
-        <div className="controls__mode">
-          <span className="controls__label">{t('control.mode')}</span>
+        <div className="controls__cluster controls__mode">
+          <span className="controls__label" id="room-talk-mode">
+            {t('control.mode')}
+          </span>
           {/* Fix 0.4.2, 2026-11-02 — le mode est un SÉLECTEUR câblé, pas une étiquette :
               chaque choix appelle le pont (`setTalkMode`) qui écrit le réglage côté main
               ET met `RoomBridge` à jour (`RoomBridge.setMode` n'avait aucun appelant et
               l'état de contrôle publié restait `ptt` quoi qu'affiche le réglage). */}
-          <span className="segmented" role="group" aria-label={t('control.mode')}>
+          <span className="segmented" role="group" aria-labelledby="room-talk-mode">
             {(['ptt', 'vad'] as const).map((mode) => (
               <button
                 key={mode}
                 type="button"
-                className="button button--compact button--toggle"
+                className="button button--toggle"
                 aria-pressed={control.mode === mode}
                 onClick={() => {
                   if (control.mode === mode) return;
@@ -402,7 +404,7 @@ export function Room({
           {voice.status === 'unavailable' ? t('voice.state.unavailable') : null}
         </span>
 
-        <div className="controls__meter" aria-hidden="true">
+        <div className="controls__cluster controls__meter" aria-hidden="true">
           <span className="controls__label">{t('control.micLevel')}</span>
           <span className="meter">
             <span className="meter__fill" style={{ width: `${Math.round(micLevel * 100)}%` }} />
