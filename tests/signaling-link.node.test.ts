@@ -23,6 +23,10 @@ import {
   toWire,
   type SignalingLink,
 } from '../src/main/signaling-link.ts';
+import { encodeAvatarPngForWire } from '../src/main/avatar-store.ts';
+import { RoomBridge } from '../src/main/room-bridge.ts';
+import { applySignalToRoster } from '../src/main/roster-link.ts';
+import { resolveOverlayAvatar } from '../src/renderer/overlay-avatar.ts';
 import type { SignalIn } from '../src/shell/ipc-contract.ts';
 
 /* ------------------------------------------------------------------ */
@@ -547,4 +551,111 @@ test('un hôte hostile qui envoie peers:[null] ne casse pas la liaison (et le pr
   link.close('fin de test');
   hostile.destroy();
   await new Promise<void>((resolve) => server.close(() => resolve()));
+});
+
+test('deux pairs : avatar emoji puis image, avant et après l’arrivée, des deux annuaires', async () => {
+  const base = testBasePort();
+  const png = encodeAvatarPngForWire(
+    Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    ),
+  );
+  assert.ok(png !== null);
+  const custom = 'a'.repeat(16);
+  const hostMessages: SignalIn[] = [];
+  const aMessages: SignalIn[] = [];
+  const lateMessages: SignalIn[] = [];
+
+  const host = createSignalingLink({
+    role: 'host',
+    localId: 'h',
+    name: 'Hôte',
+    host: '127.0.0.1',
+    port: base,
+    now: () => Date.now(),
+    onMessage: (message) => hostMessages.push(message),
+  });
+  await eventually(() => host.listen !== null);
+  const port = host.listen?.port ?? 0;
+
+  let bob: SignalingLink | null = null;
+  bob = createSignalingLink({
+    role: 'client',
+    localId: 'b',
+    name: 'Bob',
+    host: '127.0.0.1',
+    port,
+    avatarRef: 'fox',
+    now: () => Date.now(),
+    onMessage: () => undefined,
+    onAvatarGet: (request) => {
+      bob?.answerAvatarGet(request, png);
+    },
+  });
+  await eventually(() => hostMessages.some((message) => message.kind === 'peer-joined' && message.name === 'Bob'));
+  assert.equal(
+    hostMessages.find((message) => message.kind === 'peer-joined' && message.name === 'Bob' && message.avatarRef === 'fox')
+      ?.kind,
+    'peer-joined',
+    'Bob déjà dans le salon annonce le renard avant l’arrivée de Alice',
+  );
+
+  const alice = createSignalingLink({
+    role: 'client',
+    localId: 'a',
+    name: 'Alice',
+    host: '127.0.0.1',
+    port,
+    now: () => Date.now(),
+    onMessage: (message) => aMessages.push(message),
+  });
+  await eventually(() => aMessages.some((message) => message.kind === 'peer-joined' && message.avatarRef === 'fox'));
+
+  const bridge = new RoomBridge(() => undefined);
+  bridge.join({ roomId: 'r1', name: 'Salon' }, 'Alice');
+  for (const message of aMessages) {
+    if (message.kind === 'peer-joined') applySignalToRoster(bridge, message, alice.selfId);
+  }
+  const before = bridge.getParticipants().find((participant) => participant.name === 'Bob');
+  assert.equal(before?.avatarRef, 'fox');
+  assert.equal(resolveOverlayAvatar(before?.avatarRef, 'Bob', null).kind, 'emoji');
+
+  bob.announceAvatar(custom);
+  await eventually(() =>
+    aMessages.some((message) => message.kind === 'peer-joined' && message.name === 'Bob' && message.avatarRef === custom),
+  );
+  for (const message of aMessages) {
+    if (message.kind === 'peer-joined') applySignalToRoster(bridge, message, alice.selfId);
+  }
+  const bobId = aMessages.find((message) => message.kind === 'peer-joined' && message.avatarRef === custom);
+  assert.ok(bobId && bobId.kind === 'peer-joined');
+  alice.requestAvatar(bobId.peerId, custom);
+  await eventually(() => aMessages.some((message) => message.kind === 'avatar-data' && message.avatarRef === custom));
+  const data = aMessages.find((message) => message.kind === 'avatar-data' && message.avatarRef === custom);
+  assert.ok(data && data.kind === 'avatar-data' && data.data === png);
+
+  const after = bridge.getParticipants().find((participant) => participant.id === bobId.peerId);
+  assert.equal(after?.avatarRef, custom);
+  const overlay = resolveOverlayAvatar(after?.avatarRef, 'Bob', data.data);
+  assert.equal(overlay.kind, 'image');
+  if (overlay.kind === 'image') assert.equal(overlay.src, `data:image/png;base64,${png}`);
+
+  const late = createSignalingLink({
+    role: 'client',
+    localId: 'c',
+    name: 'Chloé',
+    host: '127.0.0.1',
+    port,
+    now: () => Date.now(),
+    onMessage: (message) => lateMessages.push(message),
+  });
+  await eventually(() =>
+    lateMessages.some((message) => message.kind === 'peer-joined' && message.name === 'Bob' && message.avatarRef === custom),
+  );
+
+  bob.close('fin');
+  alice.close('fin');
+  late.close('fin');
+  host.close('fin');
 });

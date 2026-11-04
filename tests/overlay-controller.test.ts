@@ -32,6 +32,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import { overlayPresentation, preferX11Ozone, shouldShowOverlay } from '../src/main/overlay-activation';
+import { classifyProbe, FULLSCREEN_POLL_MS } from '../src/main/fullscreen-detect';
 import {
   MOUSE_POLL_INTERVAL_MS,
   OverlayController,
@@ -72,8 +73,16 @@ function settings(overrides: Partial<OverlaySettings> = {}): OverlaySettings {
     scale: 'md',
     screenId: null,
     position: null,
+    placement: 'top-right',
+    showWithoutDetection: false,
     ...overrides,
   };
+}
+
+interface FakeFullscreen {
+  snap: { fullscreenApp: boolean; detectionUnavailable: boolean };
+  snapshot(): { fullscreenApp: boolean; detectionUnavailable: boolean };
+  refresh(): void;
 }
 
 /** Point de l'écran correspondant à une position RELATIVE à la fenêtre (fenêtre à 1792,0). */
@@ -307,6 +316,7 @@ interface Harness {
   readonly options: OverlayWindowOptions;
   readonly window: FakeWindow;
   readonly geometry: OverlayGeometry;
+  readonly fullscreen: FakeFullscreen;
 }
 
 /** Monte un contrôleur complet sur doubles, avec la fenêtre créée et la géométrie 3 participants. */
@@ -316,9 +326,19 @@ function harness(overrides: { displays?: ScreenDisplay[]; settings?: OverlaySett
   let captured: OverlayWindowOptions | null = null;
   let created: FakeWindow | null = null;
 
+  const fullscreen: FakeFullscreen = {
+    snap: { fullscreenApp: true, detectionUnavailable: false },
+    snapshot() {
+      return this.snap;
+    },
+    refresh() {
+      return undefined;
+    },
+  };
   const controller = new OverlayController<FakeWindow>({
     timers,
     screen: screenDouble,
+    fullscreen,
     ...(overrides.platform === undefined ? {} : { platform: overrides.platform }),
     createWindow: (options) => {
       captured = options;
@@ -339,6 +359,7 @@ function harness(overrides: { displays?: ScreenDisplay[]; settings?: OverlaySett
     options: captured as OverlayWindowOptions,
     window: created as FakeWindow,
     geometry,
+    fullscreen,
   };
 }
 
@@ -487,11 +508,11 @@ describe('overlay-controller — focus', () => {
 // ---------------------------------------------------------------------------------------------
 
 describe('overlay-controller — always-on-top et espaces', () => {
-  it('Windows : floating, posé à la création et réaffirmé au premier affichage', () => {
+  it('Windows : screen-saver, posé à la création et réaffirmé au premier affichage', () => {
     const h = harness({ platform: 'win32' });
     assert.equal(h.window.alwaysOnTopWrites.length, 2);
     for (const write of h.window.alwaysOnTopWrites) {
-      assert.deepEqual(write, { flag: true, level: 'floating' });
+      assert.deepEqual(write, { flag: true, level: 'screen-saver' });
     }
     assert.ok(h.window.workspacesWrites.length >= 1);
     assert.deepEqual(h.window.workspacesWrites[0], { visible: true, options: { visibleOnFullScreen: true } });
@@ -526,7 +547,7 @@ describe('overlay-controller — always-on-top et espaces', () => {
     assert.equal(h.window.showInactiveCalls, shown + 1);
     assert.equal(h.window.showCalls, 0);
     assert.equal(h.window.alwaysOnTopWrites.length, tops + 1);
-    assert.deepEqual(h.window.alwaysOnTopWrites.at(-1), { flag: true, level: 'floating' });
+    assert.deepEqual(h.window.alwaysOnTopWrites.at(-1), { flag: true, level: 'screen-saver' });
   });
 
   it('présent alors qu’Electron la croit encore visible : showInactive et dessus réaffirmés', () => {
@@ -542,20 +563,63 @@ describe('overlay-controller — always-on-top et espaces', () => {
   });
 });
 
-describe('overlay — activation sur le bureau', () => {
-  it('visible en salon sur Linux et Windows, fenêtre vivante même cachée', () => {
+describe('overlay — activation au-dessus du plein écran', () => {
+  const base = {
+    enabled: true,
+    inRoom: true,
+    appWindowAlive: true,
+    fullscreenApp: false,
+    detectionUnavailable: false,
+    showWithoutDetection: false,
+  };
+
+  it('visible seulement si un plein écran est au premier plan', () => {
     for (const platform of ['linux', 'win32'] as const) {
       assert.equal(overlayPresentation(platform).visibleOnFullScreen, true);
-      assert.equal(shouldShowOverlay({ enabled: true, inRoom: true, appWindowAlive: true }), true, platform);
     }
-    assert.equal(overlayPresentation('win32').alwaysOnTopLevel, 'floating');
+    assert.equal(shouldShowOverlay({ ...base, fullscreenApp: true }), true);
+    assert.equal(shouldShowOverlay(base), false, 'le bureau ne montre pas l’overlay');
+    assert.equal(overlayPresentation('win32').alwaysOnTopLevel, 'screen-saver');
     assert.equal(overlayPresentation('linux').alwaysOnTopLevel, undefined);
   });
 
   it('caché hors salon, désactivé, ou sans fenêtre d’application', () => {
-    assert.equal(shouldShowOverlay({ enabled: true, inRoom: false, appWindowAlive: true }), false);
-    assert.equal(shouldShowOverlay({ enabled: false, inRoom: true, appWindowAlive: true }), false);
-    assert.equal(shouldShowOverlay({ enabled: true, inRoom: true, appWindowAlive: false }), false);
+    assert.equal(shouldShowOverlay({ ...base, fullscreenApp: true, inRoom: false }), false);
+    assert.equal(shouldShowOverlay({ ...base, fullscreenApp: true, enabled: false }), false);
+    assert.equal(shouldShowOverlay({ ...base, fullscreenApp: true, appWindowAlive: false }), false);
+  });
+
+  it('Wayland sans sonde : caché, sauf si le réglage force l’affichage', () => {
+    const blind = { ...base, detectionUnavailable: true };
+    assert.equal(shouldShowOverlay(blind), false);
+    assert.equal(shouldShowOverlay({ ...blind, showWithoutDetection: true }), true);
+  });
+
+  it('la sonde ignore Concord, le bureau, et reconnaît un plein écran', () => {
+    assert.deepEqual(
+      classifyProbe({ platform: 'win32', ownPid: 10, report: 'status=ok;pid=10;class=Chrome_WidgetWin_1;owner=concord;quns=3;ww=1920;wh=1080;sw=1920;sh=1080' }),
+      { fullscreenApp: false, detectionUnavailable: false },
+    );
+    assert.deepEqual(
+      classifyProbe({ platform: 'win32', ownPid: 10, report: 'status=ok;pid=4;class=Progman;owner=explorer;quns=5;ww=1920;wh=1080;sw=1920;sh=1080' }),
+      { fullscreenApp: false, detectionUnavailable: false },
+    );
+    assert.deepEqual(
+      classifyProbe({ platform: 'win32', ownPid: 10, report: 'status=ok;pid=40;class=UnityWndClass;owner=game;quns=3;ww=1920;wh=1080;sw=1920;sh=1080' }),
+      { fullscreenApp: true, detectionUnavailable: false },
+    );
+    assert.deepEqual(
+      classifyProbe({ platform: 'win32', ownPid: 10, report: 'status=ok;pid=40;class=UnityWndClass;owner=game;quns=5;wx=0;wy=0;ww=1920;wh=1080;sw=1920;sh=1080' }),
+      { fullscreenApp: true, detectionUnavailable: false },
+    );
+    assert.deepEqual(
+      classifyProbe({ platform: 'linux', ownPid: 10, report: 'status=ok\npid=40\nclass=steam\nstate=_NET_WM_STATE_FULLSCREEN\nww=1920\nwh=1080\nsw=1920\nsh=1080' }),
+      { fullscreenApp: true, detectionUnavailable: false },
+    );
+    assert.deepEqual(
+      classifyProbe({ platform: 'linux', ownPid: 10, report: 'status=unavailable' }),
+      { fullscreenApp: false, detectionUnavailable: true },
+    );
   });
 
   it('Wayland sans choix explicite passe par XWayland ; un choix explicite est gardé', () => {
@@ -565,6 +629,22 @@ describe('overlay — activation sur le bureau', () => {
     assert.equal(preferX11Ozone('linux', 'wayland', undefined, ['--ozone-platform=wayland']), false);
     assert.equal(preferX11Ozone('linux', 'x11', undefined, []), false);
     assert.equal(preferX11Ozone('win32', 'wayland', undefined, []), false);
+  });
+
+  it('la fenêtre se cache sur le bureau et revient au plein écran, sans show()', () => {
+    const h = harness({ platform: 'win32' });
+    assert.equal(h.window.isVisible(), true, 'le harnais démarre sur un plein écran');
+    const shown = h.window.showInactiveCalls;
+    h.fullscreen.snap = { fullscreenApp: false, detectionUnavailable: false };
+    h.timers.tick();
+    assert.equal(h.window.isVisible(), false);
+    assert.equal(h.window.showCalls, 0);
+    h.fullscreen.snap = { fullscreenApp: true, detectionUnavailable: false };
+    h.timers.tick();
+    assert.equal(h.window.isVisible(), true);
+    assert.equal(h.window.showInactiveCalls, shown + 1);
+    assert.equal(h.window.showCalls, 0);
+    assert.equal(h.window.alwaysOnTopWrites.at(-1)?.level, 'screen-saver');
   });
 });
 
@@ -649,7 +729,7 @@ describe('overlay-controller — démontage', () => {
     assert.equal(h.screen.cursorReads, readsBefore, '0 lecture de curseur après destroy()');
     assert.equal(h.window.ignoreWrites.length, writesBefore, '0 écriture ignore après destroy()');
     assert.equal(h.window.destroyCalls, 1);
-    assert.deepEqual(h.timers.cancelled, [1], 'l’échéance répétée est bien désarmée une fois');
+    assert.deepEqual(h.timers.cancelled, [1, 2], 'les deux échéances (curseur et plein écran) sont désarmées');
     assert.equal(h.controller.getWindow(), null);
     assert.equal(h.controller.getGeometry(), null);
   });
@@ -666,13 +746,16 @@ describe('overlay-controller — démontage', () => {
     h.timers.tick(10);
     assert.equal(h.screen.cursorReads, readsBefore, 'aucune scrutation orpheline après closed');
     assert.equal(h.window.ignoreWrites.length, writesBefore);
-    assert.deepEqual(h.timers.cancelled, [1]);
+    assert.deepEqual(h.timers.cancelled, [1, 2]);
   });
 
   it('la scrutation est armée une seule fois, à 120 ms, par le port', () => {
     const h = harness();
     h.controller.create('/tmp/preload.js'); // deuxième create : fenêtre existante, rien de plus
-    assert.deepEqual(h.timers.armedRepeats, [{ ms: MOUSE_POLL_INTERVAL_MS, repeating: true }]);
+    assert.deepEqual(h.timers.armedRepeats, [
+      { ms: MOUSE_POLL_INTERVAL_MS, repeating: true },
+      { ms: FULLSCREEN_POLL_MS, repeating: true },
+    ]);
     assert.equal(MOUSE_POLL_INTERVAL_MS, 120);
   });
 });

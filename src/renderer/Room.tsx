@@ -67,7 +67,15 @@ function initials(name: string): string {
  * image locale reçue du pair, ou initiales. Une empreinte dont le PNG n'est pas encore arrivé (ou
  * n'arrivera jamais) rend les initiales — jamais un carré vide, jamais une image inventée.
  */
-function AvatarOrInitials({ avatarRef, name }: { avatarRef: string | undefined; name: string }): JSX.Element {
+function AvatarOrInitials({
+  avatarRef,
+  name,
+  revision,
+}: {
+  avatarRef: string | undefined;
+  name: string;
+  revision: number;
+}): JSX.Element {
   const emoji = avatarEmojiFor(avatarRef);
   const ref = avatarRef !== undefined && isAvatarRef(avatarRef) ? avatarRef : null;
   const [png, setPng] = useState<string | null>(null);
@@ -88,7 +96,7 @@ function AvatarOrInitials({ avatarRef, name }: { avatarRef: string | undefined; 
     return () => {
       live = false;
     };
-  }, [ref]);
+  }, [ref, revision]);
   if (emoji !== null) {
     return (
       <span className="participant__avatar" aria-hidden="true">
@@ -167,6 +175,13 @@ export function Room({
   // Une seule lecture d'horloge par rendu, même origine que `PeerSpeakingSample.at`
   // (`performance.now()` du renderer) : la péremption de 250 ms se juge sur cette valeur.
   const speakingClock = performance.now();
+  // Chaque annuaire relance le chargement des images : le PNG d'un pair arrive
+  // souvent APRÈS le premier `getAvatarImage` (qui a rendu null). Sans ça, la
+  // pastille reste aux initiales pour toute la session.
+  const [avatarEpoch, setAvatarEpoch] = useState(0);
+  useEffect(() => {
+    setAvatarEpoch((value) => value + 1);
+  }, [participants]);
 
   return (
     <section className="panel room" aria-labelledby="room-title">
@@ -240,7 +255,7 @@ export function Room({
               data-peer-stream={peer.hasStream ? 'true' : 'false'}
               data-speaking={peerSpeaking(peer.peerId, PEER_LEVELS, speakingClock)}
             >
-              <AvatarOrInitials avatarRef={peer.avatarRef} name={peer.name ?? peer.peerId} />
+              <AvatarOrInitials avatarRef={peer.avatarRef} name={peer.name ?? peer.peerId} revision={avatarEpoch} />
               <span className="participant__name">{peer.name ?? peer.peerId}</span>
               <span className="participant__state">
                 {peer.state === 'connecting' ? t('voice.peer.connecting') : null}
@@ -274,7 +289,7 @@ export function Room({
             data-muted={mutedAttr(participant, room.selfId)}
             data-self={isSelf ? 'true' : 'false'}
           >
-            <AvatarOrInitials avatarRef={participant.avatarRef} name={participant.name} />
+            <AvatarOrInitials avatarRef={participant.avatarRef} name={participant.name} revision={avatarEpoch} />
             <span className="participant__halo" aria-hidden="true" />
             <span className="participant__name">
               {participant.name}

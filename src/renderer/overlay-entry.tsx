@@ -9,6 +9,7 @@ import { StrictMode, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import type { ParticipantDto } from '../shell/ipc-contract';
+import type { OverlayPlacement } from '../shell/overlay-geometry';
 import { lanApi } from './api';
 import { browserTimers } from './browser-timers';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -22,6 +23,7 @@ function OverlayRoot(): JSX.Element {
   const [participants, setParticipants] = useState<ParticipantDto[]>([]);
   const [revision, setRevision] = useState(0);
   const [locale, setLocale] = useState<Locale>('fr');
+  const [placement, setPlacement] = useState<OverlayPlacement>('top-right');
   const [selfId, setSelfId] = useState<string | null>(null);
   // Parole relayée : `[]` n'affirme rien (l'overlay n'a aucune mesure à lui, AD-17 D1).
   const [parole, afficherParole] = useState<SpeakingIds>([]);
@@ -30,7 +32,13 @@ function OverlayRoot(): JSX.Element {
     const api = lanApi();
     let active = true;
     void api.getSettings().then((settings) => {
-      if (active) setLocale(settings.locale);
+      if (!active) return;
+      setLocale(settings.locale);
+      setPlacement(settings.overlay.placement);
+    });
+    const unsubscribeSettings = api.onSettingsChanged(({ settings }) => {
+      if (!active) return;
+      setPlacement(settings.overlay.placement);
     });
     const unsubscribe = api.onParticipants((next) => {
       setParticipants(next);
@@ -58,6 +66,7 @@ function OverlayRoot(): JSX.Element {
     return () => {
       active = false;
       unsubscribe();
+      unsubscribeSettings();
       unsubscribeRoom();
       unsubscribeSpeaking();
       // Démontage : aucun minuteur ne survit à l'overlay (AD-25 D2, `cancel` par les deux chemins).
@@ -72,6 +81,7 @@ function OverlayRoot(): JSX.Element {
       selfId={selfId}
       speaking={parole}
       revision={revision}
+      placement={placement}
     />
   );
 }

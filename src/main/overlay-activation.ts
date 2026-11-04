@@ -3,20 +3,22 @@
  *
  * Pur (aucun Electron) : les tests mesurent la règle, le contrôleur ne fait que l'appliquer.
  *
- * Bureau : l'overlay est visible dès qu'il est activé ET qu'un salon est rejoint, que la
- * fenêtre principale soit au premier plan, minimisée ou rangée dans la zone de notification.
- * Il n'attend pas un jeu plein écran.
+ * L'overlay n'est visible QUE au-dessus d'un jeu ou d'une application plein écran, jamais
+ * sur le bureau. Il faut qu'il soit activé, qu'un salon soit ouvert, et qu'une sonde
+ * annonce un plein écran (pas le bureau, pas Concord).
  *
- * Windows : le niveau `screen-saver` ne se compose qu'avec le plein écran exclusif. Sur le
- * bureau il reste invisible. `floating` reste au-dessus des fenêtres normales ET du bureau.
- * `visibleOnFullScreen` couvre les applications plein écran fenêtrées.
+ * Windows : le niveau `screen-saver` se compose avec le plein écran exclusif. On ne
+ * l'applique qu'au moment de l'affichage, après `showInactive` : un bit topmost posé
+ * pendant que la fenêtre est cachée ne tient pas.
  *
- * Linux / Wayland : GTK ignore le niveau, et un `screen-saver` explicite peut empêcher
- * `_NET_WM_STATE_ABOVE`. On appelle `setAlwaysOnTop(true)` sans niveau. Le compositeur
- * Wayland natif ne garantit ni le dessus, ni la position, ni le click-through d'une fenêtre
- * transparente. Le défaut, si personne n'a choisi `--ozone-platform` ni
- * `ELECTRON_OZONE_PLATFORM_HINT`, est XWayland (`--ozone-platform=x11`) : above, position
- * et click-through fonctionnent. Un utilisateur qui force Wayland garde ce choix.
+ * Linux : GTK ignore le niveau, et un `screen-saver` explicite peut empêcher
+ * `_NET_WM_STATE_ABOVE`. On appelle `setAlwaysOnTop(true)` sans niveau, avec
+ * `visibleOnFullScreen`.
+ *
+ * Wayland natif : la sonde ne peut pas voir le plein écran. L'overlay reste caché,
+ * sauf `showWithoutDetection`. Le défaut de Concord sous Wayland est XWayland
+ * (`preferX11Ozone`) : `xprop` y voit les jeux X11. Un jeu uniquement Wayland peut
+ * échapper à la sonde.
  */
 
 export type OverlayPlatform = 'linux' | 'win32' | 'darwin';
@@ -31,7 +33,8 @@ export function overlayPresentation(platform: string): OverlayPresentation {
   if (platform === 'linux') {
     return { alwaysOnTopLevel: undefined, visibleOnFullScreen: true };
   }
-  return { alwaysOnTopLevel: 'floating', visibleOnFullScreen: true };
+  // Windows : au-dessus du plein écran exclusif. La fenêtre est cachée sur le bureau.
+  return { alwaysOnTopLevel: 'screen-saver', visibleOnFullScreen: true };
 }
 
 export interface OverlayActivation {
@@ -39,10 +42,30 @@ export interface OverlayActivation {
   readonly inRoom: boolean;
   /** La fenêtre principale existe encore (y compris minimisée ou cachée dans le bac). */
   readonly appWindowAlive: boolean;
+  /** Un jeu ou une application plein écran est au premier plan. */
+  readonly fullscreenApp: boolean;
+  /** La sonde ne peut pas répondre (Wayland natif, outil absent). */
+  readonly detectionUnavailable: boolean;
+  /** Réglage : afficher malgré une sonde muette. */
+  readonly showWithoutDetection: boolean;
 }
 
-/** Vrai sur le bureau, en plein écran, minimisée ou dans le bac — tant que le salon est ouvert. */
+/** Vrai seulement au-dessus d'un plein écran, ou si la sonde est muette et que l'utilisateur force. */
 export function shouldShowOverlay(input: OverlayActivation): boolean {
+  if (!input.enabled || !input.inRoom || !input.appWindowAlive) return false;
+  if (input.fullscreenApp) return true;
+  return input.detectionUnavailable && input.showWithoutDetection;
+}
+
+/**
+ * La fenêtre overlay est créée (cachée) tant que le salon est ouvert et l'overlay activé.
+ * La sonde décide ensuite de l'afficher.
+ */
+export function shouldKeepOverlay(input: {
+  enabled: boolean;
+  inRoom: boolean;
+  appWindowAlive: boolean;
+}): boolean {
   return input.enabled && input.inRoom && input.appWindowAlive;
 }
 

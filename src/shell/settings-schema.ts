@@ -24,6 +24,7 @@ import {
   type AvatarSetting,
   type CustomAvatar,
 } from './avatar.ts';
+import { OVERLAY_PLACEMENTS, type OverlayPlacement } from './overlay-geometry.ts';
 
 /** Version courante du schéma. Toute évolution de forme incrémente ce nombre. */
 export const SETTINGS_VERSION = 1;
@@ -50,6 +51,7 @@ export type TalkMode = 'ptt' | 'vad';
 export type DiscoveryMode = 'auto' | 'mdns' | 'broadcast';
 /** Mêmes crans que la géométrie de l'overlay (test de cohérence croisé). */
 export type OverlayScale = 'sm' | 'md' | 'lg';
+export type { OverlayPlacement };
 
 export interface Point {
   x: number;
@@ -107,6 +109,13 @@ export interface OverlaySettings {
   screenId: string | null;
   /** Dernière position (DIP), null = ancrage par défaut. */
   position: Point | null;
+  /** Coin (rangée) ou côté (colonne). Défaut `top-right`. */
+  placement: OverlayPlacement;
+  /**
+   * Afficher l'overlay quand le plein écran ne peut pas être détecté (Wayland natif).
+   * `false` par défaut : sans détection, l'overlay reste caché.
+   */
+  showWithoutDetection: boolean;
 }
 
 export interface NetworkSettings {
@@ -236,6 +245,8 @@ export function defaultSettings(): Settings {
       scale: 'md',
       screenId: null,
       position: null,
+      placement: 'top-right',
+      showWithoutDetection: false,
     },
     network: {
       signalingPort: SIGNALING_PORT_DEFAULT,
@@ -598,7 +609,7 @@ const AUDIO_KEYS = [
  */
 const VOICE_FILTER_VALUES = ['none', 'robot', 'radio', 'deep', 'man', 'woman', 'child'] as const;
 const TALK_KEYS = ['mode', 'pttAccelerator', 'vadThresholdDb'] as const;
-const OVERLAY_KEYS = ['enabled', 'opacity', 'scale', 'screenId', 'position'] as const;
+const OVERLAY_KEYS = ['enabled', 'opacity', 'scale', 'screenId', 'position', 'placement', 'showWithoutDetection'] as const;
 const NETWORK_KEYS = ['signalingPort', 'discovery'] as const;
 const UPDATE_KEYS = ['auto', 'checkedAt', 'lastSeenVersion'] as const;
 /** Les cles de mesure du service : le renderer n'a aucun droit d'ecriture dessus (2026-11-01). */
@@ -855,6 +866,8 @@ function validateV1(source: Dict): SettingsResult {
     scale: readEnum(ctx, overlaySource, 'scale', 'overlay', OVERLAY_SCALES),
     screenId: readNullableString(ctx, overlaySource, 'screenId', 'overlay', 64),
     position: readPosition(ctx, overlaySource, 'position', 'overlay'),
+    placement: readEnum(ctx, overlaySource, 'placement', 'overlay', OVERLAY_PLACEMENTS),
+    showWithoutDetection: readBoolean(ctx, overlaySource, 'showWithoutDetection', 'overlay'),
   };
 
   const networkSource = section(ctx, source, 'network');
@@ -1316,6 +1329,13 @@ function interpretCurrent(source: Dict, defaults: Settings, repaired: SettingsEr
       scale: takeEnum(overlayPeeled.known['scale'], defaults.overlay.scale, 'overlay.scale', repaired, OVERLAY_SCALES),
       screenId: takeNullableString(overlayPeeled.known['screenId'], defaults.overlay.screenId, 'overlay.screenId', repaired, 64),
       position,
+      placement: takeEnum(overlayPeeled.known['placement'], defaults.overlay.placement, 'overlay.placement', repaired, OVERLAY_PLACEMENTS),
+      showWithoutDetection: takeBoolean(
+        overlayPeeled.known['showWithoutDetection'],
+        defaults.overlay.showWithoutDetection,
+        'overlay.showWithoutDetection',
+        repaired,
+      ),
     },
     network: {
       signalingPort: takeNumber(networkKnown['signalingPort'], defaults.network.signalingPort, 'network.signalingPort', repaired, SIGNALING_PORT_DEFAULT, SIGNALING_PORT_MAX, true),

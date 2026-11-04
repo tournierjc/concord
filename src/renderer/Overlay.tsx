@@ -19,6 +19,8 @@ import {
   MAX_OVERLAY_WIDTH_PX,
   computeOverlayGeometry,
   overlayCssVariables,
+  placementFlow,
+  type OverlayPlacement,
 } from '../shell/overlay-geometry';
 import { lanApi } from './api';
 import { mutedAttr } from './participant-state';
@@ -37,6 +39,8 @@ export interface OverlayProps {
   speaking?: readonly string[];
   /** Incrémenté à chaque annuaire reçu : relance le chargement des images. */
   revision?: number;
+  /** Coin = rangée, côté = colonne. */
+  placement?: OverlayPlacement;
 }
 
 /**
@@ -93,6 +97,7 @@ export function Overlay({
   selfId = null,
   speaking = [],
   revision = 0,
+  placement = 'top-right',
 }: OverlayProps): JSX.Element {
   const t = createTranslator(locale);
   // Au plus 8 participants en salon ; la marge supérieure (10) évite toute surprise.
@@ -101,12 +106,18 @@ export function Overlay({
   const style = useMemo<CSSProperties>(() => {
     // Zone de travail large : sur l'overlay, on ne veut jamais de retour à la ligne (le process
     // principal a déjà dimensionné la fenêtre pour une rangée).
+    const flow = placementFlow(placement);
     const geometry = computeOverlayGeometry({
       participantCount: Math.max(1, visible.length),
-      workArea: { x: 0, y: 0, width: MAX_OVERLAY_WIDTH_PX * 4, height: 480 },
+      workArea:
+        flow === 'column'
+          ? { x: 0, y: 0, width: 480, height: MAX_OVERLAY_WIDTH_PX * 4 }
+          : { x: 0, y: 0, width: MAX_OVERLAY_WIDTH_PX * 4, height: 480 },
+      anchor: 'top-left',
+      flow,
     });
     return overlayCssVariables(geometry) as CSSProperties;
-  }, [visible.length]);
+  }, [visible.length, placement]);
 
   const dragOrigin = useRef<{ pointerX: number; pointerY: number; windowX: number; windowY: number } | null>(null);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
@@ -122,6 +133,7 @@ export function Overlay({
   return (
     <div
       className="overlay"
+      data-flow={placementFlow(placement)}
       style={{ ...style, transform: `translate(${offset.x}px, ${offset.y}px)` }}
       data-empty={visible.length === 0 ? 'true' : 'false'}
     >

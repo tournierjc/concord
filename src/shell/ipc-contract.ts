@@ -370,6 +370,8 @@ export interface OverlayPatchPayload {
   scale?: OverlayScaleDto;
   screenId?: string | null;
   position?: { x: number; y: number } | null;
+  placement?: 'top-right' | 'top-left' | 'bottom-right' | 'bottom-left' | 'left' | 'right';
+  showWithoutDetection?: boolean;
 }
 
 // --- Mises à jour (avenant SPEC-006b, 2026-11-01) ------------------------------------------
@@ -790,7 +792,7 @@ const PTT_KEYS = ['active'] as const;
 const TALK_MODE_KEYS: readonly string[] = ['mode'];
 const TALK_MODE_VALUES: readonly TalkModeDto[] = ['ptt', 'vad'];
 const GAIN_KEYS = ['participantId', 'gain'] as const;
-const OVERLAY_KEYS = ['visible', 'opacity', 'scale', 'screenId', 'position'] as const;
+const OVERLAY_KEYS = ['visible', 'opacity', 'scale', 'screenId', 'position', 'placement', 'showWithoutDetection'] as const;
 // `readonly string[]` plutôt qu'un tuple littéral : la clé inspectée vient d'un `Object.keys`
 // (donc `string`) et `includes` sur un tuple exige l'union littérale, ce qui forcerait un cast.
 const POSITION_KEYS: readonly string[] = ['x', 'y'];
@@ -950,6 +952,21 @@ function guardInvoke(channel: string, raw: unknown): GuardResult<unknown> {
       if ('position' in payload) {
         const position = readPosition(guard, payload, 'position');
         if (position !== undefined) value.position = position;
+      }
+      if ('placement' in payload) {
+        const placement = guard.oneOf(payload, 'placement', 'payload', [
+          'top-right',
+          'top-left',
+          'bottom-right',
+          'bottom-left',
+          'left',
+          'right',
+        ] as const);
+        if (placement !== null) value.placement = placement;
+      }
+      if ('showWithoutDetection' in payload) {
+        const showWithoutDetection = guard.boolean(payload, 'showWithoutDetection', 'payload');
+        if (showWithoutDetection !== null) value.showWithoutDetection = showWithoutDetection;
       }
       if (guard.errors.length > 0) return guardError(channel, guard);
       return { ok: true, value };

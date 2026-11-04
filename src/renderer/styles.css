@@ -770,6 +770,19 @@ body {
   list-style: none;
 }
 
+.overlay[data-flow='column'] {
+  flex-direction: column;
+}
+
+.overlay[data-flow='column'] .overlay__avatars {
+  flex-direction: column;
+}
+
+.overlay[data-flow='column'] .overlay__handle {
+  width: 100%;
+  height: var(--overlay-handle-width);
+}
+
 .overlay__avatar {
   position: relative;
   display: flex;
