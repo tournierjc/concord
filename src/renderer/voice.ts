@@ -699,6 +699,17 @@ function pageMeterBeat(): MeterBeatDriver {
  * globale : `voice.ts` reste sans DOM ambiant, et un test rejoue la fonction directement.
  * Sans session ou sans battement armé, le geste est un no-op.
  */
+/**
+ * Donne au maillage vivant l'id que le serveur de signalisation nous a attribué.
+ * Appelé quand `selfSignalingId` arrive (souvent APRÈS un `peer-joined` déjà routé) :
+ * le plus petit id rattrape alors l'offre qui n'était pas partie.
+ */
+export function noteVoiceSignalingSelf(id: string): void {
+  const current = session;
+  if (current === null || id.length === 0) return;
+  current.wire.noteSignalingSelf(id);
+}
+
 export function resumeVoiceMeter(): void {
   const current = session;
   if (current === null || !current.live) return;
@@ -814,6 +825,7 @@ export function openVoice(
         startMeter(current);
       },
       onError: (error: unknown) => {
+        console.error(`[voice] micro ou maillage indisponible : ${describeError(error)}`);
         const failed = current;
         if (failed !== null) {
           failed.live = false;
@@ -840,6 +852,9 @@ export function openVoice(
     publish({ status: 'unavailable', error: describeError(error), level: 0, transmitting: false });
     return;
   }
+
+  const initialSignalingId = (options?.selfIds ?? []).find((id) => id.length > 0 && id !== localId);
+  if (initialSignalingId !== undefined) wire.noteSignalingSelf(initialSignalingId);
 
   const makeBeat = options?.makeBeat ?? pageMeterBeat;
   const created: VoiceSession = {
@@ -992,6 +1007,12 @@ export function useVoicePlane(options: UseVoicePlaneOptions): VoiceSnapshot {
     }
     if (phase === 'connected') openVoice(`${roomId}|${localId}`, localId, settings);
   }, [enabled, roomId, localId, phase]);
+
+  const signalingSelfId = (selfIds ?? []).find((value) => value.length > 0) ?? '';
+  useEffect(() => {
+    if (!enabled || roomId === null || signalingSelfId.length === 0) return;
+    noteVoiceSignalingSelf(signalingSelfId);
+  }, [enabled, roomId, signalingSelfId]);
 
   useEffect(() => {
     if (!enabled || roomId === null) return;

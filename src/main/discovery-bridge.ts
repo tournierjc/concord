@@ -129,6 +129,11 @@ export interface AnnounceOptions {
    * `undefined` : comportement d'avant (l'annonce reste celle de bonjour).
    */
   host?: string;
+  /**
+   * Autres adresses LAN réellement écoutées (seconde carte, même /24). Publiées dans
+   * le TXT `addrs` pour qu'un voisin ne dépende pas d'une seule interface.
+   */
+  hosts?: readonly string[];
 }
 
 /**
@@ -488,6 +493,11 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
     // l'adresse de bonjour qu'un champ mensonger.
     const addr =
       typeof room.host === 'string' && room.host.length > 0 && room.host.length <= 45 ? room.host : undefined;
+    const addrs = (room.hosts ?? [])
+      .filter((host) => host !== '127.0.0.1' && host !== '::1' && host.length > 0 && host.length <= 45)
+      .filter((host, index, all) => all.indexOf(host) === index)
+      .slice(0, 8)
+      .join(',');
     try {
       announcedService = mdns.publish({
         name: instanceId,
@@ -498,6 +508,7 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
           roomName: roomName.slice(0, MAX_ROOM_NAME_LENGTH),
           participants: String(Number.isFinite(room.participants) ? Math.max(0, Math.trunc(room.participants)) : 0),
           ...(addr === undefined ? {} : { addr }),
+          ...(addrs.length > 0 ? { addrs } : {}),
         },
       });
       announcedPort = port;
@@ -511,7 +522,13 @@ function createDiscoveryBridge(options: DiscoveryBridgeOptions): DiscoveryBridge
     // annonce après `ROOM_DISCOVERY_TTL_MS` (12 s). Sans battement sous le TTL, un salon calme
     // disparaissait de la liste des voisins jusqu'au prochain mouvement de population. La
     // cadence est strictement inférieure au TTL (TTL/2 = 6 s) : deux marges de sécurité.
-    reannounceOptions = { roomName: room.roomName, port, participants: room.participants, ...(addr === undefined ? {} : { host: addr }) };
+    reannounceOptions = {
+      roomName: room.roomName,
+      port,
+      participants: room.participants,
+      ...(addr === undefined ? {} : { host: addr }),
+      ...(addrs.length > 0 ? { hosts: addrs.split(',') } : {}),
+    };
     armReannounce();
     // Une entrée de nous-mêmes laissée par un passage précédent ne doit pas rester dans la liste.
     registry.remove(instanceId);

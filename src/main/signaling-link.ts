@@ -58,6 +58,11 @@ export interface SignalingLinkOptions {
   name: string;
   /** Adresse d'écoute (hôte) ou adresse de l'hôte (client) : LAN ou loopback, jamais large. */
   host: string;
+  /**
+   * Hôte seulement : toutes les adresses LAN à écouter, en plus de `host` (la préférée,
+   * celle qui est annoncée). Absentes : on n'écoute que `host`, comme avant.
+   */
+  hosts?: readonly string[];
   /** Client : port de l'hôte (défaut 47821). Hôte : premier port essayé. */
   port?: number;
   maxPeers?: number;
@@ -105,6 +110,13 @@ export interface SignalingLink {
   readonly role: 'host' | 'client';
   /** Adresse réellement écoutée (hôte) ; `null` en client ou si le lien a refusé de démarrer. */
   readonly listen: { host: string; port: number } | null;
+  /** Toutes les adresses sur lesquelles l'hôte accepte encore un join. */
+  readonly listens: readonly { host: string; port: number }[];
+  /**
+   * Ajoute l'écoute des adresses LAN apparues depuis le bind (câble rebranché, seconde carte).
+   * Ne ferme pas les écoutes encore vivantes : une carte qui part émet `error` toute seule.
+   */
+  reconcileHosts(hosts: readonly string[]): void;
   /** Identité attribuée par le serveur, connue après le `hello`. */
   readonly selfId: string | null;
   readonly stats: SignalingLinkStats;
@@ -151,10 +163,16 @@ export interface InterfaceLike {
  * l'interface réellement joignable, là où un `eth0` alphabétique pouvait désigner une interface
  * que le LAN ne joint pas. `undefined` : comportement d'avant (repli trié, jamais une panne).
  */
-export function pickListenHost(
+/**
+ * Toutes les adresses d'écoute LAN, la préférée (route par défaut) en tête, les ponts
+ * d'orchestrateur en queue. Une machine à deux cartes sur le même /24 doit les publier
+ * et les écouter TOUTES : n'en lier qu'une (souvent celle de la route par défaut) fait
+ * mourir le salon quand ce câble part, et laisse l'autre carte muette.
+ */
+export function listListenHosts(
   interfaces: Record<string, InterfaceLike[] | undefined>,
   preferred?: string,
-): string {
+): string[] {
   const sorted = Object.keys(interfaces).sort((a, b) => a.localeCompare(b));
   const candidates: string[] = [];
   for (const name of sorted) {
@@ -164,16 +182,23 @@ export function pickListenHost(
       if (!isAllowedListenHost(entry.address)) continue;
       // Une adresse de lien-local (169.254/16) n'est pas un réseau local utile : on l'ignore.
       if (entry.address.startsWith('169.254.')) continue;
-      candidates.push(entry.address);
+      if (!candidates.includes(entry.address)) candidates.push(entry.address);
     }
   }
-  // L'adresse de la route par défaut gagne quand elle existe parmi les candidates : c'est la
-  // seule qui soit GARANTIE joignable depuis l'extérieur du poste (le reste est un tri heuristique).
-  if (preferred !== undefined && candidates.includes(preferred)) return preferred;
-  // Priorité aux adresses joignables depuis le LAN : un pont Docker n'est retenu qu'en dernier.
   const plausible = candidates.filter((address) => !isOrchestratorAddress(address));
-  const chosen = plausible.length > 0 ? plausible[0] : candidates[0];
-  return chosen ?? '127.0.0.1';
+  const bridges = candidates.filter((address) => isOrchestratorAddress(address));
+  const ordered = [...plausible, ...bridges];
+  if (preferred !== undefined && ordered.includes(preferred)) {
+    return [preferred, ...ordered.filter((address) => address !== preferred)];
+  }
+  return ordered.length > 0 ? ordered : ['127.0.0.1'];
+}
+
+export function pickListenHost(
+  interfaces: Record<string, InterfaceLike[] | undefined>,
+  preferred?: string,
+): string {
+  return listListenHosts(interfaces, preferred)[0] ?? '127.0.0.1';
 }
 
 /* ------------------------------------------------------------------ */
@@ -575,6 +600,9 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
   };
 
   let server: Server | null = null;
+  const extraServers: Server[] = [];
+  /** Adresses sur lesquelles un `listen` a réussi et n'a pas encore rompu. */
+  const boundHosts = new Set<string>();
   let signaling: LocalSignaling | null = null;
   let outbound: Socket | null = null;
   let listen: { host: string; port: number } | null = null;
@@ -765,6 +793,9 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
         tryNext(detail);
       });
       candidateServer.listen({ host, port }, () => {
+        // Le `once('error')` du bind (port occupé) ne doit plus relancer un essai
+        // une fois l'écoute acquise : une carte qui part ensuite est gérée à part.
+        candidateServer.removeAllListeners('error');
         server = candidateServer;
         listen = { host, port };
         // Vient après le bind, jamais avant : on ne peut annoncer qu'un port réellement écouté.
@@ -809,15 +840,79 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
               }),
         });
         candidateServer.on('connection', (socket: Socket) => acceptIncoming(socket));
-        candidateServer.on('error', (error: Error) => {
-          refuse(`lien rompu : ${error.message}`);
-        });
-        // L'hôte est aussi un pair : il rejoint son propre salon par le même chemin que les autres.
-        dial(host === 'localhost' ? '127.0.0.1' : host, port);
+        boundHosts.add(host);
+        watchListener(candidateServer, host, port);
+        // Les autres cartes du LAN. Le join de CET hôte passe par 127.0.0.1 quand
+        // on peut l'écouter : débrancher la carte annoncée ne tue pas sa session.
+        const extras = new Set<string>(options.hosts ?? []);
+        extras.delete(host);
+        extras.delete('127.0.0.1');
+        for (const extra of extras) bindExtra(extra, port);
+        if (host === '127.0.0.1' || host === 'localhost') {
+          dial('127.0.0.1', port);
+        } else {
+          bindExtra('127.0.0.1', port, () => dial('127.0.0.1', port), () => dial(host, port));
+        }
       });
     };
 
     tryNext('');
+  }
+
+  /** Une écoute qui meurt (câble retiré) ne ferme le salon que s'il n'en reste aucune. */
+  function watchListener(srv: Server, host: string, port: number): void {
+    srv.on('error', (error: Error) => {
+      if (process.env.CONCORD_SIGNAL_DEBUG) {
+        console.error(`[signal:host] écoute ${host}:${port} rompue : ${error.message}`);
+      }
+      boundHosts.delete(host);
+      srv.close();
+      if (server === srv) server = extraServers[0] ?? null;
+      const index = extraServers.indexOf(srv);
+      if (index >= 0) extraServers.splice(index, 1);
+      if (boundHosts.size === 0) {
+        refuse(`lien rompu : ${error.message}`);
+        return;
+      }
+      if (listen?.host === host) {
+        const next = [...boundHosts][0];
+        if (next !== undefined && listen !== null) {
+          listen = { host: next, port: listen.port };
+          try {
+            options.onListen?.(listen);
+          } catch {
+            // Un rappel qui lève ne doit pas empêcher les autres écoutes de vivre.
+          }
+        }
+      }
+    });
+  }
+
+  function bindExtra(host: string, port: number, onUp?: () => void, onFail?: () => void): void {
+    if (closed || boundHosts.has(host) || !isAllowedListenHost(host)) {
+      if (boundHosts.has(host)) onUp?.();
+      else onFail?.();
+      return;
+    }
+    const extra = createServer();
+    extra.once('error', (error: NodeJS.ErrnoException) => {
+      extra.close();
+      if (process.env.CONCORD_SIGNAL_DEBUG) {
+        console.error(`[signal:host] écoute supplémentaire ${host}:${port} refusée : ${error.message}`);
+      }
+      onFail?.();
+    });
+    extra.listen({ host, port }, () => {
+      if (closed) {
+        extra.close();
+        return;
+      }
+      extraServers.push(extra);
+      boundHosts.add(host);
+      extra.on('connection', (socket: Socket) => acceptIncoming(socket));
+      watchListener(extra, host, port);
+      onUp?.();
+    });
   }
 
   function acceptIncoming(socket: Socket): void {
@@ -892,17 +987,39 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
     get listen() {
       return listen;
     },
+    get listens() {
+      if (listen === null) return [];
+      const port = listen.port;
+      return [...boundHosts].map((host) => ({ host, port }));
+    },
+    reconcileHosts(hosts: readonly string[]): void {
+      if (closed || role !== 'host' || listen === null) return;
+      for (const host of hosts) bindExtra(host, listen.port);
+      bindExtra('127.0.0.1', listen.port);
+    },
     get selfId() {
       return selfId;
     },
     stats,
     send(message: SignalOut): void {
-      if (closed || outbound === null || outbound.destroyed) return;
+      const debug = Boolean(process.env.CONCORD_SIGNAL_DEBUG) || process.env.CONCORD_E2E_DEBUG === '1';
+      if (closed || outbound === null || outbound.destroyed) {
+        // Sans cette ligne, une offre calculée par le renderer et refusée ici
+        // (socket déjà mort) était invisible : le journal ne montrait que les `<=`.
+        if (debug && message.kind !== 'leave') {
+          console.error(`[signal:${role}] >x ${message.kind} non émis (lien fermé ou socket absent)`);
+        }
+        return;
+      }
       const wire = toWire(message);
       if (wire === null) {
         // Candidat hors LAN, ou charge utile inexploitable : rien ne sort, et c'est voulu.
         if (message.kind === 'ice') stats.filteredCandidates += 1;
+        if (debug) console.error(`[signal:${role}] >x ${message.kind} non émis`);
         return;
+      }
+      if (debug && (wire.type === 'offer' || wire.type === 'answer' || wire.type === 'ice')) {
+        console.error(`[signal:${role}] => ${JSON.stringify(wire).slice(0, 200)}`);
       }
       outbound.write(`${JSON.stringify(wire)}\n`);
       if (message.kind === 'leave') {
@@ -957,6 +1074,9 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
       signaling = null;
       server?.close();
       server = null;
+      for (const extra of extraServers) extra.close();
+      extraServers.length = 0;
+      boundHosts.clear();
       emitLink('closed', detail ?? 'lien fermé');
     },
   };

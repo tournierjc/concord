@@ -62,6 +62,7 @@ import { createRequire } from 'node:module';
 import { probePrimaryAddress } from './primary-address';
 import {
   createSignalingLink,
+  listListenHosts,
   pickListenHost,
   type SignalingLink,
 } from './signaling-link';
@@ -459,6 +460,19 @@ function createMainWindow(): BrowserWindow {
   });
 
   harden(window.webContents);
+  // CONCORD_SIGNAL_DEBUG : le journal du process ne voyait que les lignes `<=` du
+  // tuyau. Les erreurs du renderer (micro refusé, rôle du maillage) y remontent,
+  // et la page active les traces `[mesh]` déjà gardées par `__CONCORD_DEBUG__`.
+  if (process.env.CONCORD_SIGNAL_DEBUG) {
+    window.webContents.on('console-message', (_event, level, message) => {
+      if (level < 2) return;
+      console.error(`[renderer] ${message}`);
+    });
+    window.webContents.on('dom-ready', () => {
+      if (window.isDestroyed()) return;
+      void window.webContents.executeJavaScript('globalThis.__CONCORD_DEBUG__ = true').catch(() => undefined);
+    });
+  }
   const reveal = (): void => {
     if (!window.isDestroyed() && !window.isVisible()) window.show();
   };
@@ -618,6 +632,12 @@ const PRIMARY_ADDRESS_REFRESH_MS = 30_000;
 function refreshPrimaryAddress(): void {
   void probePrimaryAddress(systemTimers).then((address) => {
     if (address !== null) primaryAddressCache = address;
+    // Une carte apparue après le bind (second câble, retour de lien) doit écouter
+    // aussi : le salon ne reste pas prisonnier de l'adresse choisie au démarrage.
+    const link = signalingLink;
+    if (link !== null && link.role === 'host') {
+      link.reconcileHosts(listListenHosts(networkInterfaces(), primaryAddressCache));
+    }
   });
 }
 
@@ -1061,7 +1081,8 @@ function startSignalingLink(roomId: string, name: string, selfId: string, avatar
   // asynchrone — ses résultats sont mis en cache par la cadence de `bootstrap` (une sonde au
   // démarrage, puis toutes les 30 s : une adresse de sortie change rarement en séance) et le
   // join lit le DERNIER résultat connu, sans attendre. `undefined` = repli trié d'avant.
-  const listenHost = pickListenHost(networkInterfaces(), primaryAddressCache);
+  const listenHosts = listListenHosts(networkInterfaces(), primaryAddressCache);
+  const listenHost = listenHosts[0] ?? pickListenHost(networkInterfaces(), primaryAddressCache);
   const role: 'host' | 'client' = remote ? 'client' : 'host';
   signalingLink = createSignalingLink({
     role,
@@ -1087,6 +1108,7 @@ function startSignalingLink(roomId: string, name: string, selfId: string, avatar
       }
     },
     host: role === 'client' && remote ? remote.host : listenHost,
+    ...(role === 'host' ? { hosts: listenHosts } : {}),
     ...(role === 'client' && remote ? { port: remote.port } : {}),
     now: () => systemTimers.now(),
     // Bind refusé (fix 0.4.2, 2026-11-02, D2) : les 10 ports sont occupés — `onListen` ne
@@ -1138,6 +1160,7 @@ function startSignalingLink(roomId: string, name: string, selfId: string, avatar
         // Cohérence bind/annonce (2026-11-02) : le lecteur joint l'adresse que CE poste a
         // réellement liée, jamais une reconstruction de bonjour (machine multi-interfaces).
         host: listen.host,
+        hosts: signalingLink.listens?.map((entry) => entry.host) ?? [],
       });
     },
   });
@@ -1166,6 +1189,7 @@ function reannounceHostedRoom(): void {
     participants: state.participantCount,
     // Cohérence bind/annonce (2026-11-02) : même règle que le bind initial.
     host: listen.host,
+    hosts: link.listens?.map((entry) => entry.host) ?? [],
   });
 }
 

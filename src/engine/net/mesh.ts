@@ -366,6 +366,14 @@ export function createMesh(o: MeshOptions): Mesh {
   const flowTimeoutMs = normaliseFlowTimeout(o.flowTimeoutMs)
   const timers = o.timers
   const links = new Map<string, Link>()
+  /**
+   * Id attribué par le serveur de signalisation (`p1`, `p2`, …), appris du message
+   * `link` `pair=<id>`. En production le `localId` du maillage est l'id d'UI `'self'`
+   * sur LES DEUX postes : `'self' > 'pN'`, donc les deux se déclaraient answerer et
+   * personne n'émettait d'offre (salon joint, zéro offer/answer/ice). Cet id-ci,
+   * comparable, désigne un seul offreur.
+   */
+  let signalingSelfId: string | null = null
   /** Un seul minuteur par pair : celui des 5 s sans flux. Jamais deux. */
   const clocks = new Map<string, unknown>()
   let closed = false
@@ -488,10 +496,39 @@ export function createMesh(o: MeshOptions): Mesh {
     }
   }
 
+  /**
+   * Qui offre. L'id de signalisation (`p1` < `p2`) prime : c'est le seul identifiant
+   * distinct par poste. Sans lui, on retombe sur `localId < peerId` (contrat des tests).
+   */
+  function roleAgainst(peerId: string): 'offerer' | 'answerer' {
+    const mine = signalingSelfId ?? localId
+    return mine < peerId ? 'offerer' : 'answerer'
+  }
+
+  /** `link` connected `pair=<id>` : retient notre id serveur et promeut un lien en attente. */
+  function noteSignalingSelf(id: string): void {
+    if (id.length === 0 || signalingSelfId === id) return
+    signalingSelfId = id
+    for (const link of links.values()) {
+      if (link.phase !== 'waiting' || link.role === 'offerer') continue
+      if (!(id < link.peerId)) continue
+      link.role = 'offerer'
+      if (debugMesh()) console.warn(`[mesh] rôle repris ${link.peerId} → offerer (id=${id})`)
+      void offerTo(link)
+    }
+  }
+
+  function signalingIdOf(detail: string | null): string | null {
+    if (detail === null) return null
+    const matched = /^pair=(\S+)/.exec(detail)
+    const id = matched?.[1]
+    return id === undefined || id.length === 0 ? null : id
+  }
+
   /** Crée le lien s'il reste de la place ; sinon refuse explicitement. */
   function openLink(peerId: string, cause: string): Link | null {
-    if (peerId === localId) {
-      warn(`message ${cause} ignoré : il vient de moi-même (${localId})`)
+    if (peerId === localId || (signalingSelfId !== null && peerId === signalingSelfId)) {
+      warn(`message ${cause} ignoré : il vient de moi-même (${signalingSelfId ?? localId})`)
       return null
     }
     const existing = links.get(peerId)
@@ -500,10 +537,11 @@ export function createMesh(o: MeshOptions): Mesh {
       warn(`${cause} refusé : borne de ${maxPeers} pairs atteinte (${peerId} reste hors maillage)`)
       return null
     }
-    if (debugMesh()) console.warn(`[mesh] openLink ${peerId} cause=${cause} role=${localId < peerId ? 'offerer' : 'answerer'}`)
+    const role = roleAgainst(peerId)
+    if (debugMesh()) console.warn(`[mesh] openLink ${peerId} cause=${cause} role=${role} mine=${signalingSelfId ?? localId}`)
     const link: Link = {
       peerId,
-      role: localId < peerId ? 'offerer' : 'answerer',
+      role,
       phase: 'waiting',
       remoteOfferSdp: '',
       flow: null,
@@ -722,8 +760,13 @@ export function createMesh(o: MeshOptions): Mesh {
     }
     switch (msg.kind) {
       case 'link':
-        // État de lien calculé par la coquille (relais TCP / ICE) : il ne change
-        // aucune décision de maillage, et le pilote n'a pas d'état à en tirer.
+        // `pair=<id>` est l'id que le serveur nous a donné. Il doit être connu
+        // AVANT la décision d'offre : sans lui, deux postes dont le localId d'UI
+        // est `'self'` n'envoient jamais d'offre.
+        if (msg.state === 'connected') {
+          const id = signalingIdOf(msg.detail)
+          if (id !== null) noteSignalingSelf(id)
+        }
         return
       case 'peer-joined':
         await onPeerJoined(msg.peerId)
