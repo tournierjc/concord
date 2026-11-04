@@ -127,8 +127,14 @@ describe('A2 — setTransmitting(on) pilote track.enabled sur TOUS les pairs', (
     }
 
     // La piste est un objet unique partagé : l'état ne peut pas diverger d'un
-    // pair à l'autre, et la séquence d'écritures le montre.
-    assert.deepEqual(mic.enabledWrites, [false, true, false], 'séquence PTT : coupé → ouvert → coupé')
+    // pair à l'autre. L'ouverture écrit « coupé », le pair déjà là et chaque
+    // attach suivant réécrivent la même intention (un nouvel émetteur ne repart
+    // pas ouvert), puis l'appui et le relâchement.
+    assert.deepEqual(
+      mic.enabledWrites,
+      [false, false, false, false, true, false],
+      'séquence PTT : coupé, réaffirmé à chaque pair, ouvert, coupé',
+    )
     plane.close()
   })
 

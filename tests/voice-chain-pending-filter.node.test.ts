@@ -182,6 +182,155 @@ test('plan média : un changement de voix en cours d’appel replaceTrack sur ch
   }
 })
 
+test('VAD en train de parler : une piste neuve au changement de filtre reste ouverte, sans changer de mode', async () => {
+  const restore = installStubs()
+  FakePeerConnection.reset()
+  const mic = new FakeTrack('micro-brut')
+  const first = new FakeTrack('filtre-1')
+  const second = new FakeTrack('filtre-2')
+  second.enabled = false
+  const nav = globalThis.navigator.mediaDevices
+  const original = nav.getUserMedia.bind(nav)
+  nav.getUserMedia = async () => new FakeMediaStream([mic]) as unknown as MediaStream
+  let sent: MediaStreamTrack = first as unknown as MediaStreamTrack
+  try {
+    const plane = createMediaPlane({
+      localId: 'a',
+      timers: timers(),
+      onLocalCandidate: () => {},
+      microOpenOnStart: true,
+      voiceFilter: 'none',
+      voiceChainFactory: (() => {
+        const chain = {
+          current: 'none' as VoiceFilterId,
+          get track() {
+            return sent
+          },
+          applyFilter(id: VoiceFilterId) {
+            chain.current = id
+            sent = second as unknown as MediaStreamTrack
+            return sent
+          },
+          close() {},
+        }
+        return chain
+      }) as never,
+    })
+    await plane.startMicrophone()
+    plane.setTransmitting(true)
+    await plane.attach('b')
+    const sender = FakePeerConnection.instances[0]?.senders[0]
+    assert.equal(sender?.track, first, 'le pair a la première piste')
+    assert.equal(first.enabled, true, 'VAD ouvert : la piste part')
+    plane.setVoiceFilter('woman')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(sender?.track, second, 'replaceTrack pose la piste neuve')
+    assert.equal(second.enabled, true, 'la piste neuve reprend l’intention VAD, sans nouveau front')
+    assert.equal(mic.enabled, true, 'la capture n’est pas coupée')
+    plane.close()
+  } finally {
+    nav.getUserMedia = original
+    restore()
+  }
+})
+
+test('PTT tenu : une piste neuve au changement de filtre reste ouverte', async () => {
+  const restore = installStubs()
+  FakePeerConnection.reset()
+  const mic = new FakeTrack('micro-brut')
+  const first = new FakeTrack('filtre-1')
+  const second = new FakeTrack('filtre-2')
+  second.enabled = false
+  const nav = globalThis.navigator.mediaDevices
+  const original = nav.getUserMedia.bind(nav)
+  nav.getUserMedia = async () => new FakeMediaStream([mic]) as unknown as MediaStream
+  let sent: MediaStreamTrack = first as unknown as MediaStreamTrack
+  try {
+    const plane = createMediaPlane({
+      localId: 'a',
+      timers: timers(),
+      onLocalCandidate: () => {},
+      voiceFilter: 'none',
+      voiceChainFactory: (() => {
+        const chain = {
+          current: 'none' as VoiceFilterId,
+          get track() {
+            return sent
+          },
+          applyFilter(id: VoiceFilterId) {
+            chain.current = id
+            sent = second as unknown as MediaStreamTrack
+            return sent
+          },
+          close() {},
+        }
+        return chain
+      }) as never,
+    })
+    await plane.startMicrophone()
+    plane.setTransmitting(true)
+    await plane.attach('b')
+    plane.setVoiceFilter('radio')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const sender = FakePeerConnection.instances[0]?.senders[0]
+    assert.equal(sender?.track, second)
+    assert.equal(second.enabled, true, 'la touche encore enfoncée ouvre la piste neuve')
+    plane.close()
+  } finally {
+    nav.getUserMedia = original
+    restore()
+  }
+})
+
+test('filtre changé en silence, puis prise de parole : c’est la piste courante qui s’ouvre', async () => {
+  const restore = installStubs()
+  FakePeerConnection.reset()
+  const mic = new FakeTrack('micro-brut')
+  const first = new FakeTrack('filtre-1')
+  const second = new FakeTrack('filtre-2')
+  second.enabled = true
+  const nav = globalThis.navigator.mediaDevices
+  const original = nav.getUserMedia.bind(nav)
+  nav.getUserMedia = async () => new FakeMediaStream([mic]) as unknown as MediaStream
+  let sent: MediaStreamTrack = first as unknown as MediaStreamTrack
+  try {
+    const plane = createMediaPlane({
+      localId: 'a',
+      timers: timers(),
+      onLocalCandidate: () => {},
+      voiceFilter: 'none',
+      voiceChainFactory: (() => {
+        const chain = {
+          current: 'none' as VoiceFilterId,
+          get track() {
+            return sent
+          },
+          applyFilter(id: VoiceFilterId) {
+            chain.current = id
+            sent = second as unknown as MediaStreamTrack
+            return sent
+          },
+          close() {},
+        }
+        return chain
+      }) as never,
+    })
+    await plane.startMicrophone()
+    assert.equal(first.enabled, false, 'PTT au repos : rien ne part')
+    await plane.attach('b')
+    plane.setVoiceFilter('child')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(second.enabled, false, 'le silence se reporte sur la piste neuve')
+    plane.setTransmitting(true)
+    assert.equal(second.enabled, true, 'parler ensuite ouvre la piste qui est réellement envoyée')
+    assert.equal(first.enabled, false, 'l’ancienne piste ne sert plus de levier')
+    plane.close()
+  } finally {
+    nav.getUserMedia = original
+    restore()
+  }
+})
+
 test('apply après ouverture : comportement inchangé (applique immédiatement)', () => {
   const chains: FakeChain[] = []
   const { host } = hostWith(chains)

@@ -76,7 +76,9 @@ function harness(initial: VoiceFilterId = 'none'): Harness {
 describe('voice-filter — la voix neutre ne change rien au chemin du micro', () => {
   it('none : AUCUN nœud de recette, la source va directement à la destination', () => {
     const h = harness('none')
-    assert.equal(h.context.created.gains.length, 0, 'aucun gain créé pour une voix neutre')
+    const bridge = h.context.created.gains.filter((gain) => gain.gain.value === 1)
+    assert.equal(bridge.length, 1, 'la voix neutre n’ajoute qu’un pont, jamais un filtre')
+    assert.equal(h.context.created.gains.length, 1, 'aucun gain de recette pour une voix neutre')
     assert.equal(h.context.created.biquads.length, 0, 'aucun filtre créé pour une voix neutre')
     assert.equal(h.context.created.oscillators.length, 0, 'aucun oscillateur pour une voix neutre')
     assert.equal(h.context.created.shapers.length, 0)
@@ -342,5 +344,36 @@ describe('voice-filter — createMediaStreamSource exige un MediaStream natif (a
     assert.equal(addTrackCalls, 0, 'le flux capté n’est pas écrit')
     assert.equal(micStream.getAudioTracks().length, 1)
     chain.close()
+  })
+})
+
+describe('voice-filter — changer de voix ne débranche pas la piste envoyée', () => {
+  function reaches(from: FakeAudioNode, target: FakeAudioNode, seen = new Set<FakeAudioNode>()): boolean {
+    if (from === target) return true
+    if (seen.has(from)) return false
+    seen.add(from)
+    return from.outgoing.some((next) => next instanceof FakeAudioNode && reaches(next, target, seen))
+  }
+
+  it('le pont vers la destination survit à none, femme et robot, et la piste reste la même', () => {
+    const h = harness('none')
+    const destination = h.context.created.destinations[0]
+    const source = h.context.created.sources[0]
+    assert.ok(destination !== undefined && source !== undefined)
+    const track = h.chain.track
+    const bridge = h.context.created.gains.find((gain) => gain.outgoing.includes(destination))
+    assert.ok(bridge !== undefined, 'un gain permanent aboutit à la destination')
+    assert.equal(reaches(source, bridge), true, 'la voix neutre alimente le pont')
+
+    h.chain.applyFilter('woman')
+    h.chain.applyFilter('robot')
+    h.chain.applyFilter('none')
+
+    assert.equal(h.chain.track, track, 'la piste envoyée ne change pas d’identité')
+    assert.equal(h.context.created.destinations.length, 1)
+    assert.equal(bridge.disconnectCalls, 0, 'le pont n’est jamais débranché par un changement de voix')
+    assert.ok(bridge.outgoing.includes(destination))
+    assert.equal(reaches(source, bridge), true, 'après les changements, le micro alimente encore le pont')
+    h.chain.close()
   })
 })
