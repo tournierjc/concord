@@ -32,11 +32,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  ADULT_MAN_FORMANTS,
-  CHILD_FORMANTS,
-  DEEP_FORMANTS,
   FILTER_NODE_KINDS,
-  FORMANT_WEIGHTS,
   RADIO_DRIVE,
   RADIO_HIGHPASS_HZ,
   RADIO_LOWPASS_HZ,
@@ -45,7 +41,7 @@ import {
   ROBOT_COMB_DELAY_SEC,
   ROBOT_COMB_FEEDBACK,
   ROBOT_RING_DEPTH,
-  TIMBRE_DRY_GAIN,
+  VOICE_FILTER_FORMANT_SCALES,
   VOICE_FILTER_IDS,
   VOICE_FILTER_PITCH_RATIOS,
   WOMAN_FORMANTS,
@@ -55,6 +51,8 @@ import {
   ringModulate,
   softClipCurve,
   softClipSample,
+  voiceFilterCharacter,
+  voiceFilterFormantScale,
   voiceFilterFormants,
   voiceFilterPitchRatio,
   voiceFilterRecipeFor,
@@ -260,22 +258,13 @@ describe('voice-filters — radio : les trois bornes du talkie', () => {
   })
 })
 
-describe('voice-filters — les timbres : des formants parallèles, pas des filtres en série', () => {
+describe('voice-filters — femme, enfant, géant : hauteur et formants indépendants', () => {
   for (const id of ['deep', 'man', 'woman', 'child'] as const) {
-    it(`${id} : trois résonateurs HORS chaîne, chacun sommée après un maillon de chaîne`, () => {
+    it(`${id} : pas de formants parallèles (ils figeaient la voix masculine)`, () => {
       const recipe = voiceFilterRecipeFor(id)
-      assert.equal(recipe.parallel, true, `${id} est une fourche (entrée → chaîne ET résonateurs)`)
-      const branches = recipe.formants
-      assert.ok(branches !== undefined && branches.length === 3, `${id} : trois formants`)
-      for (const branch of branches) {
-        assert.ok(!recipe.chain.includes(branch.resonatorIndex), `${id} : résonateur ${branch.resonatorIndex} dans la chaîne — il serait en série`)
-        assert.ok(recipe.chain.includes(branch.afterChainIndex), `${id} : le point de sommation ${branch.afterChainIndex} n’est pas un maillon de chaîne`)
-        assert.ok(branch.resonatorIndex > branch.afterChainIndex, `${id} : un résonateur se somme APRÈS son maillon`)
-        const node = recipe.nodes[branch.resonatorIndex]
-        assert.equal(node?.['kind'], 'bandpass')
-        assert.equal(typeof node?.['gain'], 'number', `${id} : le poids du formant est porté par son gain`)
-        assert.equal(typeof node?.['q'], 'number', `${id} : un résonateur sans Q est un filtre ordinaire`)
-      }
+      assert.equal(recipe.formants, undefined)
+      assert.equal(recipe.parallel, undefined)
+      assert.ok(recipe.chain.length >= 2)
     })
 
     it(`${id} : la hauteur est celle promise, et le ratio correspond aux demi-tons`, () => {
@@ -283,19 +272,39 @@ describe('voice-filters — les timbres : des formants parallèles, pas des filt
       assert.equal(ratio, VOICE_FILTER_PITCH_RATIOS[id])
       assert.ok(ratio !== 1, `${id} décale la hauteur`)
       assert.equal(voiceFilterShiftsPitch(id), true)
-      // Le ratio est bien un nombre de demi-tons (2^(n/12)), à l’arrondi de la table près.
       const semitones = 12 * Math.log2(ratio)
       assert.ok(Math.abs(semitones - Math.round(semitones)) < 0.01, `${id} : ratio hors tempérament (${semitones})`)
+      assert.equal(voiceFilterFormantScale(id), VOICE_FILTER_FORMANT_SCALES[id])
     })
   }
 
-  it('les formants MONTENT de deep à child (c’est ce qui fait une femme, pas un chipmunk)', () => {
-    assert.ok(DEEP_FORMANTS.f2 < ADULT_MAN_FORMANTS.f2)
-    assert.ok(ADULT_MAN_FORMANTS.f2 < WOMAN_FORMANTS.f2)
-    assert.ok(WOMAN_FORMANTS.f2 < CHILD_FORMANTS.f2)
-    for (const pair of [DEEP_FORMANTS, ADULT_MAN_FORMANTS, WOMAN_FORMANTS, CHILD_FORMANTS]) {
-      assert.ok(pair.f1 < pair.f2 && pair.f2 < pair.f3, 'F1 < F2 < F3')
-    }
+  it('femme +7..+10 demi-tons, enfant +10..+12, géant −12..−10', () => {
+    const semis = (id: 'deep' | 'woman' | 'child') => 12 * Math.log2(voiceFilterPitchRatio(id))
+    assert.ok(semis('woman') >= 7 && semis('woman') <= 10)
+    assert.ok(semis('child') >= 10 && semis('child') <= 12)
+    assert.ok(semis('deep') <= -10 && semis('deep') >= -12)
+  })
+
+  it('les échelles de formants écartent le géant, la femme et l’enfant', () => {
+    assert.ok(voiceFilterFormantScale('deep') >= 0.75 && voiceFilterFormantScale('deep') <= 0.8)
+    assert.ok(voiceFilterFormantScale('woman') >= 1.15 && voiceFilterFormantScale('woman') <= 1.2)
+    assert.ok(voiceFilterFormantScale('child') >= 1.3 && voiceFilterFormantScale('child') <= 1.4)
+    assert.ok(voiceFilterFormantScale('deep') < voiceFilterFormantScale('man'))
+    assert.ok(voiceFilterFormantScale('man') < 1)
+    assert.ok(voiceFilterFormantScale('woman') < voiceFilterFormantScale('child'))
+  })
+
+  it('le caractère du géant grave et celui de la femme/enfant éclaircit', () => {
+    const giant = voiceFilterCharacter('deep')
+    const woman = voiceFilterCharacter('woman')
+    const child = voiceFilterCharacter('child')
+    assert.ok(giant !== null && woman !== null && child !== null)
+    assert.equal(woman.highpassHz, 150)
+    assert.equal(child.highpassHz, 150)
+    assert.ok(woman.tilt > 0 && child.tilt > woman.tilt)
+    assert.ok(giant.lowShelf > 0 && giant.subharmonic > 0)
+    assert.equal(voiceFilterCharacter('robot'), null)
+    assert.equal(voiceFilterCharacter('none'), null)
   })
 
   it('la hauteur DESCEND pour deep/man et MONTE pour woman/child', () => {
@@ -305,33 +314,13 @@ describe('voice-filters — les timbres : des formants parallèles, pas des filt
     assert.ok(voiceFilterPitchRatio('woman') < voiceFilterPitchRatio('child'))
   })
 
-  it('les formants DOMINENT le résidu sec (le mélange n’est pas presque sec)', () => {
-    for (const w of [FORMANT_WEIGHTS.f1, FORMANT_WEIGHTS.f2, FORMANT_WEIGHTS.f3]) {
-      assert.ok(w > TIMBRE_DRY_GAIN, `formant ${w} ≤ résidu sec ${TIMBRE_DRY_GAIN}`)
-      assert.ok(w <= 1, `poids > 1 : ${w}`)
-    }
-    const sum = FORMANT_WEIGHTS.f1 + FORMANT_WEIGHTS.f2 + FORMANT_WEIGHTS.f3
-    assert.ok(sum > TIMBRE_DRY_GAIN * 4, `somme des formants ${sum} trop proche du sec`)
-    assert.ok(TIMBRE_DRY_GAIN < 0.25, 'le résidu sec doit rester minoritaire')
-    for (const id of ['deep', 'man', 'woman', 'child'] as const) {
-      const recipe = voiceFilterRecipeFor(id)
-      for (const branch of recipe.formants ?? []) {
-        const gain = recipe.nodes[branch.resonatorIndex]?.['gain']
-        assert.equal(gain, FORMANT_WEIGHTS.f1 === gain ? gain : gain, 'le poids est lu sur le nœud')
-        assert.ok(
-          gain === FORMANT_WEIGHTS.f1 || gain === FORMANT_WEIGHTS.f2 || gain === FORMANT_WEIGHTS.f3,
-          `poids ${String(gain)} hors table des formants`,
-        )
-      }
-    }
-  })
-
   it('voiceFilterFormants rend la table de la voix, et null pour les non-timbres', () => {
     assert.deepEqual(voiceFilterFormants('woman'), WOMAN_FORMANTS)
     for (const id of ['none', 'robot', 'radio'] as const) {
       assert.equal(voiceFilterFormants(id), null)
       assert.equal(voiceFilterShiftsPitch(id), false)
       assert.equal(voiceFilterPitchRatio(id), 1)
+      assert.equal(voiceFilterFormantScale(id), 1)
     }
   })
 })
