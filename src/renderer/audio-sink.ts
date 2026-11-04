@@ -13,6 +13,10 @@
  *      son fantôme ne persiste, et un retrait impossible n'empêche pas les autres.
  *   3. **Testable sans navigateur.** Aucun `document` en dur : l'hôte DOM est injecté, donc
  *      `node --test` vérifie création/destruction avec un faux DOM.
+ *   4. **Lecture par élément audio et `srcObject`**, jamais par `AudioContext.destination`. L'annulation
+ *      d'écho de Chromium prend sa référence sur le rendu de ces éléments (et sur le périphérique
+ *      choisi via `setSinkId`). Passer le distant dans le graphe Web Audio du micro lui retire
+ *      cette référence : l'écho revient.
  *
  * Aucune lecture réseau, aucune dépendance : ce fichier ne fait que du DOM.
  */
@@ -24,6 +28,8 @@ export interface SinkElement {
   setAttribute?(name: string, value: string): void;
   play?(): Promise<void> | void;
   remove?(): void;
+  /** Périphérique de sortie. Absent sur un faux DOM : l'appel est alors ignoré. */
+  setSinkId?(sinkId: string): Promise<void>;
 }
 
 /** Le peu de DOM nécessaire : créer un élément, l'ajouter, le retirer. */
@@ -53,6 +59,11 @@ export interface AudioSinkRegistry {
   list(): AudioSink[];
   /** Détruit tous les éléments (départ du salon). */
   clear(): void;
+  /**
+   * Périphérique de lecture. `null` ou `''` = défaut du système (on ne force pas un sink).
+   * Appliqué aux éléments déjà créés : l'AEC suit le rendu, donc le bon haut-parleur.
+   */
+  setOutputDevice(id: string | null): void;
 }
 
 /**
@@ -77,8 +88,25 @@ export function documentSinkHost(doc: DocumentLike): SinkHost {
   };
 }
 
-export function createAudioSinkRegistry(host: SinkHost): AudioSinkRegistry {
+function applySinkId(element: SinkElement, sinkId: string | null): void {
+  if (sinkId === null || sinkId.length === 0) return;
+  const setSinkId = element.setSinkId;
+  if (typeof setSinkId !== 'function') return;
+  try {
+    const pending = setSinkId.call(element, sinkId);
+    if (pending !== undefined && typeof pending.catch === 'function') {
+      void pending.catch(() => {
+        console.warn('[audio] setSinkId refusé : lecture sur le haut-parleur du système');
+      });
+    }
+  } catch {
+    // `setSinkId` absent ou synchrone et refusant : la lecture reste sur le défaut.
+  }
+}
+
+export function createAudioSinkRegistry(host: SinkHost, initialSinkId: string | null = null): AudioSinkRegistry {
   const sinks = new Map<string, AudioSink & { hasStream: boolean }>();
+  let sinkId = initialSinkId;
 
   function create(peerId: string): AudioSink & { hasStream: boolean } {
     const element = host.createElement('audio');
@@ -89,6 +117,7 @@ export function createAudioSinkRegistry(host: SinkHost): AudioSinkRegistry {
     // visible, l'élément ne prend ni focus ni place à l'écran.
     element.setAttribute?.('playsinline', '');
     element.setAttribute?.('aria-hidden', 'true');
+    applySinkId(element, sinkId);
     host.append(element);
 
     const sink: AudioSink & { hasStream: boolean } = {
@@ -167,6 +196,10 @@ export function createAudioSinkRegistry(host: SinkHost): AudioSinkRegistry {
           console.warn('[audio] sortie non retirée du document', error);
         }
       }
+    },
+    setOutputDevice(id: string | null): void {
+      sinkId = id;
+      for (const sink of sinks.values()) applySinkId(sink.element, sinkId);
     },
   };
 }

@@ -15,8 +15,11 @@
  *   — `media` avec des types de média tous `audio` (le micro) ;
  *   — `media` **sans** type de média annoncé : traité comme une demande de micro, seul média que
  *     cette application demande jamais (aucun appel `getUserMedia` du dépôt ne demande `video`).
+ *   — `speaker-selection` : choisir le haut-parleur (`setSinkId`). Sans elle, la lecture
+ *     reste sur le périphérique par défaut pendant que le réglage en promet un autre, et
+ *     l'annulation d'écho se cale sur le mauvais rendu.
  * Tout le reste — `geolocation`, `notifications`, `clipboard-*`, `usb`, `serial`, `hid`,
- * `display-capture`, `midi`, `fullscreen`, `openExternal`, `mediaKeySystem`, `speaker-selection`,
+ * `display-capture`, `midi`, `fullscreen`, `openExternal`, `mediaKeySystem`,
  * `window-management`, `idle-detection`, `storage-access`, `keyboardLock`, `pointerLock`,
  * `fileSystem`, `unknown` — est refusé sans consulter personne.
  */
@@ -42,6 +45,7 @@ export function isPermissionAllowed(
   permission: string,
   mediaTypes?: readonly string[],
 ): boolean {
+  if (permission === 'speaker-selection') return true;
   if (permission !== 'media') return false;
   return allMediaTypesAllowed(mediaTypes);
 }
@@ -56,6 +60,7 @@ export function isPermissionAllowed(
  * impossible à mesurer ici (aucun binaire Electron exécutable), donc on ne le prend pas.
  */
 export function isPermissionCheckAllowed(permission: string, mediaType?: string): boolean {
+  if (permission === 'speaker-selection') return true;
   if (permission !== 'media') return false;
   return mediaType !== 'video';
 }

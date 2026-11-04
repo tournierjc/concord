@@ -27,7 +27,7 @@ import {
 } from '../shell/settings-schema';
 import { isValidAccelerator, normalizeAccelerator } from '../shell/settings-schema';
 import { VOICE_FILTER_IDS } from '../engine/rtc/voice-filters.ts';
-import { currentVoiceFilter, setVoiceFilter } from './voice.ts';
+import { configureVoiceProcessing, currentVoiceFilter, reapplyCaptureProcessing, setOutputDevice, setVoiceFilter } from './voice.ts';
 import {
   MIC_CHECK_SPEAKING_RMS,
   micCheckSnapshot,
@@ -301,7 +301,11 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
             <select
               className="input"
               value={settings.audio.outputDeviceId ?? ''}
-              onChange={(event) => audioPatch({ outputDeviceId: event.target.value || null })}
+              onChange={(event) => {
+                const outputDeviceId = event.target.value || null
+                audioPatch({ outputDeviceId })
+                setOutputDevice(outputDeviceId)
+              }}
             >
               <option value="">{t('settings.audio.systemDefault')}</option>
               {outputs.map((device, index) => (
@@ -317,7 +321,15 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
             <input
               type="checkbox"
               checked={settings.audio.noiseSuppression}
-              onChange={(event) => audioPatch({ noiseSuppression: event.target.checked })}
+              onChange={(event) => {
+                const noiseSuppression = event.target.checked
+                audioPatch({ noiseSuppression })
+                reapplyCaptureProcessing({
+                  echoCancellation: settings.audio.echoCancellation,
+                  noiseSuppression,
+                  autoGainControl: false,
+                })
+              }}
             />
             <span className="field__label">{t('settings.audio.rnnoise')}</span>
             <span className="field__help">{t('settings.audio.rnnoiseHelp')}</span>
@@ -327,13 +339,39 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
             <input
               type="checkbox"
               checked={settings.audio.echoCancellation}
-              onChange={(event) => audioPatch({ echoCancellation: event.target.checked })}
+              onChange={(event) => {
+                const echoCancellation = event.target.checked
+                audioPatch({ echoCancellation })
+                reapplyCaptureProcessing({
+                  echoCancellation,
+                  noiseSuppression: settings.audio.noiseSuppression,
+                  autoGainControl: false,
+                })
+              }}
             />
             <span className="field__label">{t('settings.audio.aec')}</span>
             <span className="field__help">{t('settings.audio.aecHelp')}</span>
           </label>
 
           {/* Ducking (2026-11-01) : un seul interrupteur, activé par défaut — rien à régler. */}
+          <label className="field field--inline">
+            <input
+              type="checkbox"
+              checked={settings.audio.noiseGate}
+              onChange={(event) => {
+                const noiseGate = event.target.checked
+                audioPatch({ noiseGate })
+                configureVoiceProcessing({
+                  noiseGate,
+                  noiseGateThresholdDb: settings.talk.vadThresholdDb,
+                  inputGain: settings.audio.inputGain,
+                })
+              }}
+            />
+            <span className="field__label">{t('settings.audio.noiseGate')}</span>
+            <span className="field__help">{t('settings.audio.noiseGateHelp')}</span>
+          </label>
+
           <label className="field field--inline">
             <input
               type="checkbox"
@@ -400,7 +438,15 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
               max={2}
               step={0.05}
               value={settings.audio.inputGain}
-              onChange={(event) => audioPatch({ inputGain: Number(event.target.value) })}
+              onChange={(event) => {
+                const inputGain = Number(event.target.value)
+                audioPatch({ inputGain })
+                configureVoiceProcessing({
+                  inputGain,
+                  noiseGate: settings.audio.noiseGate,
+                  noiseGateThresholdDb: settings.talk.vadThresholdDb,
+                })
+              }}
             />
           </label>
 
@@ -505,7 +551,15 @@ export function SettingsPanel({ settings, locale, session, lobbyStatus, onChange
               step={1}
               value={settings.talk.vadThresholdDb}
               disabled={settings.talk.mode !== 'vad'}
-              onChange={(event) => talkPatch({ vadThresholdDb: Number(event.target.value) })}
+              onChange={(event) => {
+                const vadThresholdDb = Number(event.target.value)
+                talkPatch({ vadThresholdDb })
+                configureVoiceProcessing({
+                  noiseGateThresholdDb: vadThresholdDb,
+                  noiseGate: settings.audio.noiseGate,
+                  inputGain: settings.audio.inputGain,
+                })
+              }}
             />
             <span className="field__help">{t('settings.vad.help')}</span>
           </label>

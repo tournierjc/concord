@@ -61,7 +61,7 @@ import {
 import { PEER_LEVELS, peerSpeaking } from './participant-state.ts';
 import { createSpeakingRelay, type SpeakingRelay } from './speaking-relay.ts';
 import { buildMicrophoneConstraints } from '../engine/rtc/media-config.ts';
-import { createVoiceFilterChain, type FilterAudioContext } from './voice-filter.ts';
+import { createVoiceFilterChain, type FilterAudioContext, type VoiceProcessOptions } from './voice-filter.ts';
 import { DEFAULT_VAD_CONFIG } from '../engine/vad.ts';
 import type { Settings } from '../shell/settings-schema';
 import { VOICE_FILTER_IDS, type VoiceFilterId } from '../engine/rtc/voice-filters.ts';
@@ -211,17 +211,38 @@ function describeError(error: unknown): string {
 /* Haut-parleur : un <audio> par pair                                  */
 /* ------------------------------------------------------------------ */
 
-function createSinks(): AudioSinkRegistry {
+function createSinks(outputDeviceId: string | null): AudioSinkRegistry {
   const doc = typeof document === 'undefined' ? null : document;
   if (doc === null || doc.body === null || doc.body === undefined) {
     // Aucun DOM (test de fumée, document détaché) : registre inerte, jamais une exception.
-    return createAudioSinkRegistry({
-      createElement: () => ({ srcObject: null, autoplay: true }),
-      append: () => undefined,
-      remove: () => undefined,
-    });
+    return createAudioSinkRegistry(
+      {
+        createElement: () => ({ srcObject: null, autoplay: true }),
+        append: () => undefined,
+        remove: () => undefined,
+      },
+      outputDeviceId,
+    );
   }
-  return createAudioSinkRegistry(documentSinkHost(doc));
+  return createAudioSinkRegistry(documentSinkHost(doc), outputDeviceId);
+}
+
+/**
+ * Réglages du graphe (gain, porte), relus à chaque reconstruction. L'objet est
+ * stable : `configureVoiceProcessing` le mute, la fabrique le ferme.
+ */
+const voiceProcess: VoiceProcessOptions = {
+  inputGain: 1,
+  noiseGate: true,
+  noiseGateThresholdDb: -40,
+};
+
+function syncVoiceProcess(settings: VoiceSettings | undefined): void {
+  const audio = settings?.audio;
+  const talk = settings?.talk;
+  if (typeof audio?.inputGain === 'number') voiceProcess.inputGain = audio.inputGain;
+  if (typeof audio?.noiseGate === 'boolean') voiceProcess.noiseGate = audio.noiseGate;
+  if (typeof talk?.vadThresholdDb === 'number') voiceProcess.noiseGateThresholdDb = talk.vadThresholdDb;
 }
 
 function publishPeers(state: LinkState): void {
@@ -758,10 +779,11 @@ export function openVoice(
   if (session !== null) closeVoice();
 
   publish({ status: 'starting', error: null, level: 0, transmitting: false, peers: [], link: null });
+  syncVoiceProcess(settings);
 
   const link: LinkState = {
     peers: new Map<string, VoicePeer>(),
-    sinks: createSinks(),
+    sinks: createSinks(settings?.audio?.outputDeviceId ?? null),
     link: null,
     unattributed: 0,
     // `localId` est toujours une identité de soi ; l'appelant peut en ajouter (l'id serveur de
@@ -793,7 +815,7 @@ export function openVoice(
         ? {}
         : { voiceFilter: settings.audio.voiceFilter }),
       voiceChainFactory: (context, stream, voice) =>
-        createVoiceFilterChain(context as FilterAudioContext, stream, voice),
+        createVoiceFilterChain(context as FilterAudioContext, stream, voice, voiceProcess),
       send: (message) => {
         emitSignal(message);
       },
@@ -922,6 +944,45 @@ export function setVoiceFilter(id: VoiceFilterId): boolean {
  * du registre. `null` = aucune session ouverte — le test du micro retombe alors sur le registre
  * (c'est l'intention que `openVoice` appliquera, et il n'y a rien de plus vrai à mesurer).
  */
+/**
+ * Gain, porte de bruit, seuil : appliqués au graphe en vol (la voix courante est
+ * reconstruite). Hors salon, la prochaine ouverture lira ces valeurs.
+ */
+export function configureVoiceProcessing(options: VoiceProcessOptions): void {
+  if (typeof options.inputGain === 'number') voiceProcess.inputGain = options.inputGain;
+  if (typeof options.noiseGate === 'boolean') voiceProcess.noiseGate = options.noiseGate;
+  if (typeof options.noiseGateThresholdDb === 'number') {
+    voiceProcess.noiseGateThresholdDb = options.noiseGateThresholdDb;
+  }
+  const current = session;
+  if (current === null) return;
+  const id = current.wire.plane.voiceFilter();
+  if (id !== null) current.wire.plane.setVoiceFilter(id);
+}
+
+/**
+ * EC / NS / AGC sur la capture déjà ouverte. Le périphérique, lui, attend une
+ * nouvelle session (`getUserMedia`).
+ */
+export function reapplyCaptureProcessing(audio: {
+  echoCancellation?: boolean;
+  noiseSuppression?: boolean;
+  autoGainControl?: boolean;
+  inputGain?: number;
+  inputDeviceId?: string | null;
+}): void {
+  const current = session;
+  if (current === null) return;
+  void current.wire.plane.applyCaptureConstraints(buildMicrophoneConstraints(audio));
+}
+
+/** Haut-parleur de lecture des pairs. L'AEC s'aligne sur CE périphérique, pas sur un autre. */
+export function setOutputDevice(id: string | null): void {
+  const current = session;
+  if (current === null) return;
+  current.link.sinks.setOutputDevice(id);
+}
+
 export function currentVoiceFilter(): VoiceFilterId | null {
   const current = session;
   if (current === null) return null;

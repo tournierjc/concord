@@ -23,6 +23,8 @@ import { describe, it } from 'node:test';
 import {
   MIC_CONSTRAINTS,
   buildMicrophoneConstraints,
+  captureProcessingMismatches,
+  toMediaTrackConstraints,
   type MicrophoneSettingsLike,
 } from '../src/engine/rtc/media-config.ts';
 import { createMediaPlane } from '../src/engine/rtc/media-plane.ts';
@@ -32,14 +34,14 @@ import { installFakeDom, type FakeDom } from './fake-rtc.ts';
 /* ---------------------------------------------------- 1. la fabrique pure ---- */
 
 describe('buildMicrophoneConstraints — réglages → facettes de capture (SPEC-019 avenant 2026-11-02)', () => {
-  it('réglages absents : défauts du moteur (mono, EC/AGC actifs, NS ÉTEINTE — RNNoise, pas de facette)', () => {
+  it('réglages absents : défauts du moteur (mono, EC et NS demandés, AGC coupé)', () => {
     assert.deepEqual(buildMicrophoneConstraints(undefined), {
       channelCount: 1,
       echoCancellation: true,
-      // NS éteinte par défaut (2026-11-02) : RNNoise se calibre sur le silence du PTT et
-      // tue la détection de voix à la réactivation.
-      noiseSuppression: false,
-      autoGainControl: true,
+      // NS allumée : le PTT ne coupe plus la capture, RNNoise ne se cale plus sur le silence.
+      noiseSuppression: true,
+      // Un seul gain, celui du graphe. L'AGC navigateur pomperait contre lui.
+      autoGainControl: false,
     });
   });
 
@@ -63,6 +65,15 @@ describe('buildMicrophoneConstraints — réglages → facettes de capture (SPEC
     // `0` est une valeur LÉGITIME (micro coupé), pas une absence.
     assert.equal(buildMicrophoneConstraints({ inputGain: 0 }).gain, 0);
   });
+
+  it('getSettings contraire à la demande est un écart ; un champ absent n’en est pas un', () => {
+    const requested = buildMicrophoneConstraints(undefined);
+    assert.deepEqual(
+      captureProcessingMismatches(requested, { echoCancellation: false, noiseSuppression: true, autoGainControl: false }),
+      ['echoCancellation demandé=true obtenu=false'],
+    );
+    assert.deepEqual(captureProcessingMismatches(requested, {}), []);
+  });
 });
 
 /* ------------------------------- 2. le plan média reçoit les facettes ---- */
@@ -85,12 +96,12 @@ describe('createMediaPlane — les facettes réglées arrivent à getUserMedia',
       const constraints = gumConstraintsOf(dom);
       assert.ok(constraints !== undefined, 'getUserMedia a été appelé');
       const audio = constraints?.['audio'];
-      assert.deepEqual(audio, {
+      assert.deepEqual(audio, toMediaTrackConstraints({
         channelCount: MIC_CONSTRAINTS.channelCount,
         echoCancellation: true,
-        noiseSuppression: false,
-        autoGainControl: true,
-      });
+        noiseSuppression: true,
+        autoGainControl: false,
+      }));
       plane.close();
     } finally {
       dom.restore();
@@ -114,10 +125,10 @@ describe('createMediaPlane — les facettes réglées arrivent à getUserMedia',
       await plane.startMicrophone();
       const audio = gumConstraintsOf(dom)?.['audio'];
       assert.deepEqual(audio, {
-        channelCount: 1,
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: true,
+        channelCount: { ideal: 1 },
+        echoCancellation: { ideal: false },
+        noiseSuppression: { ideal: false },
+        autoGainControl: { ideal: true },
         deviceId: 'périphérique-casque',
       });
       plane.close();

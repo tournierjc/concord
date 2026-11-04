@@ -326,6 +326,15 @@ test('resolveDisplayName : borne à 32 points de code, sans casser une paire de 
 
 // --- voiceFilter (filtres vocaux, 2026-11-03, demande JC) --------------------------------------
 
+test('noiseGate : absent d’un fichier antérieur ⇒ true (la porte est le défaut, rétro-compat)', () => {
+  const sans = JSON.parse(JSON.stringify(defaultSettings())) as Record<string, unknown>
+  delete (sans['audio'] as Record<string, unknown>)['noiseGate']
+  const parsed = parseSettings(sans)
+  assert.equal(parsed.ok, true)
+  if (!parsed.ok) return
+  assert.equal(parsed.value.audio.noiseGate, true)
+})
+
 test('voiceFilter : absent d’un fichier antérieur ⇒ « none » (la voix historique, rétro-compat)', () => {
   // Un settings.json écrit avant le 2026-11-03 n’a pas la clé : parseSettings ne doit ni
   // refuser le fichier ni inventer une voix — `none` = aucun nœud de filtre (non-régression).

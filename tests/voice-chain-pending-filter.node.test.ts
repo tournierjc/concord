@@ -133,6 +133,55 @@ test('plan média : clic AVANT startMicrophone puis ouverture — la voix du pre
   }
 })
 
+test('plan média : un changement de voix en cours d’appel replaceTrack sur chaque pair, jamais le micro brut', async () => {
+  const restore = installStubs()
+  FakePeerConnection.reset()
+  const mic = new FakeTrack('micro-brut')
+  const filtered = new FakeTrack('filtre')
+  const nav = globalThis.navigator.mediaDevices
+  const original = nav.getUserMedia.bind(nav)
+  nav.getUserMedia = async () => new FakeMediaStream([mic]) as unknown as MediaStream
+  try {
+    const plane = createMediaPlane({
+      localId: 'a',
+      timers: timers(),
+      onLocalCandidate: () => {},
+      voiceFilter: 'robot',
+      voiceChainFactory: ((_ctx: unknown, _stream: MediaStream, id: VoiceFilterId) => {
+        const chain = new FakeChain(filtered as unknown as MediaStreamTrack)
+        chain.current = id
+        return chain
+      }) as never,
+    })
+    await plane.startMicrophone()
+    assert.equal(mic.enabled, true, 'la capture reste ouverte (AEC / RNNoise)')
+    assert.equal(filtered.enabled, false, 'le push-to-talk coupe la piste envoyée')
+    await plane.attach('b')
+    await plane.attach('c')
+    const peers = FakePeerConnection.instances
+    assert.equal(peers.length, 2)
+    for (const peer of peers) {
+      assert.equal(peer.senders[0]?.track, filtered, 'addTrack reçoit la piste filtrée')
+      assert.notEqual(peer.senders[0]?.track, mic, 'le micro brut ne part pas')
+    }
+    plane.setVoiceFilter('radio')
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    for (const peer of peers) {
+      const sender = peer.senders[0]
+      assert.ok(sender !== undefined)
+      assert.ok(sender.replaceTrackCalls >= 1, 'chaque pair reçoit replaceTrack')
+      assert.equal(sender.track, filtered, 'replaceTrack garde la destination filtrée')
+      assert.notEqual(sender.track, mic)
+    }
+    assert.equal(mic.enabled, true, 'changer de voix ne coupe pas la capture')
+    assert.equal(plane.voiceFilter(), 'radio')
+    plane.close()
+  } finally {
+    nav.getUserMedia = original
+    restore()
+  }
+})
+
 test('apply après ouverture : comportement inchangé (applique immédiatement)', () => {
   const chains: FakeChain[] = []
   const { host } = hostWith(chains)

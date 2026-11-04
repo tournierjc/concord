@@ -170,14 +170,10 @@ describe('mic-check — la capture porte les réglages du registre', () => {
     await startMicCheck(settings, r.port)
     const audio = r.getUserMediaCalls[0]?.audio
     assert.equal(typeof audio === 'object' && audio !== null ? Reflect.get(audio, 'deviceId') : undefined, 'mic-42')
-    assert.equal(
-      typeof audio === 'object' && audio !== null ? Reflect.get(audio, 'noiseSuppression') : undefined,
-      true,
-    )
-    assert.equal(
-      typeof audio === 'object' && audio !== null ? Reflect.get(audio, 'echoCancellation') : undefined,
-      false,
-    )
+    const noise = typeof audio === 'object' && audio !== null ? Reflect.get(audio, 'noiseSuppression') : undefined
+    const echo = typeof audio === 'object' && audio !== null ? Reflect.get(audio, 'echoCancellation') : undefined
+    assert.deepEqual(noise, { ideal: true })
+    assert.deepEqual(echo, { ideal: false })
     stopMicCheck()
   })
 

@@ -29,9 +29,9 @@
  */
 
 import { browserBeat, type RendererBeat } from './browser-beat.ts';
-import { buildMicrophoneConstraints } from '../engine/rtc/media-config.ts';
+import { buildMicrophoneConstraints, toMediaTrackConstraints } from '../engine/rtc/media-config.ts';
 import { createVoiceFilterChain } from './voice-filter.ts';
-import type { AnalyserLike, FilterAudioContext, FilterStreamLike, VoiceFilterChain } from './voice-filter.ts';
+import type { AnalyserLike, FilterAudioContext, FilterStreamLike, VoiceFilterChain, VoiceProcessOptions } from './voice-filter.ts';
 import type { VoiceFilterId } from '../engine/rtc/voice-filters.ts';
 import type { Settings } from '../shell/settings-schema';
 
@@ -137,6 +137,7 @@ export interface MicCheckPort {
     context: FilterAudioContext,
     stream: FilterStreamLike,
     initial: VoiceFilterId,
+    process?: VoiceProcessOptions,
   ) => VoiceFilterChain;
   /** Le port de cadence (production : `browserBeat()` ; test : pompe manuelle). */
   readonly makeBeat?: () => RendererBeat;
@@ -223,22 +224,18 @@ export async function startMicCheck(
   const voice = appliedVoiceFilter ?? settings.audio.voiceFilter ?? 'none';
   try {
     const stream = await port.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: requested.echoCancellation,
-        noiseSuppression: requested.noiseSuppression,
-        autoGainControl: requested.autoGainControl,
-        ...(typeof requested.deviceId === 'string' && requested.deviceId !== ''
-          ? { deviceId: requested.deviceId }
-          : {}),
-      },
+      audio: toMediaTrackConstraints(requested),
     });
     const context = port.createAudioContext();
     // Resume avant toute fabrication : un contexte SUSPENDU rend un RMS FIGÉ (le piège RMS du repo).
     void context.resume?.();
     // La MÊME chaîne que la session (mêmes recettes, mêmes poids de formants). La différence est
     // en AVAL : l'hôte d'audition porte la piste vers les HP, pas un connect brut.
-    const chain = port.buildChain(context, stream, voice);
+    const chain = port.buildChain(context, stream, voice, {
+      inputGain: gain,
+      noiseGate: settings.audio.noiseGate === true,
+      noiseGateThresholdDb: settings.talk.vadThresholdDb,
+    });
     const speakers = port.speakers ?? pageSpeakerHost;
     speakers.play(chain.track);
     // Capteur sur le micro BRUT : la barre prouve la CAPTURE, pas le rendu du filtre.

@@ -62,8 +62,14 @@ export interface AudioSettings {
   /** Suppression de bruit (RNNoise côté Chromium) — false par défaut : calibrée sur le
    * silence pendant le push-to-talk, elle tue la détection de voix à la réactivation. */
   noiseSuppression: boolean;
-  /** Annulation d'écho — true par défaut ; l'état réel est relu dans l'UI (A12). */
+  /** Annulation d'écho — true par défaut. La demande part en `{ ideal }` ; `getSettings()` est journalisé. */
   echoCancellation: boolean;
+  /**
+   * Porte de bruit dans le graphe, AVANT le filtre vocal (2026-11-04). `true` par défaut.
+   * Absente d'un fichier antérieur ⇒ `true` : le fond sous `talk.vadThresholdDb` ne part pas.
+   * Distinct de `noiseSuppression` (RNNoise du navigateur, sur la capture).
+   */
+  noiseGate: boolean;
   /** Gain d'entrée, 0..2 (1 = neutre). */
   inputGain: number;
   /**
@@ -210,8 +216,9 @@ export function defaultSettings(): Settings {
     audio: {
       inputDeviceId: null,
       outputDeviceId: null,
-      noiseSuppression: false,
+      noiseSuppression: true,
       echoCancellation: true,
+      noiseGate: true,
       inputGain: 1,
       // Voix historique : AUCUN filtre, AUCUN nœud dans le graphe micro (non-régression).
       voiceFilter: 'none',
@@ -578,6 +585,7 @@ const AUDIO_KEYS = [
   'outputDeviceId',
   'noiseSuppression',
   'echoCancellation',
+  'noiseGate',
   'inputGain',
   'voiceFilter',
   'duckOthers',
@@ -805,6 +813,8 @@ function validateV1(source: Dict): SettingsResult {
     outputDeviceId: readNullableString(ctx, audioSource, 'outputDeviceId', 'audio', 128),
     noiseSuppression: readBoolean(ctx, audioSource, 'noiseSuppression', 'audio'),
     echoCancellation: readBoolean(ctx, audioSource, 'echoCancellation', 'audio'),
+    // Rétro-compat : absent ⇒ porte active (le fond ne part pas avec la voix).
+    noiseGate: readBooleanWithDefault(ctx, audioSource, 'noiseGate', 'audio', true),
     inputGain: readNumber(ctx, audioSource, 'inputGain', 'audio', { min: 0, max: 2 }),
     // Rétro-compat assumée : absent ⇒ 'none' (la voix historique, avant 2026-11-03).
     voiceFilter: readEnumWithDefault(ctx, audioSource, 'voiceFilter', 'audio', VOICE_FILTER_VALUES, 'none'),
