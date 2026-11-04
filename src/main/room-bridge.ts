@@ -177,12 +177,17 @@ export class RoomBridge {
    * à 8). Rend `true` seulement si la liste a réellement changé — un `peer-joined` rejoué ne doit
    * pas faire croire à une arrivée.
    */
-  addParticipant(participant: Omit<ParticipantDto, 'gain'> & { gain?: number }): boolean {
+  addParticipant(participant: Omit<ParticipantDto, 'gain' | 'avatarRef'> & { gain?: number; avatarRef?: string | null }): boolean {
     if (this.participants.some((entry) => entry.id === participant.id)) {
       const existing = this.participants.find((entry) => entry.id === participant.id);
       if (!existing) return false;
       let changed = false;
-      if (participant.avatarRef !== undefined && existing.avatarRef !== participant.avatarRef) {
+      if (participant.avatarRef === null) {
+        if (existing.avatarRef !== undefined) {
+          delete existing.avatarRef;
+          changed = true;
+        }
+      } else if (typeof participant.avatarRef === 'string' && existing.avatarRef !== participant.avatarRef) {
         existing.avatarRef = participant.avatarRef;
         changed = true;
       }
@@ -195,7 +200,10 @@ export class RoomBridge {
       return true;
     }
     if (this.participants.length >= IPC_MAX_PARTICIPANTS) return false;
-    this.participants.push({ gain: 1, ...participant });
+    const { avatarRef, ...rest } = participant;
+    const row: ParticipantDto = { gain: 1, ...rest };
+    if (typeof avatarRef === 'string') row.avatarRef = avatarRef;
+    this.participants.push(row);
     this.emitParticipants();
     this.emitRoomState();
     return true;

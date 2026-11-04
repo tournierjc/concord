@@ -37,7 +37,7 @@ import {
   type SocketLike,
 } from '../engine/net/local-signaling';
 import { isLanCandidate } from '../engine/rtc/ice-filter';
-import { isAvatarRef } from '../shell/avatar';
+import { isAvatarRef, normalizeIncomingAvatarRef } from '../shell/avatar';
 import { AVATAR_WIRE_BASE64_MAX_CHARS, encodeAvatarPngForWire, type AvatarStore } from './avatar-store';
 import { systemTimers, type MainTimers } from './timers';
 import { isOrchestratorAddress } from './discovery-bridge';
@@ -133,6 +133,11 @@ export interface SignalingLink {
    * demandeur côté hôte, aller-retour par le serveur côté client — appartient au lien.
    */
   answerAvatarGet(request: { from: string; to: string; avatarRef: string }, pngBase64: string | null): void;
+  /**
+   * Réannonce l'avatar aux pairs déjà dans le salon. `null` retire le dessin
+   * (retour aux initiales). Un lien pas encore connecté retient la valeur pour le `join`.
+   */
+  announceAvatar(avatarRef: string | null): void;
   close(detail?: string): void;
 }
 
@@ -397,7 +402,7 @@ export function fromWire(message: ServerMessage): SignalIn | null {
         kind: 'peer-joined',
         peerId: message.peer.peerId,
         name: message.peer.name,
-        ...(message.peer.avatarRef !== undefined ? { avatarRef: message.peer.avatarRef } : {}),
+        ...(typeof message.peer.avatarRef === 'string' ? { avatarRef: message.peer.avatarRef } : {}),
       };
     case 'leave':
       if (typeof message.peerId !== 'string') return null;
@@ -420,7 +425,7 @@ function isMessageObject(value: unknown): value is Record<string, unknown> {
 }
 
 /** Résumé de pair d'un `hello`/`join`, ou `null` si le champ n'en est pas un. */
-function asPeerSummary(value: unknown): { peerId: string; name: string; avatarRef?: string } | null {
+function asPeerSummary(value: unknown): { peerId: string; name: string; avatarRef?: string | null } | null {
   if (!isMessageObject(value)) return null;
   const peerId = value.peerId;
   if (typeof peerId !== 'string' || peerId.length === 0) return null;
@@ -429,12 +434,13 @@ function asPeerSummary(value: unknown): { peerId: string; name: string; avatarRe
   // Empreinte d'avatar (SPEC-002 amendement 2026-10-31) : soit absente, soit sous sa forme exacte.
   // Une chaîne arbitraire est une ligne HORS CONTRAT, pas une empreinte : la ligne entière tombe.
   const rawRef = value.avatarRef;
-  if (rawRef !== undefined && !isAvatarRef(rawRef)) return null;
-  return {
-    peerId,
-    name: typeof name === 'string' ? name : '',
-    ...(typeof rawRef === 'string' ? { avatarRef: rawRef } : {}),
-  };
+  const nameText = typeof name === 'string' ? name : '';
+  if (rawRef === undefined) return { peerId, name: nameText };
+  // `null` retire un avatar déjà annoncé. Une autre forme rejette la ligne.
+  if (rawRef === null) return { peerId, name: nameText, avatarRef: null };
+  const avatarRef = normalizeIncomingAvatarRef(rawRef);
+  if (avatarRef === null) return null;
+  return { peerId, name: nameText, avatarRef };
 }
 
 /**
@@ -464,7 +470,7 @@ export function parseServerLine(line: string): ServerMessage | null {
       if (typeof parsed.peerId !== 'string' || parsed.peerId.length === 0) return null;
       const rawPeers = parsed.peers;
       if (rawPeers !== undefined && !Array.isArray(rawPeers)) return null;
-      const peers: Array<{ peerId: string; name: string; avatarRef?: string }> = [];
+      const peers: Array<{ peerId: string; name: string; avatarRef?: string | null }> = [];
       for (const entry of rawPeers ?? []) {
         // Au-delà de la borne : la ligne entière est refusée, on n'en garde pas une moitié.
         if (peers.length >= MAX_PEERS_PER_HELLO) return null;
@@ -486,6 +492,13 @@ export function parseServerLine(line: string): ServerMessage | null {
       const peer = asPeerSummary(parsed.peer);
       if (peer === null) return null;
       return { type: 'join', peer };
+    }
+    case 'avatar_get': {
+      // Demande relayée par le serveur vers le propriétaire de l'image.
+      if (typeof parsed.from !== 'string' || parsed.from.length === 0) return null;
+      if (typeof parsed.to !== 'string' || parsed.to.length === 0) return null;
+      if (!isAvatarRef(parsed.avatarRef)) return null;
+      return { type: 'avatar_get', from: parsed.from, to: parsed.to, avatarRef: parsed.avatarRef };
     }
     case 'leave': {
       if (typeof parsed.peerId !== 'string' || parsed.peerId.length === 0) return null;
@@ -586,7 +599,9 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
   const role = options.role;
   const name = options.name.slice(0, 32);
   // Empreinte validée AVANT d'être annoncée : une forme douteuse compte comme « pas d'avatar ».
-  const avatarRef = typeof options.avatarRef === 'string' && isAvatarRef(options.avatarRef) ? options.avatarRef : undefined;
+  // Galerie (`fox`) ou empreinte (16 hex). `isAvatarRef` seul jetait les emoji :
+  // le join partait sans avatar, et les pairs ne voyaient que les initiales.
+  let announcedAvatar = normalizeIncomingAvatarRef(options.avatarRef) ?? undefined;
   const maxPeers = options.maxPeers;
   const timeoutMs = options.timeoutMs ?? CONNECT_TIMEOUT_MS;
   const timers = options.timers ?? systemTimers;
@@ -631,12 +646,14 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
     emitLink('refused', detail);
   }
 
-  function joinRequest(): string {
-    return JSON.stringify(
-      avatarRef === undefined
-        ? ({ type: 'join', name } satisfies ClientMessage)
-        : ({ type: 'join', name, avatarRef } satisfies ClientMessage),
-    );
+  function joinRequest(clearAvatar: boolean): string {
+    if (announcedAvatar !== undefined) {
+      return JSON.stringify({ type: 'join', name, avatarRef: announcedAvatar } satisfies ClientMessage);
+    }
+    if (clearAvatar) {
+      return JSON.stringify({ type: 'join', name, avatarRef: null } satisfies ClientMessage);
+    }
+    return JSON.stringify({ type: 'join', name } satisfies ClientMessage);
   }
 
   function handleServerRefuse(message: { code: string; reason: string }): void {
@@ -676,7 +693,7 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
           kind: 'peer-joined',
           peerId: peer.peerId,
           name: peer.name,
-          ...(peer.avatarRef !== undefined ? { avatarRef: peer.avatarRef } : {}),
+          ...(typeof peer.avatarRef === 'string' ? { avatarRef: peer.avatarRef } : {}),
         });
       }
       return;
@@ -692,6 +709,15 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
     }
     if (message.type === 'ice' && !isLanCandidate(candidateText(message.candidate))) {
       stats.filteredCandidates += 1;
+      return;
+    }
+    if (message.type === 'avatar_get') {
+      // C'est NOTRE image qu'on nous réclame. On répond depuis le magasin local.
+      try {
+        options.onAvatarGet?.({ from: message.from, to: message.to, avatarRef: message.avatarRef });
+      } catch {
+        // Un rappel qui lève ne ferme pas le salon : le demandeur retombe sur les initiales.
+      }
       return;
     }
     const incoming = fromWire(message);
@@ -744,7 +770,7 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
     });
     socket.on('connect', () => {
       timers.cancel(timer);
-      socket.write(`${joinRequest()}\n`);
+      socket.write(`${joinRequest(false)}\n`);
     });
     socket.on('error', (error: Error) => {
       timers.cancel(timer);
@@ -810,34 +836,9 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
           // honnête : le demandeur garde ses initiales. Si aucun magasin n'est injecté (tests,
           // fenêtre sans profil), `onAvatarGet` laisse la main au main — sans lien vivant, la
           // demande expirera côté demandeur, ce qui vaut aussi « initiales ».
-          ...(options.avatarStore === undefined && options.onAvatarGet === undefined
-            ? {}
-            : {
-                onEvent: (event) => {
-                  if (event.kind !== 'avatar-get' || event.avatarGet === undefined) return;
-                  const request = event.avatarGet;
-                  const store = options.avatarStore;
-                  if (store !== undefined) {
-                    try {
-                      const loaded = store.load(request.avatarRef);
-                      const pngBase64 = loaded.ok ? encodeAvatarPngForWire(loaded.data) : null;
-                      signaling?.answerAvatarGet(
-                        { from: request.from, to: selfId ?? '', avatarRef: request.avatarRef },
-                        pngBase64,
-                      );
-                    } catch {
-                      // Un répondant qui lève ne doit pas casser le serveur : pas de réponse vaut
-                      // « initiales » côté demandeur.
-                    }
-                    return;
-                  }
-                  try {
-                    options.onAvatarGet?.({ from: request.from, to: selfId ?? '', avatarRef: request.avatarRef });
-                  } catch {
-                    // Même règle : une exception remonte du callback ne doit jamais fermer le salon.
-                  }
-                },
-              }),
+          // L'hôte ne répond plus à la place des clients : le serveur transmet
+          // `avatar_get` au propriétaire, qui répond par sa propre socket. Répondre
+          // ici avec le magasin de l'hôte renvoyait `null` pour l'image d'un pair.
         });
         candidateServer.on('connection', (socket: Socket) => acceptIncoming(socket));
         boundHosts.add(host);
@@ -1051,14 +1052,19 @@ export function createSignalingLink(options: SignalingLinkOptions): SignalingLin
         return;
       }
       if (outbound === null || outbound.destroyed) return;
+      // Le serveur recopie cette réponse vers le demandeur (`request.from`).
       const wire = {
         type: 'avatar_data',
-        from: request.to,
         to: request.from,
         avatarRef: request.avatarRef,
         pngBase64,
-      } satisfies ServerMessage;
+      } satisfies ClientMessage;
       outbound.write(`${JSON.stringify(wire)}\n`);
+    },
+    announceAvatar(next: string | null): void {
+      announcedAvatar = normalizeIncomingAvatarRef(next) ?? undefined;
+      if (closed || outbound === null || outbound.destroyed) return;
+      outbound.write(`${joinRequest(next === null)}\n`);
     },
     close(detail?: string): void {
       if (closed) return;

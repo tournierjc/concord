@@ -35,7 +35,8 @@ import { installNetworkGuard } from './net-guard';
 import { hasRoutableNetwork } from './network-state';
 import { APP_SCHEME, SCHEME_SEP } from './net-schemes';
 import { linuxAudioBufferFrames, pulseLatencyMsec } from './audio-capture';
-import { preferX11Ozone, shouldShowOverlay } from './overlay-activation';
+import { preferX11Ozone, shouldKeepOverlay } from './overlay-activation';
+import { createFullscreenProbe } from './fullscreen-detect';
 import { OverlayController, listDisplays } from './overlay-controller';
 import { registerPushToTalk, releasePushToTalk, type PttRegistration } from './ptt';
 import { appUrl, registerAppProtocol, registerAppScheme } from './renderer-protocol';
@@ -146,7 +147,7 @@ let avatarStore: AvatarStore | null = null;
  * aucune trace sur le disque — seule MA propre image est stockée sous `userData/avatars/`.
  */
 const sessionAvatars = new Map<string, string>();
-const overlay = new OverlayController();
+const overlay = new OverlayController({ fullscreen: createFullscreenProbe() });
 const bridge = new RoomBridge(forwardBridgeEvent);
 // Santé courante de la découverte (mDNS) — mesurée par le bridge, lue par le pied de lobby.
 let discoveryHealth: DiscoveryHealth = 'ok';
@@ -917,7 +918,9 @@ function syncOverlayGeometry(): void {
   // The overlay floats above every other app: outside a room it has nothing to show, so it stays
   // hidden instead of printing "nobody here yet" over the user's desktop.
   const alive = mainWindow !== null && !mainWindow.isDestroyed();
-  const enabled = shouldShowOverlay({
+  // La fenêtre existe dès le salon. La sonde plein écran décide de l'afficher :
+  // sur le bureau elle reste cachée.
+  const enabled = shouldKeepOverlay({
     enabled: settings.overlay.enabled,
     inRoom: room.roomId !== null,
     appWindowAlive: alive,
@@ -1030,6 +1033,8 @@ function overlayPatchToSettings(patch: OverlayPatchPayload): unknown {
   if (patch.scale !== undefined) overlayUpdate['scale'] = patch.scale;
   if (patch.screenId !== undefined) overlayUpdate['screenId'] = patch.screenId;
   if (patch.position !== undefined) overlayUpdate['position'] = patch.position;
+  if (patch.placement !== undefined) overlayUpdate['placement'] = patch.placement;
+  if (patch.showWithoutDetection !== undefined) overlayUpdate['showWithoutDetection'] = patch.showWithoutDetection;
   return { overlay: overlayUpdate };
 }
 
@@ -1151,6 +1156,8 @@ function startSignalingLink(roomId: string, name: string, selfId: string, avatar
     // est fourni en plus : sans magasin injecté, la demande remonte au main plutôt que expirer.
     ...(avatarStore === null ? {} : { avatarStore }),
     onAvatarGet: (request) => {
+      // Seule NOTRE image : une demande visant un autre pair est transmise à son propriétaire.
+      if (signalingLink?.selfId !== null && request.to !== signalingLink?.selfId) return;
       if (!avatarStore) {
         signalingLink?.answerAvatarGet(request, null);
         return;
@@ -1293,9 +1300,11 @@ function registerIpcHandlers(): void {
       persist(result.value);
       // `persist` a déjà publié l'événement `settings-changed` — l'annuaire local est aligné APRÈS,
       // et la publication de l'annuaire suit : le renderer reçoit l'événement réglages, puis un
-      // annuaire cohérent avec lui. Les pairs déjà connectés apprendront le nouvel avatar au
-      // prochain `join` — un `join` est l'annonce de l'identité, pas un flux continu.
-      bridge.setSelfAvatar(avatarRefForJoin(settings.avatar) ?? null);
+      // annuaire cohérent avec lui. Les pairs déjà connectés reçoivent le nouvel avatar tout de
+      // suite (`announceAvatar`), pas au prochain salon.
+      const nextAvatar = avatarRefForJoin(settings.avatar) ?? null;
+      bridge.setSelfAvatar(nextAvatar);
+      signalingLink?.announceAvatar(nextAvatar);
       return settings;
     },
     [IPC.settingsOpen]: () => {

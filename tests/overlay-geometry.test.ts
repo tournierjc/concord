@@ -23,6 +23,8 @@ import {
   PADDING_PX,
   computeOverlayGeometry,
   hitTest,
+  placementAnchor,
+  placementFlow,
   overlayCssVariables,
   resolveWorkArea,
   sanitizeScaleFactor,
@@ -277,4 +279,37 @@ test('choix de l\'écran : écran demandé, repli sur le principal si absent', (
   assert.equal(noPreference.fallback, false);
 
   assert.throws(() => resolveWorkArea([], '1'));
+});
+
+test('placement : rangée en haut à gauche, colonne sur le côté droit', () => {
+  assert.equal(placementFlow('top-right'), 'row');
+  assert.equal(placementFlow('left'), 'column');
+  assert.equal(placementAnchor('left'), 'top-left');
+  assert.equal(placementAnchor('right'), 'top-right');
+
+  const row = computeOverlayGeometry({
+    participantCount: 3,
+    workArea: SCREEN_1080,
+    anchor: 'top-left',
+    flow: 'row',
+  });
+  assert.equal(row.columns, 3);
+  assert.equal(row.rows, 1);
+  assert.equal(row.window.x, 0);
+  assert.equal(row.window.y, 0);
+  assert.ok(row.window.width > row.window.height);
+
+  const column = computeOverlayGeometry({
+    participantCount: 3,
+    workArea: SCREEN_1080,
+    anchor: placementAnchor('right'),
+    flow: 'column',
+  });
+  assert.equal(column.flow, 'column');
+  assert.equal(column.columns, 1);
+  assert.equal(column.rows, 3);
+  assert.ok(column.window.height > column.window.width);
+  assert.equal(column.window.x, SCREEN_1080.width - column.window.width);
+  assert.equal(column.window.y, 0);
+  assert.equal(column.handle.y, column.window.height - column.handle.height);
 });

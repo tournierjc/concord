@@ -271,11 +271,13 @@ function upsertPeer(
     state: patch.state ?? previous?.state ?? 'connecting',
     cause: patch.cause ?? previous?.cause ?? null,
     hasStream: patch.hasStream ?? previous?.hasStream ?? false,
-    ...(patch.avatarRef !== undefined && patch.avatarRef !== null
-      ? { avatarRef: patch.avatarRef }
-      : previous?.avatarRef !== undefined
-        ? { avatarRef: previous.avatarRef }
-        : {}),
+    ...(patch.avatarRef === null
+      ? {}
+      : patch.avatarRef !== undefined
+        ? { avatarRef: patch.avatarRef }
+        : previous?.avatarRef !== undefined
+          ? { avatarRef: previous.avatarRef }
+          : {}),
   };
   state.peers.set(peerId, next);
   return next;

@@ -17,7 +17,7 @@ import type { ParticipantDto, SignalIn } from '../shell/ipc-contract';
 
 /** Ce que ce module a besoin de l'annuaire : ajouter, retirer. Rendu : « la liste a changé ». */
 export interface RosterPort {
-  addParticipant(participant: Omit<ParticipantDto, 'gain'> & { gain?: number }): boolean;
+  addParticipant(participant: Omit<ParticipantDto, 'gain' | 'avatarRef'> & { gain?: number; avatarRef?: string | null }): boolean;
   removeParticipant(peerId: string): boolean;
 }
 
@@ -46,13 +46,18 @@ export function applySignalToRoster(
   if (message.kind === 'peer-joined') {
     if (selfSignalingId !== null && message.peerId === selfSignalingId) return false;
     const name = typeof message.name === 'string' ? message.name.trim() : '';
-    const avatarRef = typeof message.avatarRef === 'string' && message.avatarRef.length > 0 ? message.avatarRef : undefined;
+    const avatarRef =
+      message.avatarRef === null
+        ? null
+        : typeof message.avatarRef === 'string' && message.avatarRef.length > 0
+          ? message.avatarRef
+          : undefined;
     return roster.addParticipant({
       id: message.peerId,
       // Un pair sans nom occupe une ligne : mieux vaut son identifiant qu'une ligne vide.
       name: name.length > 0 ? name : message.peerId,
-      // Empreinte d'avatar relayée telle quelle (déjà validée par le contrat) ; son absence est
-      // normale (ancienne version du pair) et l'affichage retombe sur les initiales.
+      // Empreinte relayée telle quelle. `null` retire un dessin annoncé plus tôt.
+      // L'absence du champ (ancienne version) ne l'efface pas.
       ...(avatarRef !== undefined ? { avatarRef } : {}),
       muted: false,
       deafened: false,

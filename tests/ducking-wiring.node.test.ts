@@ -128,7 +128,15 @@ describe('ducking — réglage audio.duckOthers', () => {
         // Pas de `duckOthers` : le fichier vient d'avant l'amendement.
       },
       talk: { mode: 'ptt', pttAccelerator: 'Alt+Space', vadThresholdDb: -40 },
-      overlay: { enabled: true, opacity: 0.9, scale: 'md', screenId: null, position: null },
+      overlay: {
+        enabled: true,
+        opacity: 0.9,
+        scale: 'md',
+        screenId: null,
+        position: null,
+        placement: 'top-right',
+        showWithoutDetection: false,
+      },
       network: { signalingPort: 47821, discovery: 'auto' },
     };
     const result = parseSettings(fichierSansCle);

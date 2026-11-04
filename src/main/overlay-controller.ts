@@ -58,7 +58,9 @@ import {
   type Rect,
 } from '../shell/overlay-geometry';
 import type { OverlaySettings } from '../shell/settings-schema';
-import { overlayPresentation, type OverlayPlatform } from './overlay-activation';
+import { overlayPresentation, shouldShowOverlay, type OverlayPlatform } from './overlay-activation';
+import { FULLSCREEN_POLL_MS, type FullscreenPort } from './fullscreen-detect';
+import { placementAnchor, placementFlow } from '../shell/overlay-geometry';
 import { appUrl } from './renderer-protocol';
 import { systemTimers, type MainTimers } from './timers';
 
@@ -148,6 +150,8 @@ export interface OverlayControllerDeps<W extends OverlayWindow = electron.Browse
   readonly createWindow?: WindowFactory<W>;
   /** `win32` / `linux` / `darwin`. Défaut : la plateforme du process. */
   readonly platform?: OverlayPlatform | string;
+  /** Sonde plein écran. Absente : l'overlay reste caché (pas de bureau). */
+  readonly fullscreen?: FullscreenPort;
 }
 
 /** `electron.screen` EST le port par défaut : pas d'adaptateur, donc pas de dérive silencieuse. */
@@ -179,17 +183,21 @@ export class OverlayController<W extends OverlayWindow = electron.BrowserWindow>
   private participantCount = 0;
   private overlaySettings: OverlaySettings | null = null;
   private pollTimer: unknown = null;
+  private fullscreenTimer: unknown = null;
   private lastIgnore: boolean | null = null;
+  private lastWantShow: boolean | null = null;
   private readonly timers: MainTimers;
   private readonly screenPort: ScreenPort;
   private readonly createWindow: WindowFactory<W>;
   private readonly platform: string;
+  private readonly fullscreen: FullscreenPort;
 
   constructor(deps: OverlayControllerDeps<W> = {}) {
     this.timers = deps.timers ?? systemTimers;
     this.screenPort = deps.screen ?? systemScreen;
     this.createWindow = deps.createWindow ?? defaultWindowFactory<W>;
     this.platform = deps.platform ?? process.platform;
+    this.fullscreen = deps.fullscreen ?? { snapshot: () => ({ fullscreenApp: false, detectionUnavailable: false }) };
   }
 
   getWindow(): W | null {
@@ -257,7 +265,7 @@ export class OverlayController<W extends OverlayWindow = electron.BrowserWindow>
     void window.loadURL(url);
     // `apply()` may have hidden the overlay (disabled, or no room) before the document loaded.
     window.once('ready-to-show', () => {
-      if (this.geometry !== null) this.reveal(window);
+      if (this.wantsShow()) this.reveal(window);
     });
   }
 
@@ -269,7 +277,38 @@ export class OverlayController<W extends OverlayWindow = electron.BrowserWindow>
   present(): void {
     const window = this.getWindow();
     if (!window || this.geometry === null) return;
+    if (!this.wantsShow()) {
+      if (window.isVisible()) window.hide();
+      this.lastWantShow = false;
+      return;
+    }
     this.reveal(window);
+    this.lastWantShow = true;
+  }
+
+  private wantsShow(): boolean {
+    const settings = this.overlaySettings;
+    if (!settings?.enabled || this.geometry === null) return false;
+    const snap = this.fullscreen.snapshot();
+    return shouldShowOverlay({
+      enabled: true,
+      inRoom: true,
+      appWindowAlive: true,
+      fullscreenApp: snap.fullscreenApp,
+      detectionUnavailable: snap.detectionUnavailable,
+      showWithoutDetection: settings.showWithoutDetection,
+    });
+  }
+
+  /** Affiche ou cache selon la sonde, sans réarmer le dessus si rien n'a changé. */
+  private syncVisibility(): void {
+    const window = this.getWindow();
+    if (!window || this.geometry === null) return;
+    const show = this.wantsShow();
+    if (show === this.lastWantShow && show === window.isVisible()) return;
+    this.lastWantShow = show;
+    if (show) this.reveal(window);
+    else if (window.isVisible()) window.hide();
   }
 
   private raise(window: W): void {
@@ -310,7 +349,8 @@ export class OverlayController<W extends OverlayWindow = electron.BrowserWindow>
       workArea: selection.workArea,
       scaleFactor: selection.scaleFactor,
       scale: settings.scale,
-      anchor: settings.position ? 'custom' : 'top-right',
+      anchor: settings.position ? 'custom' : placementAnchor(settings.placement),
+      flow: placementFlow(settings.placement),
       position: settings.position,
     });
     this.geometry = geometry;
@@ -322,7 +362,7 @@ export class OverlayController<W extends OverlayWindow = electron.BrowserWindow>
       height: geometry.window.height,
     });
     window.setOpacity(settings.opacity);
-    if (!window.isVisible()) this.reveal(window);
+    this.syncVisibility();
     return geometry;
   }
 
@@ -351,12 +391,22 @@ export class OverlayController<W extends OverlayWindow = electron.BrowserWindow>
     // (SPEC-012 §4) La cadence passe par le port, qui arme `unref` : la scrutation ne retient pas
     // le processus à la fermeture.
     this.pollTimer = this.timers.repeat(MOUSE_POLL_INTERVAL_MS, () => this.updateMouseIgnore());
+    if (this.fullscreenTimer) return;
+    this.fullscreenTimer = this.timers.repeat(FULLSCREEN_POLL_MS, () => {
+      this.fullscreen.refresh?.();
+      this.syncVisibility();
+    });
   }
 
   private stopPolling(): void {
-    if (!this.pollTimer) return;
-    this.timers.cancel(this.pollTimer);
-    this.pollTimer = null;
+    if (this.pollTimer) {
+      this.timers.cancel(this.pollTimer);
+      this.pollTimer = null;
+    }
+    if (this.fullscreenTimer) {
+      this.timers.cancel(this.fullscreenTimer);
+      this.fullscreenTimer = null;
+    }
     this.lastIgnore = null;
   }
 

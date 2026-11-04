@@ -42,6 +42,32 @@ export type OverlayScale = 'sm' | 'md' | 'lg';
 
 export type OverlayAnchor = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'custom';
 
+/** Emplacement choisi dans les réglages. Les côtés sont une colonne, les coins une rangée. */
+export const OVERLAY_PLACEMENTS = ['top-right', 'top-left', 'bottom-right', 'bottom-left', 'left', 'right'] as const;
+export type OverlayPlacement = (typeof OVERLAY_PLACEMENTS)[number];
+export type OverlayFlow = 'row' | 'column';
+
+export function placementFlow(placement: OverlayPlacement): OverlayFlow {
+  return placement === 'left' || placement === 'right' ? 'column' : 'row';
+}
+
+export function placementAnchor(placement: OverlayPlacement): Exclude<OverlayAnchor, 'custom'> {
+  switch (placement) {
+    case 'left':
+    case 'top-left':
+      return 'top-left';
+    case 'bottom-left':
+      return 'bottom-left';
+    case 'bottom-right':
+      return 'bottom-right';
+    case 'right':
+    case 'top-right':
+      return 'top-right';
+    default:
+      return 'top-right';
+  }
+}
+
 /** Résultat d'un test de survol : la fenêtre overlay ne capture les clics que sur ces zones. */
 export type OverlayHitZone = 'avatar' | 'handle' | 'none';
 
@@ -158,6 +184,8 @@ export interface OverlayGeometryInput {
   scale?: OverlayScale;
   /** Ancrage ; `top-right` par défaut. */
   anchor?: OverlayAnchor;
+  /** `column` empile les pastilles. `row` par défaut (rangée, retour à la ligne). */
+  flow?: OverlayFlow;
   /** Position mémorisée, utilisée seulement si `anchor === 'custom'`. */
   position?: Point | null;
   /** Marge par rapport aux bords de la zone utile, en DIP (0 par défaut). */
@@ -194,6 +222,7 @@ export interface OverlayGeometry {
   scaleFactor: number;
   scale: OverlayScale;
   anchor: OverlayAnchor;
+  flow: OverlayFlow;
   /** Bornes de la fenêtre, en DIP, position écran incluse : à passer tel quel à setBounds(). */
   window: Rect;
   /** Taille réelle en pixels physiques (window × scaleFactor). */
@@ -221,6 +250,7 @@ export function computeOverlayGeometry(input: OverlayGeometryInput): OverlayGeom
   const padding = PADDING_PX;
   const scaleFactor = sanitizeScaleFactor(input.scaleFactor);
   const anchor: OverlayAnchor = input.anchor ?? 'top-right';
+  const flow: OverlayFlow = input.flow ?? 'row';
   const margin = Math.max(0, Math.round(input.margin ?? 0));
 
   const workArea: Rect = {
@@ -230,15 +260,25 @@ export function computeOverlayGeometry(input: OverlayGeometryInput): OverlayGeom
     height: Math.max(0, Math.round(input.workArea.height)),
   };
 
-  // Colonnes possibles : on réserve la poignée, la marge intérieure et les espacements.
+  // Rangée : on réserve la poignée à droite. Colonne : une seule file, poignée en bas.
   const maxWidth = Math.max(avatarSize + 2 * padding, Math.round(input.maxWidth ?? MAX_OVERLAY_WIDTH_PX));
-  const usableWidth = Math.min(maxWidth, workArea.width === 0 ? maxWidth : workArea.width) - HANDLE_WIDTH_PX;
-  const columnsThatFit = Math.floor((usableWidth - 2 * padding + gap) / (avatarSize + gap));
-  const columns = Math.max(1, Math.min(participantCount, Number.isFinite(columnsThatFit) ? columnsThatFit : 1));
-  const rows = Math.ceil(participantCount / columns);
-
-  const contentWidth = columns * avatarSize + (columns - 1) * gap + 2 * padding + HANDLE_WIDTH_PX;
-  const contentHeight = rows * avatarSize + (rows - 1) * gap + 2 * padding;
+  let columns: number;
+  let rows: number;
+  let contentWidth: number;
+  let contentHeight: number;
+  if (flow === 'column') {
+    columns = 1;
+    rows = participantCount;
+    contentWidth = avatarSize + 2 * padding;
+    contentHeight = rows * avatarSize + (rows - 1) * gap + 2 * padding + HANDLE_WIDTH_PX;
+  } else {
+    const usableWidth = Math.min(maxWidth, workArea.width === 0 ? maxWidth : workArea.width) - HANDLE_WIDTH_PX;
+    const columnsThatFit = Math.floor((usableWidth - 2 * padding + gap) / (avatarSize + gap));
+    columns = Math.max(1, Math.min(participantCount, Number.isFinite(columnsThatFit) ? columnsThatFit : 1));
+    rows = Math.ceil(participantCount / columns);
+    contentWidth = columns * avatarSize + (columns - 1) * gap + 2 * padding + HANDLE_WIDTH_PX;
+    contentHeight = rows * avatarSize + (rows - 1) * gap + 2 * padding;
+  }
   const width = workArea.width === 0 ? contentWidth : Math.min(contentWidth, workArea.width);
   const height = workArea.height === 0 ? contentHeight : Math.min(contentHeight, workArea.height);
 
@@ -280,8 +320,8 @@ export function computeOverlayGeometry(input: OverlayGeometryInput): OverlayGeom
   y = clamp(snapToDevicePixels(clampedY, scaleFactor), workArea.y, maxY);
 
   const avatars: OverlayAvatarBox[] = [];
-  const avatarMaxX = Math.max(0, width - HANDLE_WIDTH_PX - avatarSize);
-  const avatarMaxY = Math.max(0, height - avatarSize);
+  const avatarMaxX = flow === 'column' ? Math.max(0, width - avatarSize) : Math.max(0, width - HANDLE_WIDTH_PX - avatarSize);
+  const avatarMaxY = flow === 'column' ? Math.max(0, height - HANDLE_WIDTH_PX - avatarSize) : Math.max(0, height - avatarSize);
   for (let index = 0; index < participantCount; index += 1) {
     const column = index % columns;
     const row = Math.floor(index / columns);
@@ -302,12 +342,20 @@ export function computeOverlayGeometry(input: OverlayGeometryInput): OverlayGeom
     });
   }
 
-  const handle: Rect = {
-    x: Math.max(0, width - HANDLE_WIDTH_PX),
-    y: 0,
-    width: Math.min(HANDLE_WIDTH_PX, width),
-    height,
-  };
+  const handle: Rect =
+    flow === 'column'
+      ? {
+          x: 0,
+          y: Math.max(0, height - HANDLE_WIDTH_PX),
+          width,
+          height: Math.min(HANDLE_WIDTH_PX, height),
+        }
+      : {
+          x: Math.max(0, width - HANDLE_WIDTH_PX),
+          y: 0,
+          width: Math.min(HANDLE_WIDTH_PX, width),
+          height,
+        };
 
   return {
     participantCount,
@@ -324,6 +372,7 @@ export function computeOverlayGeometry(input: OverlayGeometryInput): OverlayGeom
     scaleFactor,
     scale,
     anchor,
+    flow,
     window: { x, y, width, height },
     windowDevicePixels: {
       width: Math.round(width * scaleFactor),
